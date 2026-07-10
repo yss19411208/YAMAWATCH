@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VALOWATCH.Installer/VALOWATCH.Installer.csproj" />
+    <Project Path="src/VALOWATCH.OverlayTest/VALOWATCH.OverlayTest.csproj" />
+    <Project Path="src/VALOWATCH/VALOWATCH.csproj" />
+  </Folder>
+</Solution>

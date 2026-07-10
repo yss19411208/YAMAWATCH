@@ -1,0 +1,1137 @@
+using System.Diagnostics;
+using System.Globalization;
+
+namespace VALOWATCH;
+
+public sealed class MainForm : Form
+{
+    private const int StratsHotKeyId = 9101;
+    private const string NotConnectedText = "Not connected";
+    private const string DetectedText = "VALORANT detected";
+    private const string NotDetectedText = "VALORANT not detected";
+    private const long ImmediateStratsReleasePrivateBytes = 300L * 1024L * 1024L;
+    private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan GitUpdateRetryInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan HiddenStratsOverlayRetention = TimeSpan.FromSeconds(10);
+
+    private readonly AppPaths appPaths;
+    private readonly AppStateStore appStateStore;
+    private readonly LoopbackRecorder loopbackRecorder;
+    private readonly GoogleDriveUploader googleDriveUploader;
+    private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
+    private readonly GitUpdateChecker gitUpdateChecker;
+    private readonly StartupService startupService;
+    private readonly bool disableDiscordAutomation;
+    private readonly System.Windows.Forms.Timer processTimer = new();
+    private readonly System.Windows.Forms.Timer recordingTimer = new();
+    private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
+    private readonly System.Windows.Forms.Timer stratsOverlayReleaseTimer = new();
+    private readonly List<TeammateControls> teammateControls = [];
+
+    private AppState appState;
+    private RecordingHistoryEntry? activeRecordingEntry;
+    private Label valorantStatusLabel = null!;
+    private Label recordingStatusLabel = null!;
+    private Label driveStatusLabel = null!;
+    private Label discordStatusLabel = null!;
+    private Label stratsStatusLabel = null!;
+    private Label recordingElapsedLabel = null!;
+    private Button startRecordingButton = null!;
+    private Button stopRecordingButton = null!;
+    private Button uploadLatestButton = null!;
+    private Button openRecordingsButton = null!;
+    private Button credentialsFolderButton = null!;
+    private Button openStratsButton = null!;
+    private CheckBox topMostCheckBox = null!;
+    private CheckBox startupCheckBox = null!;
+    private ListView historyListView = null!;
+    private NotifyIcon trayIcon = null!;
+    private StratsOverlayForm? stratsOverlayForm;
+    private bool suppressStartupToggle;
+    private bool hotKeyRegistered;
+    private bool lastValorantDetected;
+    private bool discordTransitionInProgress;
+    private bool hidOnInitialShow;
+    private bool stratsTogglePending;
+    private bool stratsToggleInProgress;
+    private bool gitUpdateCheckInProgress;
+    private bool gitUpdateCheckedThisValorantSession;
+    private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
+    private Uri? pendingUpdateUri;
+
+    public MainForm(
+        AppPaths appPaths,
+        AppStateStore appStateStore,
+        LoopbackRecorder loopbackRecorder,
+        GoogleDriveUploader googleDriveUploader,
+        DiscordBotVoiceRelay discordBotVoiceRelay,
+        GitUpdateChecker gitUpdateChecker,
+        StartupService startupService,
+        bool disableDiscordAutomation)
+    {
+        this.appPaths = appPaths;
+        this.appStateStore = appStateStore;
+        this.loopbackRecorder = loopbackRecorder;
+        this.googleDriveUploader = googleDriveUploader;
+        this.discordBotVoiceRelay = discordBotVoiceRelay;
+        this.gitUpdateChecker = gitUpdateChecker;
+        this.startupService = startupService;
+        this.disableDiscordAutomation = disableDiscordAutomation;
+        appState = appStateStore.Load();
+
+        BuildInterface();
+        LoadTeammateInputs();
+        RefreshHistoryList();
+        RefreshStatusLabels();
+
+        processTimer.Interval = 2000;
+        processTimer.Tick += (_, _) => RefreshValorantStatus();
+        processTimer.Start();
+
+        recordingTimer.Interval = 1000;
+        recordingTimer.Tick += (_, _) => RefreshRecordingTimer();
+        recordingTimer.Start();
+
+        stratsToggleDelayTimer.Interval = 30;
+        stratsToggleDelayTimer.Tick += (_, _) => RunPendingStratsToggleAfterHotKeyRelease();
+
+        stratsOverlayReleaseTimer.Interval = (int)HiddenStratsOverlayRetention.TotalMilliseconds;
+        stratsOverlayReleaseTimer.Tick += (_, _) => ReleaseHiddenStratsOverlayIfIdle();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs eventArgs)
+    {
+        UnregisterStratsHotKey();
+        processTimer.Stop();
+        recordingTimer.Stop();
+        stratsToggleDelayTimer.Stop();
+        stratsOverlayReleaseTimer.Stop();
+        trayIcon.Visible = false;
+        DisposeStratsOverlay();
+        loopbackRecorder.Dispose();
+        discordBotVoiceRelay.Dispose();
+        base.OnFormClosing(eventArgs);
+    }
+
+    protected override void OnShown(EventArgs eventArgs)
+    {
+        base.OnShown(eventArgs);
+
+        if (hidOnInitialShow)
+        {
+            return;
+        }
+
+        hidOnInitialShow = true;
+        Hide();
+    }
+
+    protected override void OnHandleCreated(EventArgs eventArgs)
+    {
+        base.OnHandleCreated(eventArgs);
+        RegisterStratsHotKey();
+    }
+
+    protected override void OnHandleDestroyed(EventArgs eventArgs)
+    {
+        UnregisterStratsHotKey();
+        base.OnHandleDestroyed(eventArgs);
+    }
+
+    protected override void WndProc(ref Message message)
+    {
+        if (message.Msg == NativeMethods.WmHotKey && message.WParam.ToInt32() == StratsHotKeyId)
+        {
+            ScheduleStratsOverlayToggleAfterHotKeyRelease();
+            return;
+        }
+
+        base.WndProc(ref message);
+    }
+
+    private void BuildInterface()
+    {
+        Text = "VALOWATCH";
+        MinimumSize = new Size(860, 560);
+        Size = new Size(980, 640);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(16, 18, 24);
+        ForeColor = Color.White;
+        Font = new Font("Segoe UI", 10F);
+        Opacity = 0.96;
+        TopMost = false;
+        ShowInTaskbar = false;
+
+        TableLayoutPanel rootLayout = new()
+        {
+            Dock = DockStyle.Fill,
+            BackColor = BackColor,
+            ColumnCount = 1,
+            RowCount = 4,
+            Padding = new Padding(16)
+        };
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 52));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 48));
+        Controls.Add(rootLayout);
+
+        rootLayout.Controls.Add(BuildHeaderPanel(), 0, 0);
+        rootLayout.Controls.Add(BuildActionPanel(), 0, 1);
+        rootLayout.Controls.Add(BuildTeammatePanel(), 0, 2);
+        rootLayout.Controls.Add(BuildHistoryPanel(), 0, 3);
+
+        trayIcon = new NotifyIcon
+        {
+            Icon = SystemIcons.Application,
+            Text = "VALOWATCH",
+            Visible = true,
+            ContextMenuStrip = BuildTrayMenu()
+        };
+        trayIcon.DoubleClick += (_, _) => ToggleStratsOverlayWhenValorantRunning();
+        trayIcon.BalloonTipClicked += (_, _) => OpenPendingUpdateUri();
+    }
+
+    private Control BuildHeaderPanel()
+    {
+        Panel headerPanel = new()
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(23, 26, 34),
+            Padding = new Padding(14)
+        };
+
+        Label titleLabel = new()
+        {
+            Text = "VALOWATCH",
+            Dock = DockStyle.Left,
+            AutoSize = false,
+            Width = 220,
+            Font = new Font("Segoe UI Semibold", 24F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(255, 76, 86),
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        headerPanel.Controls.Add(titleLabel);
+
+        FlowLayoutPanel statusPanel = new()
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(10, 8, 0, 0)
+        };
+
+        valorantStatusLabel = CreateStatusPill(NotDetectedText, Color.FromArgb(110, 118, 136));
+        stratsStatusLabel = CreateStatusPill("Alt + T ready", Color.FromArgb(110, 118, 136));
+        discordStatusLabel = CreateStatusPill(discordBotVoiceRelay.StatusText, Color.FromArgb(110, 118, 136));
+        recordingStatusLabel = CreateStatusPill("Recording idle", Color.FromArgb(110, 118, 136));
+        driveStatusLabel = CreateStatusPill(NotConnectedText, Color.FromArgb(110, 118, 136));
+        statusPanel.Controls.Add(valorantStatusLabel);
+        statusPanel.Controls.Add(stratsStatusLabel);
+        statusPanel.Controls.Add(discordStatusLabel);
+        statusPanel.Controls.Add(recordingStatusLabel);
+        statusPanel.Controls.Add(driveStatusLabel);
+        headerPanel.Controls.Add(statusPanel);
+
+        return headerPanel;
+    }
+
+    private Control BuildActionPanel()
+    {
+        TableLayoutPanel actionLayout = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 2,
+            BackColor = Color.FromArgb(16, 18, 24),
+            Padding = new Padding(0, 12, 0, 12)
+        };
+        actionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        actionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        actionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        actionLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25));
+        actionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+        actionLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+
+        startRecordingButton = CreateCommandButton("Start recording");
+        startRecordingButton.Click += (_, _) => StartRecording();
+
+        stopRecordingButton = CreateCommandButton("Stop recording");
+        stopRecordingButton.Enabled = false;
+        stopRecordingButton.Click += (_, _) => StopRecording();
+
+        uploadLatestButton = CreateCommandButton("Upload latest");
+        uploadLatestButton.Click += async (_, _) => await UploadLatestRecordingAsync().ConfigureAwait(true);
+
+        openRecordingsButton = CreateCommandButton("Open recordings");
+        openRecordingsButton.Click += (_, _) => OpenFolder(appPaths.RecordingsDirectory);
+
+        credentialsFolderButton = CreateSecondaryButton("Open credentials folder");
+        credentialsFolderButton.Click += (_, _) => OpenFolder(appPaths.ConfigDirectory);
+
+        openStratsButton = CreateSecondaryButton("Open strats overlay");
+        openStratsButton.Click += (_, _) => ToggleStratsOverlayWhenValorantRunning();
+
+        topMostCheckBox = CreateCheckBox("Top most overlay", true);
+        topMostCheckBox.CheckedChanged += (_, _) => TopMost = topMostCheckBox.Checked;
+
+        startupCheckBox = CreateCheckBox("Start with Windows", SafeIsStartupEnabled());
+        startupCheckBox.CheckedChanged += (_, _) => ToggleStartup();
+
+        actionLayout.Controls.Add(startRecordingButton, 0, 0);
+        actionLayout.Controls.Add(stopRecordingButton, 1, 0);
+        actionLayout.Controls.Add(uploadLatestButton, 2, 0);
+        actionLayout.Controls.Add(openRecordingsButton, 3, 0);
+        actionLayout.Controls.Add(credentialsFolderButton, 0, 1);
+        actionLayout.Controls.Add(openStratsButton, 1, 1);
+        actionLayout.Controls.Add(topMostCheckBox, 2, 1);
+        actionLayout.Controls.Add(startupCheckBox, 3, 1);
+
+        return actionLayout;
+    }
+
+    private Control BuildTeammatePanel()
+    {
+        Panel panel = new()
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(23, 26, 34),
+            Padding = new Padding(12)
+        };
+
+        Label titleLabel = new()
+        {
+            Text = "Teammate Overlay",
+            Dock = DockStyle.Top,
+            Height = 32,
+            Font = new Font("Segoe UI Semibold", 13F, FontStyle.Bold),
+            ForeColor = Color.White
+        };
+        panel.Controls.Add(titleLabel);
+
+        TableLayoutPanel teammateLayout = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 4,
+            RowCount = 6,
+            BackColor = Color.FromArgb(23, 26, 34),
+            Padding = new Padding(0, 8, 0, 0)
+        };
+        teammateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 84));
+        teammateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
+        teammateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+        teammateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+        teammateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        for (int rowIndex = 1; rowIndex <= 5; rowIndex++)
+        {
+            teammateLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 20));
+        }
+
+        teammateLayout.Controls.Add(CreateHeaderLabel("Slot"), 0, 0);
+        teammateLayout.Controls.Add(CreateHeaderLabel("Riot ID"), 1, 0);
+        teammateLayout.Controls.Add(CreateHeaderLabel("States"), 2, 0);
+        teammateLayout.Controls.Add(CreateHeaderLabel("Action"), 3, 0);
+
+        for (int slotIndex = 0; slotIndex < 5; slotIndex++)
+        {
+            int displayNumber = slotIndex + 1;
+            Label slotLabel = new()
+            {
+                Text = $"Mate {displayNumber}",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(190, 199, 214)
+            };
+
+            TextBox riotIdTextBox = new()
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(30, 34, 45),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin = new Padding(4)
+            };
+
+            Label stateLabel = new()
+            {
+                Text = TeammateSlot.DefaultStateText,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(255, 205, 112),
+                Margin = new Padding(4)
+            };
+
+            Button openProfileButton = CreateSecondaryButton("Open profile");
+            openProfileButton.Tag = slotIndex;
+            openProfileButton.Click += (_, _) => OpenTrackerProfile(slotIndex);
+
+            teammateControls.Add(new TeammateControls(riotIdTextBox, stateLabel));
+
+            teammateLayout.Controls.Add(slotLabel, 0, displayNumber);
+            teammateLayout.Controls.Add(riotIdTextBox, 1, displayNumber);
+            teammateLayout.Controls.Add(stateLabel, 2, displayNumber);
+            teammateLayout.Controls.Add(openProfileButton, 3, displayNumber);
+        }
+
+        panel.Controls.Add(teammateLayout);
+        return panel;
+    }
+
+    private Control BuildHistoryPanel()
+    {
+        Panel historyPanel = new()
+        {
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(23, 26, 34),
+            Padding = new Padding(12)
+        };
+
+        recordingElapsedLabel = new Label
+        {
+            Text = "No active recording",
+            Dock = DockStyle.Top,
+            Height = 28,
+            ForeColor = Color.FromArgb(190, 199, 214)
+        };
+        historyPanel.Controls.Add(recordingElapsedLabel);
+
+        historyListView = new ListView
+        {
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = false,
+            BackColor = Color.FromArgb(16, 18, 24),
+            ForeColor = Color.White,
+            BorderStyle = BorderStyle.None
+        };
+        historyListView.Columns.Add("Start", 160);
+        historyListView.Columns.Add("Duration", 100);
+        historyListView.Columns.Add("File", 360);
+        historyListView.Columns.Add("Upload", 160);
+        historyPanel.Controls.Add(historyListView);
+
+        return historyPanel;
+    }
+
+    private ContextMenuStrip BuildTrayMenu()
+    {
+        ContextMenuStrip trayMenu = new();
+        trayMenu.Items.Add("Strats overlay (Alt+T)", null, (_, _) => ToggleStratsOverlayWhenValorantRunning());
+        trayMenu.Items.Add("Check updates now", null, async (_, _) => await RunGitUpdateCheckAsync(showUpToDateNotice: true).ConfigureAwait(true));
+        trayMenu.Items.Add("Open config folder", null, (_, _) => OpenFolder(appPaths.ConfigDirectory));
+        trayMenu.Items.Add("Exit", null, (_, _) => Close());
+        return trayMenu;
+    }
+
+    private static Label CreateStatusPill(string text, Color backgroundColor)
+    {
+        return new Label
+        {
+            Text = text,
+            BackColor = backgroundColor,
+            ForeColor = Color.White,
+            AutoSize = false,
+            Width = 170,
+            Height = 34,
+            Margin = new Padding(0, 0, 10, 0),
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+    }
+
+    private static Button CreateCommandButton(string text)
+    {
+        return new Button
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(255, 76, 86),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Margin = new Padding(4)
+        };
+    }
+
+    private static Button CreateSecondaryButton(string text)
+    {
+        return new Button
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            BackColor = Color.FromArgb(39, 45, 59),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Margin = new Padding(4)
+        };
+    }
+
+    private static CheckBox CreateCheckBox(string text, bool isChecked)
+    {
+        return new CheckBox
+        {
+            Text = text,
+            Checked = isChecked,
+            Dock = DockStyle.Fill,
+            ForeColor = Color.FromArgb(210, 217, 229),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(8, 4, 4, 4)
+        };
+    }
+
+    private static Label CreateHeaderLabel(string text)
+    {
+        return new Label
+        {
+            Text = text,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Color.FromArgb(143, 153, 171),
+            Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
+        };
+    }
+
+    private void LoadTeammateInputs()
+    {
+        for (int teammateIndex = 0; teammateIndex < teammateControls.Count; teammateIndex++)
+        {
+            TeammateSlot teammateSlot = appState.Teammates[teammateIndex];
+            teammateControls[teammateIndex].RiotIdTextBox.Text = teammateSlot.RiotId;
+            teammateControls[teammateIndex].StateLabel.Text = string.IsNullOrWhiteSpace(teammateSlot.StateText)
+                ? TeammateSlot.DefaultStateText
+                : teammateSlot.StateText;
+        }
+    }
+
+    private void SaveTeammates()
+    {
+        for (int teammateIndex = 0; teammateIndex < teammateControls.Count; teammateIndex++)
+        {
+            TeammateControls controls = teammateControls[teammateIndex];
+            TeammateSlot teammateSlot = appState.Teammates[teammateIndex];
+            teammateSlot.RiotId = controls.RiotIdTextBox.Text.Trim();
+            teammateSlot.StateText = TeammateSlot.DefaultStateText;
+            controls.StateLabel.Text = TeammateSlot.DefaultStateText;
+        }
+
+        appStateStore.Save(appState);
+        ShowInfo("味方情報を保存しました。");
+    }
+
+    private void StartRecording()
+    {
+        if (loopbackRecorder.IsRecording)
+        {
+            return;
+        }
+
+        string timestampText = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+        string recordingFilePath = Path.Combine(appPaths.RecordingsDirectory, $"VALOWATCH_{timestampText}.wav");
+
+        try
+        {
+            loopbackRecorder.Start(recordingFilePath);
+            activeRecordingEntry = RecordingHistoryEntry.Start(recordingFilePath, appState.Teammates);
+            startRecordingButton.Enabled = false;
+            stopRecordingButton.Enabled = true;
+            RefreshStatusLabels();
+            RefreshRecordingTimer();
+        }
+        catch (Exception exception)
+        {
+            ShowError($"録音を開始できませんでした。{exception.Message}");
+        }
+    }
+
+    private void StopRecording()
+    {
+        if (!loopbackRecorder.IsRecording)
+        {
+            return;
+        }
+
+        try
+        {
+            loopbackRecorder.Stop();
+            if (activeRecordingEntry is not null)
+            {
+                activeRecordingEntry.Finish();
+                appState.History.Insert(0, activeRecordingEntry);
+                activeRecordingEntry = null;
+                appStateStore.Save(appState);
+                RefreshHistoryList();
+            }
+        }
+        catch (Exception exception)
+        {
+            ShowError($"録音を停止できませんでした。{exception.Message}");
+        }
+        finally
+        {
+            startRecordingButton.Enabled = true;
+            stopRecordingButton.Enabled = false;
+            RefreshStatusLabels();
+            RefreshRecordingTimer();
+        }
+    }
+
+    private async Task UploadLatestRecordingAsync()
+    {
+        RecordingHistoryEntry? latestEntry = appState.History.FirstOrDefault();
+        if (latestEntry is null)
+        {
+            ShowInfo("アップロードできる録音履歴がありません。");
+            return;
+        }
+
+        if (!File.Exists(latestEntry.FilePath))
+        {
+            ShowError("録音ファイルが見つかりません。履歴のファイルを確認してください。");
+            return;
+        }
+
+        uploadLatestButton.Enabled = false;
+        driveStatusLabel.Text = "Drive uploading";
+        driveStatusLabel.BackColor = Color.FromArgb(79, 118, 214);
+
+        try
+        {
+            DriveUploadResult uploadResult = await googleDriveUploader.UploadAsync(latestEntry.FilePath, CancellationToken.None);
+            latestEntry.UploadStatus = string.IsNullOrWhiteSpace(uploadResult.FileId) ? "Uploaded" : "Uploaded";
+            latestEntry.DriveFileId = uploadResult.FileId;
+            latestEntry.DriveWebViewLink = uploadResult.WebViewLink;
+            appStateStore.Save(appState);
+            RefreshHistoryList();
+            ShowInfo("Google Driveへアップロードしました。");
+        }
+        catch (Exception exception)
+        {
+            latestEntry.UploadStatus = "Upload failed";
+            appStateStore.Save(appState);
+            RefreshHistoryList();
+            ShowError(exception.Message);
+        }
+        finally
+        {
+            uploadLatestButton.Enabled = true;
+            RefreshStatusLabels();
+        }
+    }
+
+    private void OpenTrackerProfile(int teammateIndex)
+    {
+        string riotId = teammateControls[teammateIndex].RiotIdTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(riotId))
+        {
+            ShowInfo("Riot IDを入力してください。例: Player#JP1");
+            return;
+        }
+
+        Uri profileUri = TrackerProfileUrlBuilder.BuildProfileUri(riotId);
+        ProcessStartInfo processStartInfo = new()
+        {
+            FileName = profileUri.ToString(),
+            UseShellExecute = true
+        };
+
+        try
+        {
+            Process.Start(processStartInfo);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            ShowError($"ブラウザを開けませんでした。{exception.Message}");
+        }
+    }
+
+    private void RefreshValorantStatus()
+    {
+        bool valorantDetected = ValorantProcessMonitor.IsValorantRunning();
+        valorantStatusLabel.Text = valorantDetected ? DetectedText : NotDetectedText;
+        valorantStatusLabel.BackColor = valorantDetected
+            ? Color.FromArgb(39, 145, 104)
+            : Color.FromArgb(110, 118, 136);
+
+        if (!valorantDetected && stratsOverlayForm is not null)
+        {
+            DisposeStratsOverlay();
+            stratsStatusLabel.Text = "Launch VALORANT first";
+            stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+        }
+
+        if (valorantDetected != lastValorantDetected)
+        {
+            lastValorantDetected = valorantDetected;
+            nextDiscordRetryAtUtc = valorantDetected
+                ? DateTimeOffset.UtcNow.Add(DiscordRetryInterval)
+                : DateTimeOffset.MinValue;
+            gitUpdateCheckedThisValorantSession = false;
+            nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
+            if (valorantDetected)
+            {
+                StartGitUpdateCheckIfNeeded(force: true);
+            }
+            _ = HandleValorantStateChangeAsync(valorantDetected);
+        }
+        else if (ShouldRetryDiscordStart(valorantDetected))
+        {
+            nextDiscordRetryAtUtc = DateTimeOffset.UtcNow.Add(DiscordRetryInterval);
+            _ = HandleValorantStateChangeAsync(valorantDetected);
+        }
+
+        if (valorantDetected)
+        {
+            StartGitUpdateCheckIfNeeded(force: false);
+        }
+
+        RefreshDiscordStatusLabel();
+    }
+
+    private void RefreshStatusLabels()
+    {
+        RefreshValorantStatus();
+
+        bool isRecording = loopbackRecorder.IsRecording;
+        recordingStatusLabel.Text = isRecording ? "Recording" : "Recording idle";
+        recordingStatusLabel.BackColor = isRecording
+            ? Color.FromArgb(255, 76, 86)
+            : Color.FromArgb(110, 118, 136);
+
+        driveStatusLabel.Text = googleDriveUploader.HasClientSecret ? "Drive ready" : NotConnectedText;
+        driveStatusLabel.BackColor = googleDriveUploader.HasClientSecret
+            ? Color.FromArgb(39, 145, 104)
+            : Color.FromArgb(110, 118, 136);
+
+        RefreshDiscordStatusLabel();
+    }
+
+    private void RefreshRecordingTimer()
+    {
+        if (loopbackRecorder.StartedAt is null)
+        {
+            recordingElapsedLabel.Text = "No active recording";
+            return;
+        }
+
+        TimeSpan elapsed = DateTimeOffset.Now - loopbackRecorder.StartedAt.Value;
+        recordingElapsedLabel.Text = $"Recording: {elapsed:hh\\:mm\\:ss}";
+    }
+
+    private void RefreshHistoryList()
+    {
+        historyListView.Items.Clear();
+
+        foreach (RecordingHistoryEntry historyEntry in appState.History.Take(50))
+        {
+            string durationText = historyEntry.EndedAt is null
+                ? "Active"
+                : (historyEntry.EndedAt.Value - historyEntry.StartedAt).ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture);
+
+            string fileName = string.IsNullOrWhiteSpace(historyEntry.FilePath)
+                ? "(missing)"
+                : Path.GetFileName(historyEntry.FilePath);
+
+            ListViewItem listViewItem = new(historyEntry.StartedAt.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
+            listViewItem.SubItems.Add(durationText);
+            listViewItem.SubItems.Add(fileName);
+            listViewItem.SubItems.Add(historyEntry.UploadStatus);
+            historyListView.Items.Add(listViewItem);
+        }
+    }
+
+    private void ToggleStartup()
+    {
+        if (suppressStartupToggle)
+        {
+            return;
+        }
+
+        try
+        {
+            startupService.SetEnabled(startupCheckBox.Checked);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            suppressStartupToggle = true;
+            startupCheckBox.Checked = SafeIsStartupEnabled();
+            suppressStartupToggle = false;
+            ShowError($"スタートアップ設定を変更できませんでした。{exception.Message}");
+        }
+    }
+
+    private void OpenFolder(string folderPath)
+    {
+        try
+        {
+            Directory.CreateDirectory(folderPath);
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = folderPath,
+                UseShellExecute = true
+            };
+            Process.Start(processStartInfo);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            ShowError($"フォルダーを開けませんでした。{exception.Message}");
+        }
+    }
+
+    private void OpenPendingUpdateUri()
+    {
+        if (pendingUpdateUri is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = pendingUpdateUri.ToString(),
+                UseShellExecute = true
+            });
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            ShowError($"更新ページを開けませんでした。{exception.Message}");
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+        WindowState = FormWindowState.Normal;
+        Activate();
+    }
+
+    private static void ShowInfo(string message)
+    {
+        MessageBox.Show(message, "VALOWATCH", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private static void ShowError(string message)
+    {
+        MessageBox.Show(message, "VALOWATCH", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private bool SafeIsStartupEnabled()
+    {
+        try
+        {
+            return startupService.IsEnabled();
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return false;
+        }
+    }
+
+    private void RegisterStratsHotKey()
+    {
+        if (hotKeyRegistered || Handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        hotKeyRegistered = NativeMethods.RegisterHotKey(
+            Handle,
+            StratsHotKeyId,
+            NativeMethods.ModAlt,
+            NativeMethods.VirtualKeyT);
+
+        if (stratsStatusLabel is null)
+        {
+            return;
+        }
+
+        stratsStatusLabel.Text = hotKeyRegistered ? "Alt + T ready" : "Alt + T unavailable";
+        stratsStatusLabel.BackColor = hotKeyRegistered
+            ? Color.FromArgb(39, 145, 104)
+            : Color.FromArgb(153, 99, 53);
+    }
+
+    private void UnregisterStratsHotKey()
+    {
+        if (!hotKeyRegistered || Handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        NativeMethods.UnregisterHotKey(Handle, StratsHotKeyId);
+        hotKeyRegistered = false;
+    }
+
+    private void ToggleStratsOverlayWhenValorantRunning()
+    {
+        _ = ToggleStratsOverlayWhenValorantRunningAsync();
+    }
+
+    private async Task ToggleStratsOverlayWhenValorantRunningAsync()
+    {
+        if (stratsToggleInProgress)
+        {
+            return;
+        }
+
+        if (!ValorantProcessMonitor.IsValorantRunning())
+        {
+            stratsStatusLabel.Text = "Launch VALORANT first";
+            stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+            return;
+        }
+
+        stratsToggleInProgress = true;
+        try
+        {
+            if (stratsOverlayForm is null || stratsOverlayForm.IsDisposed)
+            {
+                stratsOverlayForm = new StratsOverlayForm();
+            }
+
+            if (stratsOverlayForm.IsOverlayVisible)
+            {
+                long privateMemoryBytes = stratsOverlayForm.GetApproximateWebViewPrivateMemoryBytes();
+                stratsOverlayForm.HideOverlayKeepingPage();
+                if (privateMemoryBytes >= ImmediateStratsReleasePrivateBytes)
+                {
+                    DisposeStratsOverlay();
+                    stratsStatusLabel.Text = "Strats unloaded";
+                    stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+                    return;
+                }
+
+                ScheduleHiddenStratsOverlayRelease();
+                stratsStatusLabel.Text = "Strats hidden";
+                stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+                return;
+            }
+
+            stratsOverlayReleaseTimer.Stop();
+            Rectangle targetBounds = ValorantProcessMonitor.TryGetValorantWindowBounds(out Rectangle valorantBounds)
+                ? valorantBounds
+                : Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+
+            stratsStatusLabel.Text = "Strats loading";
+            stratsStatusLabel.BackColor = Color.FromArgb(79, 118, 214);
+            await stratsOverlayForm.BringOverlayToFrontAsync(targetBounds).ConfigureAwait(true);
+            stratsStatusLabel.Text = "Strats visible";
+            stratsStatusLabel.BackColor = Color.FromArgb(79, 118, 214);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            stratsStatusLabel.Text = "Strats failed";
+            stratsStatusLabel.BackColor = Color.FromArgb(153, 99, 53);
+            ShowError($"strats overlay を表示できませんでした。{exception.Message}");
+        }
+        finally
+        {
+            stratsToggleInProgress = false;
+        }
+    }
+
+    private void ScheduleStratsOverlayToggleAfterHotKeyRelease()
+    {
+        stratsTogglePending = true;
+        stratsToggleDelayTimer.Stop();
+        stratsToggleDelayTimer.Start();
+    }
+
+    private void RunPendingStratsToggleAfterHotKeyRelease()
+    {
+        if (!stratsTogglePending)
+        {
+            stratsToggleDelayTimer.Stop();
+            return;
+        }
+
+        bool altKeyDown = NativeMethods.IsKeyDown(NativeMethods.VirtualKeyMenu);
+        bool tKeyDown = NativeMethods.IsKeyDown((int)NativeMethods.VirtualKeyT);
+        if (altKeyDown || tKeyDown)
+        {
+            return;
+        }
+
+        stratsTogglePending = false;
+        stratsToggleDelayTimer.Stop();
+        ToggleStratsOverlayWhenValorantRunning();
+    }
+
+    private async Task HandleValorantStateChangeAsync(bool valorantDetected)
+    {
+        if (discordTransitionInProgress)
+        {
+            return;
+        }
+
+        discordTransitionInProgress = true;
+
+        try
+        {
+            if (valorantDetected)
+            {
+                if (disableDiscordAutomation)
+                {
+                    RefreshDiscordStatusLabel();
+                    return;
+                }
+
+                await discordBotVoiceRelay.StartForValorantAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                await discordBotVoiceRelay.StopAsync().ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            discordTransitionInProgress = false;
+            RefreshDiscordStatusLabel();
+        }
+    }
+
+    private bool ShouldRetryDiscordStart(bool valorantDetected)
+    {
+        if (!valorantDetected || disableDiscordAutomation || discordTransitionInProgress)
+        {
+            return false;
+        }
+
+        if (discordBotVoiceRelay.IsRunning || !discordBotVoiceRelay.HasConfig)
+        {
+            return false;
+        }
+
+        return DateTimeOffset.UtcNow >= nextDiscordRetryAtUtc;
+    }
+
+    private void StartGitUpdateCheckIfNeeded(bool force)
+    {
+        if (gitUpdateCheckInProgress)
+        {
+            return;
+        }
+
+        if (!force)
+        {
+            if (gitUpdateCheckedThisValorantSession)
+            {
+                return;
+            }
+
+            if (DateTimeOffset.UtcNow < nextGitUpdateRetryAtUtc)
+            {
+                return;
+            }
+        }
+
+        _ = RunGitUpdateCheckAsync(showUpToDateNotice: false);
+    }
+
+    private async Task RunGitUpdateCheckAsync(bool showUpToDateNotice)
+    {
+        if (gitUpdateCheckInProgress)
+        {
+            return;
+        }
+
+        gitUpdateCheckInProgress = true;
+        try
+        {
+            GitUpdateCheckResult updateResult = await gitUpdateChecker
+                .CheckLatestReleaseAsync(CancellationToken.None)
+                .ConfigureAwait(true);
+
+            if (updateResult.HasUpdate)
+            {
+                gitUpdateCheckedThisValorantSession = true;
+                pendingUpdateUri = updateResult.DownloadUri ?? updateResult.ReleaseUri;
+                string latestVersionText = string.IsNullOrWhiteSpace(updateResult.LatestVersion)
+                    ? "new version"
+                    : updateResult.LatestVersion;
+                trayIcon.ShowBalloonTip(
+                    8000,
+                    "VALOWATCH update available",
+                    $"Latest: {latestVersionText}\nCurrent: {updateResult.CurrentVersion}\nClick to open the release.",
+                    ToolTipIcon.Info);
+                return;
+            }
+
+            if (updateResult.ShouldRetry)
+            {
+                nextGitUpdateRetryAtUtc = DateTimeOffset.UtcNow.Add(GitUpdateRetryInterval);
+                return;
+            }
+
+            gitUpdateCheckedThisValorantSession = true;
+            if (showUpToDateNotice && updateResult.Status == GitUpdateCheckStatus.UpToDate)
+            {
+                trayIcon.ShowBalloonTip(
+                    5000,
+                    "VALOWATCH update check",
+                    "VALOWATCH is already up to date.",
+                    ToolTipIcon.Info);
+            }
+        }
+        finally
+        {
+            gitUpdateCheckInProgress = false;
+        }
+    }
+
+    private void ScheduleHiddenStratsOverlayRelease()
+    {
+        stratsOverlayReleaseTimer.Stop();
+        stratsOverlayReleaseTimer.Start();
+    }
+
+    private void ReleaseHiddenStratsOverlayIfIdle()
+    {
+        stratsOverlayReleaseTimer.Stop();
+        if (stratsOverlayForm is null || stratsOverlayForm.IsDisposed || stratsOverlayForm.IsOverlayVisible)
+        {
+            return;
+        }
+
+        DisposeStratsOverlay();
+        stratsStatusLabel.Text = "Strats unloaded";
+        stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+    }
+
+    private void DisposeStratsOverlay()
+    {
+        if (stratsOverlayForm is null)
+        {
+            return;
+        }
+
+        stratsOverlayReleaseTimer.Stop();
+        try
+        {
+            stratsOverlayForm.Close();
+        }
+        finally
+        {
+            stratsOverlayForm.Dispose();
+            stratsOverlayForm = null;
+        }
+    }
+
+    private void RefreshDiscordStatusLabel()
+    {
+        discordStatusLabel.Text = discordBotVoiceRelay.StatusText;
+        if (disableDiscordAutomation)
+        {
+            discordStatusLabel.Text = "Discord disabled";
+            discordStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+            return;
+        }
+
+        discordStatusLabel.BackColor = discordBotVoiceRelay.IsRunning
+            ? Color.FromArgb(88, 101, 242)
+            : Color.FromArgb(110, 118, 136);
+    }
+
+    private sealed record TeammateControls(TextBox RiotIdTextBox, Label StateLabel);
+}

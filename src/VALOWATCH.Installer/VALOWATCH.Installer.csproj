@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>VALOWATCH_Setup</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\exe\VALOWATCH.exe" LogicalName="VALOWATCH.exe" />
+    <EmbeddedResource Include="..\..\installer\.env" LogicalName="InstallerEnv/.env" Condition="Exists('..\..\installer\.env')" />
+    <EmbeddedResource Include="..\..\overwolf\VALOWATCH\**\*">
+      <LogicalName>OverwolfApp/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>
