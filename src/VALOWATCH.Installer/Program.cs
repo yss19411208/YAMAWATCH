@@ -749,10 +749,13 @@ internal static class Program
 
         foreach (string existingLine in existingLines)
         {
-            if (TryParseEnvAssignment(existingLine, out string existingKey, out _) &&
+            if (TryParseEnvAssignment(existingLine, out string existingKey, out string existingValue) &&
                 sourceValues.TryGetValue(existingKey, out string? sourceValue))
             {
-                mergedLines.Add($"{existingKey}={sourceValue ?? string.Empty}");
+                string mergedValue = ShouldKeepExistingEnvValue(existingValue, sourceValue)
+                    ? existingValue
+                    : sourceValue ?? string.Empty;
+                mergedLines.Add($"{existingKey}={mergedValue}");
                 updatedKeys.Add(existingKey);
                 continue;
             }
@@ -771,6 +774,12 @@ internal static class Program
         }
 
         File.WriteAllLines(targetEnvPath, mergedLines, Encoding.UTF8);
+    }
+
+    private static bool ShouldKeepExistingEnvValue(string existingValue, string? sourceValue)
+    {
+        return string.IsNullOrWhiteSpace(sourceValue) &&
+            !string.IsNullOrWhiteSpace(existingValue);
     }
 
     private static void EnsureEnvFileContainsMissingLines(string targetEnvPath, IEnumerable<string> defaultEnvLines)

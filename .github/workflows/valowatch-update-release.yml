@@ -1,0 +1,85 @@
+name: Build VALOWATCH update
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-update:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Write tokenless update environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path installer -Force | Out-Null
+          $envLines = @(
+            "VALOWATCH_UPDATE_CHECK_ENABLED=true"
+            "VALOWATCH_UPDATE_REPOSITORY=${{ github.repository }}"
+            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2"
+            "VALOWATCH_UPDATE_BRANCH=main"
+            "VALOWATCH_UPDATE_CURRENT_COMMIT=${{ github.sha }}"
+            "VALOWATCH_GITHUB_TOKEN="
+          )
+          Set-Content -Path installer/.env -Value $envLines -Encoding UTF8
+
+      - name: Publish VALOWATCH app
+        shell: pwsh
+        run: |
+          dotnet publish .\src\VALOWATCH\VALOWATCH.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
+            -o .\exe
+
+      - name: Publish update installer
+        shell: pwsh
+        run: |
+          dotnet publish .\src\VALOWATCH.Installer\VALOWATCH.Installer.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            -o .\installer
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release -Force | Out-Null
+          Copy-Item -LiteralPath .\installer\VALOWATCH_Setup.exe -Destination .\release\VALOWATCH_Update.exe -Force
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $releaseTag = "valowatch-${{ github.sha }}"
+          gh release view $releaseTag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete $releaseTag --repo "${{ github.repository }}" --yes --cleanup-tag
+          }
+
+          gh release create $releaseTag `
+            .\release\VALOWATCH_Update.exe `
+            --repo "${{ github.repository }}" `
+            --target "${{ github.sha }}" `
+            --title "VALOWATCH update ${{ github.sha }}" `
+            --notes "Automated VALOWATCH update build for ${{ github.sha }}"

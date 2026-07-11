@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace VALOWATCH;
 
@@ -141,6 +142,7 @@ public sealed class GitUpdateChecker
         string latestVersion = ReadJsonString(root, "tag_name");
         Uri? releaseUri = TryReadUri(root, "html_url");
         Uri? downloadUri = TryReadDownloadUri(root);
+        string releaseCommit = TryReadReleaseCommit(root, latestVersion);
 
         if (string.IsNullOrWhiteSpace(latestVersion))
         {
@@ -153,7 +155,7 @@ public sealed class GitUpdateChecker
                 "Latest release tag was empty.");
         }
 
-        bool hasUpdate = IsNewerVersion(latestVersion, settings.CurrentVersion);
+        bool hasUpdate = HasReleaseUpdate(latestVersion, releaseCommit, settings);
         return new GitUpdateCheckResult(
             hasUpdate ? GitUpdateCheckStatus.UpdateAvailable : GitUpdateCheckStatus.UpToDate,
             settings.CurrentVersion,
@@ -337,6 +339,41 @@ public sealed class GitUpdateChecker
         }
 
         return fallbackUri;
+    }
+
+    private static string TryReadReleaseCommit(JsonElement releaseElement, string tagName)
+    {
+        string targetCommitish = ReadJsonString(releaseElement, "target_commitish");
+        string commitFromTarget = ExtractCommitLikeText(targetCommitish);
+        if (!string.IsNullOrWhiteSpace(commitFromTarget))
+        {
+            return commitFromTarget;
+        }
+
+        return ExtractCommitLikeText(tagName);
+    }
+
+    private static string ExtractCommitLikeText(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        Match match = Regex.Match(value, @"(?i)(?<![0-9a-f])([0-9a-f]{7,40})(?![0-9a-f])");
+        return match.Success ? match.Groups[1].Value : string.Empty;
+    }
+
+    private static bool HasReleaseUpdate(string latestVersion, string releaseCommit, GitUpdateSettings settings)
+    {
+        if (!string.IsNullOrWhiteSpace(releaseCommit))
+        {
+            string currentCommit = settings.CurrentCommit.Trim();
+            return string.IsNullOrWhiteSpace(currentCommit) ||
+                !IsSameCommit(releaseCommit, currentCommit);
+        }
+
+        return IsNewerVersion(latestVersion, settings.CurrentVersion);
     }
 
     private static bool IsNewerVersion(string latestVersion, string currentVersion)
