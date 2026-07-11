@@ -14,8 +14,10 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - VALORANT ウィンドウの位置が取れる場合は、その上に寄せてオーバーレイを出します。
 - インストーラーを実行すると `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に本体を配置し、ユーザー単位の Windows スタートアップに登録します。
 - Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、既定マイク入力のリレーを開始します。
-- Google Drive 設定と保存済み認証がある場合、VALORANT 終了検知後に録音ファイルをDriveへアップロードします。
-- 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Drive設定があればアップロードします。
+- VALORANT 終了検知後、録音WAVをMP3へ変換し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
+- 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
+- Google Drive 設定と保存済み認証がある場合は、従来どおりDriveアップロードも併用できます。
+- `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセス起動中だけPCの既定出力音声をDiscord音声へミックスします。
 - `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、VALORANT 起動時に GitHub Releases の更新確認を行い、`VALOWATCH_Setup.exe` の release asset が新しければ自動でダウンロードしてサイレント更新します。
 - 配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` を `VALOWATCH.exe` へ埋め込みます。
 
@@ -64,7 +66,7 @@ C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env
 5. VALORANT を起動すると、bot が指定 VC に入ります。
 
 VALORANT 起動中に通信状態が悪く Discord 接続に失敗した場合、VALOWATCH は一定間隔で VC 接続を再試行します。
-`DISCORD_TEXT_CHANNEL_ID` を設定すると、VALORANT 起動時にそのテキストチャンネルへ `VALORANTを開きました` を送信します。
+`DISCORD_TEXT_CHANNEL_ID` を設定すると、VALORANT 終了後のMP3/MP4共有先になります。通常の起動通知テキストは送信しません。
 Discord の接続や音声送信で失敗した場合は、`C:\Users\p159yusuke\Documents\VALOWATCH\data\logs\valowatch.log` に理由を記録します。
 
 `.env` は `C:\Users\p159yusuke\Documents\VALOWATCH\installer` に置きます。bot token は秘密情報なので Git に入れないでください。exe へ埋め込んでも完全な秘匿にはならず、配布先が解析すれば token を取り出せる可能性があります。
@@ -77,11 +79,18 @@ DISCORD_BOT_TOKEN=PASTE_BOT_TOKEN_HERE
 DISCORD_GUILD_ID=123456789012345678
 DISCORD_VOICE_CHANNEL_ID=123456789012345678
 DISCORD_TEXT_CHANNEL_ID=123456789012345678
-DISCORD_VALORANT_OPENED_MESSAGE=VALORANTを開きました
 DISCORD_STREAM_MIC_AUDIO=true
 DISCORD_MIC_DEVICE_NAME=
 DISCORD_MIC_VOLUME=0.85
 DISCORD_MIC_NOISE_GATE=0
+DISCORD_STREAM_LINE_AUDIO=true
+DISCORD_LINE_PROCESS_NAMES=LINE,Line,line
+DISCORD_LINE_AUDIO_VOLUME=0.45
+DISCORD_SHARE_MEDIA_FILES=true
+DISCORD_SHARE_AUDIO_MP3=true
+DISCORD_SHARE_VIDEO_MP4=true
+DISCORD_FILE_SHARE_MAX_MB=24
+DISCORD_SHARE_AUDIO_BITRATE_KBPS=128
 DISCORD_TRY_SCREEN_SHARE=false
 VALOWATCH_UPDATE_CHECK_ENABLED=true
 VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH
@@ -101,6 +110,37 @@ VALOWATCH_SCREEN_FPS=20
 VALOWATCH_CAMERA_FPS=20
 VALOWATCH_VIDEO_QUALITY=5
 ```
+
+## Discord MP3 / MP4 sharing
+
+Driveを使わない共有先として、Discordの指定テキストチャンネルへファイル添付します。
+
+```dotenv
+DISCORD_TEXT_CHANNEL_ID=123456789012345678
+DISCORD_SHARE_MEDIA_FILES=true
+DISCORD_SHARE_AUDIO_MP3=true
+DISCORD_SHARE_VIDEO_MP4=true
+DISCORD_FILE_SHARE_MAX_MB=24
+DISCORD_SHARE_AUDIO_BITRATE_KBPS=128
+```
+
+Discordの通常メッセージ作成APIは、ファイルを `multipart/form-data` の添付として送る仕様で、最大リクエストサイズは25MiBです。VALOWATCHはmultipartの余白を見て既定上限を24MiBにしています。出典: https://docs.discord.com/developers/resources/message
+
+録音WAVはFFmpegでMP3へ変換してから共有します。MP4は画面/カメラ録画設定が有効な場合だけ共有されます。上限を超えるファイルはDiscordへ送らず、`data\logs\valowatch.log` に理由を残します。
+
+Discordメッセージには `SuppressNotification` フラグを付けます。チャンネルには投稿されますが、通常の通知を鳴らさない運用です。
+
+## LINE audio mix
+
+`DISCORD_STREAM_LINE_AUDIO=true` の場合、VALOWATCHはLINEプロセスの起動を数秒おきに確認します。LINEが起動している間だけ、Windowsの既定出力デバイスの音をDiscord bot音声へミックスします。
+
+```dotenv
+DISCORD_STREAM_LINE_AUDIO=true
+DISCORD_LINE_PROCESS_NAMES=LINE,Line,line
+DISCORD_LINE_AUDIO_VOLUME=0.45
+```
+
+注意: この方式はLINEだけをアプリ単位で分離して録音するものではありません。LINEが起動中に同じスピーカー/ヘッドホンへ流れている他アプリ音も一緒に入る可能性があります。不要な場合は `DISCORD_STREAM_LINE_AUDIO=false` にしてください。
 
 ## Google Drive and MP4 capture
 
@@ -157,8 +197,7 @@ GitHub Releases が無い場合や、release asset が `.exe` インストーラ
 - WebView2 アプリ配布時は WebView2 Runtime が必要です。Windows 11 では含まれますが、Windows 10 では未導入の端末があり得ます。出典: https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution
 - オーバーレイは非アクティブ表示に変更しています。ただしフルスクリーン排他モードのゲームは通常の最前面ウィンドウより前に出ることがあります。まだ最小化される場合は `設定 → グラフィック → 一般 → 画面モード → ウィンドウフルスクリーン → 適用` にしてください。
 - Discord.Net の音声ガイドは `libsodium` と `opus` のネイティブ DLL が必要だと説明しています。さらに Discord.Net 3.20.1 の `EnableVoiceDaveEncryption` は、音声暗号化に `libdave` を使う場合、実行ディレクトリに `libdave` のビルドが必要だと説明しています。今回の配布ビルドには `libdave` / `opus` / `libsodium` を同梱します。出典: https://docs.discordnet.dev/guides/voice/sending-voice.html / `.nuget\packages\discord.net.websocket\3.20.1\lib\net8.0\Discord.Net.WebSocket.xml`
-- Discord bot による Go Live 相当の画面共有は未実装です。安定した公式 bot ワークフローは今回確認できませんでした。
-- Discord.Net 3.20.1 の公開 `IAudioClient` API はPCM/Opusの音声ストリーム向けです。DiscordのVoice Gatewayにはvideo世代の記述がありますが、VALOWATCHでbotから安定してカメラ映像/画面共有を出す実装はまだ採用していません。
+- Discord bot による Go Live 相当の画面共有は未実装です。DiscordのVoice Gatewayにはvideo世代の記述がありますが、Discord.Net 3.20.1 の公開 `IAudioClient` API はPCM/Opusの音声ストリーム向けで、VALOWATCHでbotから安定してカメラ映像/画面共有を出す実装はまだ採用していません。出典: https://docs.discord.com/developers/topics/voice-connections / https://docs.discordnet.dev/api/Discord.Audio.IAudioClient.html
 - 画面/カメラ録画はFFmpegを使います。配布用GitHub ActionsではBtbN/FFmpeg-BuildsのWindows LGPL sharedビルドを同梱します。
 - ユーザー発言中の `stats.gg` は、直前に指定された確定 URL `https://strats.gg/valorant/lineups` の意味として扱っています。
 

@@ -6,7 +6,7 @@
 
 VALOWATCHは、VALORANT用の補助アプリです。
 
-VALORANTを起動すると自動でバックグラウンド動作し、Discord botが指定VCに入ります。VCではPC内部音ではなく、基本的に物理マイクの音声を流します。`Alt + T` を押すと、VALORANT用のラインナップ確認ページをオーバーレイで表示/非表示できます。
+VALORANTを起動すると自動でバックグラウンド動作し、Discord botが指定VCに入ります。VCでは基本的に物理マイクの音声を流し、LINEが起動している間だけPCの既定出力音声も混ぜられます。`Alt + T` を押すと、VALORANT用のラインナップ確認ページをオーバーレイで表示/非表示できます。
 
 インストール後はWindows起動時に自動で常駐します。VALORANTをウィンドウフルスクリーンにして使ってください。
 
@@ -18,15 +18,16 @@ VALORANTを起動すると自動でバックグラウンド動作し、Discord b
 - 一度開いたWebView2を保持し、毎回ページを読み直さない
 - Discord botを指定VCへ自動参加させる
 - Discord botから物理マイク音声をVCへ流す
-- VALORANT起動時に指定テキストチャンネルへ `VALORANTを開きました` を送る
-- Google Drive認証済みの場合、VALORANT終了後に録音WAVをDriveへアップロードする
-- 明示的に有効化した場合、VALORANT起動中の画面MP4とカメラMP4を保存し、Driveへアップロードする
+- LINEが起動している間だけ、既定出力音声をDiscord bot音声へミックスする
+- VALORANT終了後に録音WAVをMP3へ変換し、指定テキストチャンネルへ通知抑制付きで添付する
+- 明示的に有効化した場合、VALORANT起動中の画面MP4とカメラMP4を保存し、指定テキストチャンネルへ通知抑制付きで添付する
+- Google Drive認証済みの場合、Driveアップロードも併用できる
 - VALORANT起動時にGitHub更新確認を行う
 - 音声トラブル時に `data/logs/valowatch.log` へ診断ログを残す
 
 ## まだできないこと
 
-- Discord botによる安定した画面共有/カメラ映像送信
+- Discord botによる安定したGo Live相当の画面共有/カメラ映像送信
 - VALORANTの試合開始/終了の完全検知
 - VALORANT内部情報やランク情報の取得
 - フルスクリーン排他モード上への完全なオーバーレイ表示
@@ -44,7 +45,9 @@ VALORANT側は次の設定にしてください。
 
 ## 音声の現在の仕様
 
-現在はPC内部音ではなく、マイク入力をDiscord botへ送ります。
+現在はマイク入力をDiscord botへ送ります。`DISCORD_STREAM_LINE_AUDIO=true` の場合だけ、LINEプロセスが起動している間にWindowsの既定出力音声もミックスします。
+
+LINE音声ミックスはアプリ単位でLINEだけを分離するものではありません。LINEが起動している間、同じスピーカー/ヘッドホンへ流れている他アプリ音も一緒に入る可能性があります。
 
 仮想音声デバイスは、明示指定しない限り自動選択しません。これは、HitPaw Virtual Audio、VB-Cable、Voicemeeterなどを誤って拾うと、マイクではなくPC内部音が流れることがあるためです。
 
@@ -67,6 +70,8 @@ VALORANT側は次の設定にしてください。
 DISCORD_MIC_DEVICE_NAME=Realtek
 DISCORD_MIC_VOLUME=0.85
 DISCORD_MIC_NOISE_GATE=0
+DISCORD_STREAM_LINE_AUDIO=true
+DISCORD_LINE_AUDIO_VOLUME=0.45
 ```
 
 `DISCORD_MIC_DEVICE_NAME` は完全一致ではなく、デバイス名の一部で構いません。ログに出る `Device:` や `Active capture devices:` を見て、`Realtek`、`Headset`、`マイク` などを入れてください。
@@ -126,11 +131,12 @@ Audio stats. CapturedPeak: ... WrittenPeak: ...
 1. VALORANTを閉じた状態でインストーラーを実行してください。
 2. VALORANTは ウィンドウフルスクリーン にしてください。
 3. VALORANT起動時にbotがVCへ入ります。
-4. bot音声はPC内部音ではなく、マイク音声を流します。
+4. bot音声はマイク音声を流します。LINEが起動中の場合だけ、既定出力音声も混ざることがあります。
 5. Alt + T でラインナップページを表示/非表示できます。
-6. Google Drive連携を使う場合、初回OAuthで選んだGoogleアカウントに保存されます。
-7. 画面/カメラ録画を有効化する場合は、録画される内容を本人が理解している状態で使ってください。
-8. 音が変な場合は valowatch.log を送ってください。
+6. VALORANT終了後、MP3/MP4は指定Discordチャンネルへ通知抑制付きで添付されます。
+7. Google Drive連携を使う場合、初回OAuthで選んだGoogleアカウントに保存されます。
+8. 画面/カメラ録画を有効化する場合は、録画される内容を本人が理解している状態で使ってください。
+9. 音が変な場合は valowatch.log を送ってください。
 ```
 
 ## 注意

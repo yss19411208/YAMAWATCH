@@ -18,9 +18,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const int DiscordPcmFrameBytes = 3840;
     private const float AudiblePeakThreshold = 0.003F;
     private static readonly byte[] SilenceFrame = new byte[DiscordPcmFrameBytes];
-    private static readonly TimeSpan MicrophoneCaptureBufferDuration = TimeSpan.FromMilliseconds(30);
-    private static readonly TimeSpan MicrophoneBufferDuration = TimeSpan.FromMilliseconds(900);
-    private static readonly TimeSpan MicrophoneStartupBufferDuration = TimeSpan.FromMilliseconds(140);
+    private static readonly TimeSpan MicrophoneCaptureBufferDuration = TimeSpan.FromMilliseconds(50);
+    private static readonly TimeSpan MicrophoneBufferDuration = TimeSpan.FromMilliseconds(1600);
+    private static readonly TimeSpan MicrophoneStartupBufferDuration = TimeSpan.FromMilliseconds(260);
+    private static readonly TimeSpan LineLoopbackBufferDuration = TimeSpan.FromMilliseconds(1600);
+    private static readonly TimeSpan LineProcessCheckInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(30);
@@ -38,6 +40,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private IAudioClient? audioClient;
     private WasapiCapture? microphoneCapture;
     private BufferedWaveProvider? bufferedWaveProvider;
+    private WasapiLoopbackCapture? lineLoopbackCapture;
+    private BufferedWaveProvider? lineBufferedWaveProvider;
     private IWaveProvider? discordPcmProvider;
     private AudioOutStream? discordStream;
     private CancellationTokenSource? relayCancellationTokenSource;
@@ -57,6 +61,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool audioDiagnosticMessageSent;
     private string currentMicrophoneDeviceName = string.Empty;
     private string currentCaptureDeviceList = string.Empty;
+    private string currentLineLoopbackDeviceName = string.Empty;
+    private string[] currentLineAudioProcessNames = [];
+    private DateTimeOffset lastLineProcessCheckAtUtc = DateTimeOffset.MinValue;
+    private bool lineProcessDetected;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioStatsLogTime = DateTimeOffset.MinValue;
 
@@ -111,7 +119,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Discord settings loaded. Guild: {settings.GuildId}. Voice: {settings.VoiceChannelId}. " +
             $"Text: {settings.TextChannelId}. StreamMic: {settings.StreamMicrophoneAudio}. " +
             $"MicDevice: {settings.MicrophoneDeviceName}. Volume: {settings.MicrophoneVolume:0.00}. " +
-            $"NoiseGate: {settings.MicrophoneNoiseGate:0.000}.");
+            $"NoiseGate: {settings.MicrophoneNoiseGate:0.000}. " +
+            $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
+            $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}. " +
+            $"ShareMedia: {settings.ShareMediaFiles}.");
 
         if (settings.TryScreenShare)
         {
@@ -538,13 +549,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             BufferDuration = MicrophoneBufferDuration,
             DiscardOnBufferOverflow = true,
-            ReadFully = false
+            ReadFully = true
         };
 
+        IWaveProvider? lineAudioProvider = TryStartLineLoopbackAudio(settings);
         discordPcmProvider = CreateDiscordPcmProvider(
             bufferedWaveProvider,
             settings.MicrophoneVolume,
-            settings.MicrophoneNoiseGate);
+            settings.MicrophoneNoiseGate,
+            lineAudioProvider,
+            settings.LineAudioVolume);
 
         discordStream = audioClient.CreatePCMStream(AudioApplication.Voice);
         relayCancellationTokenSource = new CancellationTokenSource();
@@ -560,6 +574,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Relay buffer: {MicrophoneBufferDuration.TotalMilliseconds:0}ms. " +
             $"Startup buffer: {MicrophoneStartupBufferDuration.TotalMilliseconds:0}ms. " +
             $"Volume: {settings.MicrophoneVolume:0.00}. Noise gate: {settings.MicrophoneNoiseGate:0.000}. " +
+            $"Line loopback: {(lineAudioProvider is null ? "off" : currentLineLoopbackDeviceName)}. " +
+            $"Line volume: {settings.LineAudioVolume:0.00}. " +
             $"Preferred device: {settings.MicrophoneDeviceName}.");
 
         relayTask = Task.Run(
@@ -698,6 +714,101 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         ObserveCapturedAudio(eventArgs.Buffer, eventArgs.BytesRecorded);
     }
 
+    private IWaveProvider? TryStartLineLoopbackAudio(DiscordBotSettings settings)
+    {
+        if (!settings.StreamLineAudioWhenRunning)
+        {
+            WriteLog("LINE loopback audio is disabled.");
+            return null;
+        }
+
+        currentLineAudioProcessNames = settings.LineAudioProcessNames.Length == 0
+            ? ["LINE", "Line", "line"]
+            : settings.LineAudioProcessNames;
+        lineProcessDetected = IsAnyProcessRunning(currentLineAudioProcessNames);
+        lastLineProcessCheckAtUtc = DateTimeOffset.UtcNow;
+
+        try
+        {
+            using MMDeviceEnumerator deviceEnumerator = new();
+            MMDevice renderDevice = deviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            currentLineLoopbackDeviceName = renderDevice.FriendlyName;
+            lineLoopbackCapture = new WasapiLoopbackCapture(renderDevice);
+            lineBufferedWaveProvider = new BufferedWaveProvider(lineLoopbackCapture.WaveFormat)
+            {
+                BufferDuration = LineLoopbackBufferDuration,
+                DiscardOnBufferOverflow = true,
+                ReadFully = true
+            };
+
+            lineLoopbackCapture.DataAvailable += OnLineLoopbackDataAvailable;
+            lineLoopbackCapture.RecordingStopped += OnLineLoopbackRecordingStopped;
+            lineLoopbackCapture.StartRecording();
+            WriteLog(
+                $"LINE loopback audio started. Device: {currentLineLoopbackDeviceName}. " +
+                $"Source format: {lineLoopbackCapture.WaveFormat}. Buffer: {LineLoopbackBufferDuration.TotalMilliseconds:0}ms. " +
+                $"InitialLineProcessDetected: {lineProcessDetected}. " +
+                $"ProcessNames: {string.Join(", ", currentLineAudioProcessNames)}.");
+            return lineBufferedWaveProvider;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or COMException or ArgumentException)
+        {
+            WriteLog("LINE loopback audio could not start. Continuing with microphone only.", exception);
+            DisposeLineLoopbackObjects();
+            return null;
+        }
+    }
+
+    private void OnLineLoopbackDataAvailable(object? sender, WaveInEventArgs eventArgs)
+    {
+        if (lineBufferedWaveProvider is null || eventArgs.BytesRecorded <= 0)
+        {
+            return;
+        }
+
+        if (!ShouldForwardLineLoopbackAudio())
+        {
+            return;
+        }
+
+        lineBufferedWaveProvider.AddSamples(eventArgs.Buffer, 0, eventArgs.BytesRecorded);
+    }
+
+    private bool ShouldForwardLineLoopbackAudio()
+    {
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc - lastLineProcessCheckAtUtc < LineProcessCheckInterval)
+        {
+            return lineProcessDetected;
+        }
+
+        bool wasDetected = lineProcessDetected;
+        lineProcessDetected = IsAnyProcessRunning(currentLineAudioProcessNames);
+        lastLineProcessCheckAtUtc = nowUtc;
+
+        if (lineProcessDetected != wasDetected)
+        {
+            WriteLog($"LINE loopback forwarding changed. Enabled: {lineProcessDetected}.");
+            if (!lineProcessDetected)
+            {
+                lineBufferedWaveProvider?.ClearBuffer();
+            }
+        }
+
+        return lineProcessDetected;
+    }
+
+    private void OnLineLoopbackRecordingStopped(object? sender, StoppedEventArgs eventArgs)
+    {
+        if (eventArgs.Exception is not null)
+        {
+            WriteLog("LINE loopback audio stopped because of an output device error.", eventArgs.Exception);
+            return;
+        }
+
+        WriteLog("LINE loopback audio stopped.");
+    }
+
     private void OnMicrophoneRecordingStopped(object? sender, StoppedEventArgs eventArgs)
     {
         if (eventArgs.Exception is not null)
@@ -736,6 +847,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
         }
 
+        DisposeLineLoopbackObjects();
         discordStream?.Dispose();
         microphoneCapture?.Dispose();
 
@@ -743,6 +855,31 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         discordPcmProvider = null;
         bufferedWaveProvider = null;
         microphoneCapture = null;
+    }
+
+    private void DisposeLineLoopbackObjects()
+    {
+        if (lineLoopbackCapture is not null)
+        {
+            lineLoopbackCapture.DataAvailable -= OnLineLoopbackDataAvailable;
+            lineLoopbackCapture.RecordingStopped -= OnLineLoopbackRecordingStopped;
+            try
+            {
+                lineLoopbackCapture.StopRecording();
+            }
+            catch (InvalidOperationException)
+            {
+            }
+
+            lineLoopbackCapture.Dispose();
+        }
+
+        lineLoopbackCapture = null;
+        lineBufferedWaveProvider = null;
+        currentLineLoopbackDeviceName = string.Empty;
+        currentLineAudioProcessNames = [];
+        lastLineProcessCheckAtUtc = DateTimeOffset.MinValue;
+        lineProcessDetected = false;
     }
 
     internal static MMDevice GetDefaultMicrophoneDevice(string? preferredDeviceName = null)
@@ -798,9 +935,37 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     internal static IWaveProvider CreateDiscordPcmProvider(
         IWaveProvider microphoneWaveProvider,
         float microphoneVolume,
-        float microphoneNoiseGate)
+        float microphoneNoiseGate,
+        IWaveProvider? lineLoopbackWaveProvider = null,
+        float lineLoopbackVolume = 0.45F)
     {
-        ISampleProvider sampleProvider = microphoneWaveProvider.ToSampleProvider();
+        ISampleProvider microphoneSampleProvider = CreateMono48KhzSampleProvider(microphoneWaveProvider, "microphone");
+        microphoneSampleProvider = new MicrophoneVoiceSampleProvider(microphoneSampleProvider, microphoneVolume, microphoneNoiseGate);
+
+        ISampleProvider mixedSampleProvider = microphoneSampleProvider;
+        if (lineLoopbackWaveProvider is not null)
+        {
+            ISampleProvider lineLoopbackSampleProvider = CreateMono48KhzSampleProvider(lineLoopbackWaveProvider, "LINE loopback");
+            lineLoopbackSampleProvider = new SimpleVolumeSampleProvider(
+                lineLoopbackSampleProvider,
+                Math.Clamp(lineLoopbackVolume, 0.0F, 1.0F));
+
+            MixingSampleProvider mixer = new(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1))
+            {
+                ReadFully = true
+            };
+            mixer.AddMixerInput(microphoneSampleProvider);
+            mixer.AddMixerInput(lineLoopbackSampleProvider);
+            mixedSampleProvider = new SoftLimiterSampleProvider(mixer);
+        }
+
+        mixedSampleProvider = new MonoToStereoSampleProvider(mixedSampleProvider);
+        return new SampleToWaveProvider16(mixedSampleProvider);
+    }
+
+    private static ISampleProvider CreateMono48KhzSampleProvider(IWaveProvider sourceWaveProvider, string sourceLabel)
+    {
+        ISampleProvider sampleProvider = sourceWaveProvider.ToSampleProvider();
 
         if (sampleProvider.WaveFormat.Channels == 2)
         {
@@ -812,7 +977,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
         else if (sampleProvider.WaveFormat.Channels != 1)
         {
-            throw new InvalidOperationException($"Unsupported microphone channel count: {sampleProvider.WaveFormat.Channels}");
+            throw new InvalidOperationException($"Unsupported {sourceLabel} channel count: {sampleProvider.WaveFormat.Channels}");
         }
 
         if (sampleProvider.WaveFormat.SampleRate != 48000)
@@ -820,10 +985,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             sampleProvider = new WdlResamplingSampleProvider(sampleProvider, 48000);
         }
 
-        sampleProvider = new MicrophoneVoiceSampleProvider(sampleProvider, microphoneVolume, microphoneNoiseGate);
-
-        sampleProvider = new MonoToStereoSampleProvider(sampleProvider);
-        return new SampleToWaveProvider16(sampleProvider);
+        return sampleProvider;
     }
 
     internal static float CalculateAudioPeak(WaveFormat waveFormat, byte[] buffer, int offset, int byteCount)
@@ -1152,6 +1314,106 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             normalizedName.Contains("wave link", StringComparison.Ordinal) ||
             normalizedName.Contains("仮想", StringComparison.Ordinal) ||
             normalizedName.Contains("バーチャル", StringComparison.Ordinal);
+    }
+
+    private static bool IsAnyProcessRunning(IEnumerable<string> processNames)
+    {
+        foreach (string rawProcessName in processNames)
+        {
+            string processName = Path.GetFileNameWithoutExtension(rawProcessName.Trim());
+            if (string.IsNullOrWhiteSpace(processName))
+            {
+                continue;
+            }
+
+            try
+            {
+                Process[] matchingProcesses = Process.GetProcessesByName(processName);
+                try
+                {
+                    if (matchingProcesses.Length > 0)
+                    {
+                        return true;
+                    }
+                }
+                finally
+                {
+                    foreach (Process matchingProcess in matchingProcesses)
+                    {
+                        matchingProcess.Dispose();
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+            }
+        }
+
+        return false;
+    }
+
+    private sealed class SimpleVolumeSampleProvider : ISampleProvider
+    {
+        private readonly ISampleProvider sourceProvider;
+        private readonly float volume;
+
+        public SimpleVolumeSampleProvider(ISampleProvider sourceProvider, float volume)
+        {
+            this.sourceProvider = sourceProvider;
+            this.volume = Math.Clamp(volume, 0.0F, 1.0F);
+        }
+
+        public WaveFormat WaveFormat => sourceProvider.WaveFormat;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int samplesRead = sourceProvider.Read(buffer, offset, count);
+            for (int sampleIndex = offset; sampleIndex < offset + samplesRead; sampleIndex++)
+            {
+                float sample = float.IsFinite(buffer[sampleIndex]) ? buffer[sampleIndex] : 0F;
+                buffer[sampleIndex] = sample * volume;
+            }
+
+            return samplesRead;
+        }
+    }
+
+    private sealed class SoftLimiterSampleProvider : ISampleProvider
+    {
+        private readonly ISampleProvider sourceProvider;
+
+        public SoftLimiterSampleProvider(ISampleProvider sourceProvider)
+        {
+            this.sourceProvider = sourceProvider;
+        }
+
+        public WaveFormat WaveFormat => sourceProvider.WaveFormat;
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int samplesRead = sourceProvider.Read(buffer, offset, count);
+            for (int sampleIndex = offset; sampleIndex < offset + samplesRead; sampleIndex++)
+            {
+                buffer[sampleIndex] = ApplySoftLimiter(float.IsFinite(buffer[sampleIndex]) ? buffer[sampleIndex] : 0F);
+            }
+
+            return samplesRead;
+        }
+
+        private static float ApplySoftLimiter(float sample)
+        {
+            const float limitThreshold = 0.86F;
+            const float compressedSlope = 0.12F;
+
+            float absoluteSample = MathF.Abs(sample);
+            if (absoluteSample <= limitThreshold)
+            {
+                return sample;
+            }
+
+            float compressedSample = limitThreshold + ((absoluteSample - limitThreshold) * compressedSlope);
+            return MathF.CopySign(Math.Min(compressedSample, 0.96F), sample);
+        }
     }
 
     private sealed class MicrophoneVoiceSampleProvider : ISampleProvider

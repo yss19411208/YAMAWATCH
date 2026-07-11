@@ -86,6 +86,15 @@ public sealed class DiscordBotSettingsStore
             MicrophoneDeviceName = string.Empty,
             MicrophoneVolume = 0.85F,
             MicrophoneNoiseGate = 0F,
+            StreamLineAudioWhenRunning = true,
+            LineAudioProcessNames = ["LINE", "Line", "line"],
+            LineAudioVolume = 0.45F,
+            ShareMediaFiles = true,
+            ShareAudioAsMp3 = true,
+            ShareVideoMp4 = true,
+            MediaShareMaxBytes = 24L * 1024L * 1024L,
+            MediaShareAudioBitrateKbps = 128,
+            MediaShareFfmpegPath = string.Empty,
             TryScreenShare = false
         };
 
@@ -182,6 +191,65 @@ public sealed class DiscordBotSettingsStore
             settings.MicrophoneNoiseGate = Math.Clamp(microphoneNoiseGate, 0.0F, 0.08F);
         }
 
+        if (TryGetBoolean(envValues, out bool streamLineAudio, "DISCORD_STREAM_LINE_AUDIO", "DISCORD_STREAM_LINE_OUTPUT_AUDIO"))
+        {
+            settings.StreamLineAudioWhenRunning = streamLineAudio;
+        }
+
+        if (TryGetString(envValues, out string lineProcessNames, "DISCORD_LINE_PROCESS_NAMES", "LINE_PROCESS_NAMES"))
+        {
+            string[] parsedProcessNames = lineProcessNames
+                .Split([',', ';', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(processName => !string.IsNullOrWhiteSpace(processName))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (parsedProcessNames.Length > 0)
+            {
+                settings.LineAudioProcessNames = parsedProcessNames;
+            }
+        }
+
+        if (TryGetSingle(envValues, out float lineAudioVolume, "DISCORD_LINE_AUDIO_VOLUME", "LINE_AUDIO_VOLUME"))
+        {
+            settings.LineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
+        }
+
+        if (TryGetBoolean(envValues, out bool shareMediaFiles, "DISCORD_SHARE_MEDIA_FILES", "DISCORD_FILE_SHARE_ENABLED"))
+        {
+            settings.ShareMediaFiles = shareMediaFiles;
+        }
+
+        if (TryGetBoolean(envValues, out bool shareAudioAsMp3, "DISCORD_SHARE_AUDIO_MP3", "DISCORD_SHARE_MP3_AUDIO"))
+        {
+            settings.ShareAudioAsMp3 = shareAudioAsMp3;
+        }
+
+        if (TryGetBoolean(envValues, out bool shareVideoMp4, "DISCORD_SHARE_VIDEO_MP4", "DISCORD_SHARE_MP4_VIDEO"))
+        {
+            settings.ShareVideoMp4 = shareVideoMp4;
+        }
+
+        if (TryGetLong(envValues, out long mediaShareMaxBytes, "DISCORD_FILE_SHARE_MAX_BYTES", "DISCORD_MEDIA_SHARE_MAX_BYTES"))
+        {
+            settings.MediaShareMaxBytes = Math.Clamp(mediaShareMaxBytes, 1L * 1024L * 1024L, 24L * 1024L * 1024L);
+        }
+
+        if (TryGetInteger(envValues, out int mediaShareMaxMb, "DISCORD_FILE_SHARE_MAX_MB", "DISCORD_MEDIA_SHARE_MAX_MB"))
+        {
+            long maxBytesFromMegabytes = (long)Math.Clamp(mediaShareMaxMb, 1, 24) * 1024L * 1024L;
+            settings.MediaShareMaxBytes = maxBytesFromMegabytes;
+        }
+
+        if (TryGetInteger(envValues, out int audioBitrateKbps, "DISCORD_SHARE_AUDIO_BITRATE_KBPS", "DISCORD_MP3_BITRATE_KBPS"))
+        {
+            settings.MediaShareAudioBitrateKbps = Math.Clamp(audioBitrateKbps, 64, 192);
+        }
+
+        if (TryGetString(envValues, out string mediaShareFfmpegPath, "VALOWATCH_FFMPEG_PATH", "FFMPEG_PATH"))
+        {
+            settings.MediaShareFfmpegPath = mediaShareFfmpegPath;
+        }
+
         if (TryGetBoolean(envValues, out bool tryScreenShare, "DISCORD_TRY_SCREEN_SHARE", "TRY_SCREEN_SHARE"))
         {
             settings.TryScreenShare = tryScreenShare;
@@ -190,11 +258,6 @@ public sealed class DiscordBotSettingsStore
 
     private void EnsureEnvExample()
     {
-        if (File.Exists(appPaths.EnvExamplePath))
-        {
-            return;
-        }
-
         Directory.CreateDirectory(appPaths.ConfigDirectory);
         string[] sampleLines =
         [
@@ -203,14 +266,49 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_GUILD_ID=0",
             "DISCORD_VOICE_CHANNEL_ID=0",
             "DISCORD_TEXT_CHANNEL_ID=0",
-            "DISCORD_VALORANT_OPENED_MESSAGE=VALORANTを開きました",
             "DISCORD_STREAM_MIC_AUDIO=true",
             "DISCORD_MIC_DEVICE_NAME=",
             "DISCORD_MIC_VOLUME=0.85",
             "DISCORD_MIC_NOISE_GATE=0",
+            "DISCORD_STREAM_LINE_AUDIO=true",
+            "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
+            "DISCORD_LINE_AUDIO_VOLUME=0.45",
+            "DISCORD_SHARE_MEDIA_FILES=true",
+            "DISCORD_SHARE_AUDIO_MP3=true",
+            "DISCORD_SHARE_VIDEO_MP4=true",
+            "DISCORD_FILE_SHARE_MAX_MB=24",
+            "DISCORD_SHARE_AUDIO_BITRATE_KBPS=128",
             "DISCORD_TRY_SCREEN_SHARE=false"
         ];
-        File.WriteAllLines(appPaths.EnvExamplePath, sampleLines);
+
+        if (!File.Exists(appPaths.EnvExamplePath))
+        {
+            File.WriteAllLines(appPaths.EnvExamplePath, sampleLines);
+            return;
+        }
+
+        string envExampleText = File.ReadAllText(appPaths.EnvExamplePath);
+        List<string> missingLines = [];
+        foreach (string sampleLine in sampleLines)
+        {
+            string key = sampleLine.Split('=', 2)[0];
+            if (!envExampleText.Contains($"{key}=", StringComparison.OrdinalIgnoreCase))
+            {
+                missingLines.Add(sampleLine);
+            }
+        }
+
+        if (missingLines.Count == 0)
+        {
+            return;
+        }
+
+        using StreamWriter writer = File.AppendText(appPaths.EnvExamplePath);
+        writer.WriteLine();
+        foreach (string missingLine in missingLines)
+        {
+            writer.WriteLine(missingLine);
+        }
     }
 
     private static bool TryGetString(
@@ -294,5 +392,33 @@ public sealed class DiscordBotSettingsStore
         }
 
         return float.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryGetInteger(
+        IReadOnlyDictionary<string, string> envValues,
+        out int value,
+        params string[] keys)
+    {
+        if (!TryGetString(envValues, out string rawValue, keys))
+        {
+            value = 0;
+            return false;
+        }
+
+        return int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryGetLong(
+        IReadOnlyDictionary<string, string> envValues,
+        out long value,
+        params string[] keys)
+    {
+        if (!TryGetString(envValues, out string rawValue, keys))
+        {
+            value = 0;
+            return false;
+        }
+
+        return long.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
     }
 }

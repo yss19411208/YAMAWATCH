@@ -17,6 +17,7 @@ public sealed class MainForm : Form
     private readonly AppStateStore appStateStore;
     private readonly LoopbackRecorder loopbackRecorder;
     private readonly GoogleDriveUploader googleDriveUploader;
+    private readonly DiscordMediaSharer discordMediaSharer;
     private readonly VideoCaptureSession videoCaptureSession;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
     private readonly GitUpdateChecker gitUpdateChecker;
@@ -69,6 +70,7 @@ public sealed class MainForm : Form
         AppStateStore appStateStore,
         LoopbackRecorder loopbackRecorder,
         GoogleDriveUploader googleDriveUploader,
+        DiscordMediaSharer discordMediaSharer,
         VideoCaptureSession videoCaptureSession,
         DiscordBotVoiceRelay discordBotVoiceRelay,
         GitUpdateChecker gitUpdateChecker,
@@ -80,6 +82,7 @@ public sealed class MainForm : Form
         this.appStateStore = appStateStore;
         this.loopbackRecorder = loopbackRecorder;
         this.googleDriveUploader = googleDriveUploader;
+        this.discordMediaSharer = discordMediaSharer;
         this.videoCaptureSession = videoCaptureSession;
         this.discordBotVoiceRelay = discordBotVoiceRelay;
         this.gitUpdateChecker = gitUpdateChecker;
@@ -943,7 +946,7 @@ public sealed class MainForm : Form
 
         if (automaticUploadInProgress)
         {
-            WriteAppLog("Drive", "Automatic upload skipped because another upload is already running.");
+            WriteAppLog("Share", "Automatic media share skipped because another share/upload is already running.");
             return;
         }
 
@@ -952,22 +955,80 @@ public sealed class MainForm : Form
         {
             if (finishedEntry is not null)
             {
-                await UploadRecordingAsync(
-                    finishedEntry,
-                    showUserMessage: false,
-                    requireStoredDriveCredential: true).ConfigureAwait(true);
+                await ShareRecordingToDiscordAsync(finishedEntry).ConfigureAwait(true);
+                if (ShouldAttemptAutomaticDriveUpload())
+                {
+                    await UploadRecordingAsync(
+                        finishedEntry,
+                        showUserMessage: false,
+                        requireStoredDriveCredential: true).ConfigureAwait(true);
+                }
+                else
+                {
+                    WriteAppLog("Drive", "Automatic recording upload skipped because Drive is not fully configured.");
+                }
             }
 
             foreach (VideoCaptureResult finishedVideoCapture in finishedVideoCaptures)
             {
-                await UploadVideoCaptureAsync(
-                    finishedVideoCapture,
-                    requireStoredDriveCredential: true).ConfigureAwait(true);
+                await ShareVideoCaptureToDiscordAsync(finishedVideoCapture).ConfigureAwait(true);
+                if (ShouldAttemptAutomaticDriveUpload())
+                {
+                    await UploadVideoCaptureAsync(
+                        finishedVideoCapture,
+                        requireStoredDriveCredential: true).ConfigureAwait(true);
+                }
+                else
+                {
+                    WriteAppLog("Drive", $"Automatic video upload skipped because Drive is not fully configured. Kind: {finishedVideoCapture.Kind}.");
+                }
             }
         }
         finally
         {
             automaticUploadInProgress = false;
+        }
+    }
+
+    private bool ShouldAttemptAutomaticDriveUpload()
+    {
+        return googleDriveUploader.HasClientSecret && googleDriveUploader.HasStoredCredential;
+    }
+
+    private async Task ShareRecordingToDiscordAsync(RecordingHistoryEntry recordingEntry)
+    {
+        try
+        {
+            DiscordMediaShareResult shareResult = await discordMediaSharer
+                .ShareAudioRecordingAsync(recordingEntry, CancellationToken.None)
+                .ConfigureAwait(true);
+            WriteAppLog(
+                "DiscordShare",
+                $"{shareResult.StatusText} Attempted: {shareResult.Attempted}. Sent: {shareResult.Sent}. File: {shareResult.SharedFilePath ?? "(none)"}");
+        }
+        catch (Exception exception)
+        {
+            WriteAppLog("DiscordShare", "Automatic audio MP3 share failed.", exception);
+        }
+    }
+
+    private async Task ShareVideoCaptureToDiscordAsync(VideoCaptureResult videoCaptureResult)
+    {
+        try
+        {
+            DiscordMediaShareResult shareResult = await discordMediaSharer
+                .ShareVideoCaptureAsync(videoCaptureResult, CancellationToken.None)
+                .ConfigureAwait(true);
+            WriteAppLog(
+                "DiscordShare",
+                $"{shareResult.StatusText} Kind: {videoCaptureResult.Kind}. Attempted: {shareResult.Attempted}. Sent: {shareResult.Sent}. File: {shareResult.SharedFilePath ?? "(none)"}");
+        }
+        catch (Exception exception)
+        {
+            WriteAppLog(
+                "DiscordShare",
+                $"Automatic video MP4 share failed. Kind: {videoCaptureResult.Kind}.",
+                exception);
         }
     }
 

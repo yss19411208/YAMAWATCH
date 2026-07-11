@@ -45,6 +45,7 @@ static class Program
             new AppStateStore(appPaths),
             new LoopbackRecorder(discordBotSettingsStore),
             new GoogleDriveUploader(appPaths),
+            new DiscordMediaSharer(appPaths, discordBotSettingsStore),
             new VideoCaptureSession(appPaths, new VideoCaptureSettingsStore(appPaths)),
             new DiscordBotVoiceRelay(discordBotSettingsStore, appPaths),
             new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
@@ -100,12 +101,12 @@ static class Program
             float microphoneVolume = settings?.MicrophoneVolume ?? 0.85F;
             float microphoneNoiseGate = settings?.MicrophoneNoiseGate ?? 0F;
             MMDevice defaultMicrophoneDevice = DiscordBotVoiceRelay.GetDefaultMicrophoneDevice(preferredMicrophoneDeviceName);
-            using WasapiCapture microphoneCapture = new(defaultMicrophoneDevice, useEventSync: false, audioBufferMillisecondsLength: 30);
+            using WasapiCapture microphoneCapture = new(defaultMicrophoneDevice, useEventSync: false, audioBufferMillisecondsLength: 50);
             BufferedWaveProvider bufferedWaveProvider = new(microphoneCapture.WaveFormat)
             {
-                BufferDuration = TimeSpan.FromSeconds(1),
+                BufferDuration = TimeSpan.FromMilliseconds(1600),
                 DiscardOnBufferOverflow = true,
-                ReadFully = false
+                ReadFully = true
             };
             IWaveProvider discordPcmProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
                 bufferedWaveProvider,
@@ -133,7 +134,7 @@ static class Program
 
             microphoneCapture.StartRecording();
             DateTime startupBufferDeadline = DateTime.UtcNow.AddSeconds(2);
-            while (bufferedWaveProvider.BufferedDuration < TimeSpan.FromMilliseconds(140) &&
+            while (bufferedWaveProvider.BufferedDuration < TimeSpan.FromMilliseconds(260) &&
                 DateTime.UtcNow < startupBufferDeadline)
             {
                 Thread.Sleep(10);
