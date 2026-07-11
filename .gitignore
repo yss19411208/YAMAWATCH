@@ -13,6 +13,8 @@
 .nuget/
 recordings/
 data/
+config/discord_bot.sample.json
+config/.env.example
 config/.env
 config/google_client_secret.json
 config/discord_bot.json
@@ -24,12 +26,9 @@ installer/
 release/
 *.exe
 *.dll
-*.opk
 *.zip
 *.mp4
 *.wav
-overwolf/*.zip
-overwolf/*.opk
 
 # User-specific files
 *.rsuser

@@ -11,10 +11,10 @@
 
   <ItemGroup>
     <EmbeddedResource Include="..\..\exe\VALOWATCH.exe" LogicalName="VALOWATCH.exe" />
+    <EmbeddedResource Include="..\..\exe\libdave.dll" LogicalName="Native/libdave.dll" Condition="Exists('..\..\exe\libdave.dll')" />
+    <EmbeddedResource Include="..\..\exe\libsodium.dll" LogicalName="Native/libsodium.dll" Condition="Exists('..\..\exe\libsodium.dll')" />
+    <EmbeddedResource Include="..\..\exe\opus.dll" LogicalName="Native/opus.dll" Condition="Exists('..\..\exe\opus.dll')" />
     <EmbeddedResource Include="..\..\installer\.env" LogicalName="InstallerEnv/.env" Condition="Exists('..\..\installer\.env')" />
-    <EmbeddedResource Include="..\..\overwolf\VALOWATCH\**\*">
-      <LogicalName>OverwolfApp/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
-    </EmbeddedResource>
   </ItemGroup>
 
 </Project>

@@ -7,7 +7,7 @@
 
 現在のMVPは、VALORANT 起動中に `Alt + T` を押した時だけ `https://strats.gg/valorant/lineups` をオーバーレイ表示することです。録音中表示、bot状態、履歴、tracker.gg のURL表示はオーバーレイに出しません。
 
-Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、PC の出力音声をリレーします。Discord token などの秘密情報は `%LocalAppData%\VALOWATCH\config\.env` に置きます。
+Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、既定マイク入力をリレーします。`DISCORD_TEXT_CHANNEL_ID` が設定されている場合は、同じタイミングで指定テキストチャンネルへ `VALORANTを開きました` を送信します。Discord token などの設定は、配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` から `VALOWATCH.exe` へ埋め込みます。
 
 ## 根拠
 
@@ -16,7 +16,7 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 - Microsoft は `SW_SHOWNOACTIVATE` を「ウィンドウを表示するがアクティブ化しない」値として説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow
 - Microsoft は `SWP_NOACTIVATE` を「ウィンドウをアクティブ化しない」フラグとして説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos
 - Microsoft は `Run` レジストリキーのプログラムがユーザーのログオン時に実行されると説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
-- Discord.Net の音声送信ガイドは、音声に `libsodium` と `opus` のネイティブライブラリが必要だと説明しています。出典: https://docs.discordnet.dev/guides/voice/sending-voice.html
+- Discord.Net の音声送信ガイドは、音声に `libsodium` と `opus` のネイティブライブラリが必要だと説明しています。Discord.Net 3.20.1 の `EnableVoiceDaveEncryption` は、音声暗号化に `libdave` を使う場合、実行ディレクトリに `libdave` のビルドが必要だと説明しています。出典: https://docs.discordnet.dev/guides/voice/sending-voice.html / `.nuget\packages\discord.net.websocket\3.20.1\lib\net8.0\Discord.Net.WebSocket.xml`
 - strats.gg の対象ページは `Valorant Lineups, Stats Tracker & More!` のページとして確認しました。出典: https://strats.gg/valorant/lineups
 
 ## 実装済み
@@ -29,10 +29,11 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 - `SW_SHOWNOACTIVATE` / `SWP_NOACTIVATE` による非アクティブ表示
 - 少し透過したオーバーレイ表示
 - VALORANT ウィンドウ位置に合わせたオーバーレイ配置
-- `.env` による Discord bot 設定読み込み
+- exe 埋め込み `.env` と外部 `.env` による Discord bot 設定読み込み
 - Discord bot の VC 接続設定ファイル生成
-- PC 出力音声の Discord bot へのリレー処理
-- インストーラーによる `%LocalAppData%\VALOWATCH\app` への配置
+- Discord bot の VALORANT 起動通知
+- 既定マイク入力の Discord bot へのリレー処理
+- インストーラーによる `C:\Users\p159yusuke\Documents\VALOWATCH\app` への配置
 - ユーザー単位の Windows スタートアップ登録
 
 ## 未実装・保留
@@ -47,4 +48,4 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 
 フルスクリーン排他モードでは、通常の Windows 最前面ウィンドウがゲームより前に出ない場合があります。この点は DirectX フック型の本格的なゲームオーバーレイとは違います。現MVPでは安全性と実装速度を優先し、通常の WinForms 最前面ウィンドウを使っています。
 
-Discord.Net の該当ガイド自体に「情報が古い可能性がある」という警告があります。そのため、音声送信まわりは実機 Discord VC での追加検証が必要です。
+Discord.Net の該当ガイド自体に「情報が古い可能性がある」という警告があります。そのため、音声送信まわりは実機 Discord VC での追加検証が必要です。`data\logs\valowatch.log` に `E2EE/DAVE protocol required` または `OpusDecoder` の `DllNotFoundException` が出る場合は、配布 exe に `libdave` / `opus` / `libsodium` が入っていない状態です。

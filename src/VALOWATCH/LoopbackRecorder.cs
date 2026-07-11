@@ -1,3 +1,4 @@
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 
 namespace VALOWATCH;
@@ -5,7 +6,7 @@ namespace VALOWATCH;
 public sealed class LoopbackRecorder : IDisposable
 {
     private readonly object recorderLock = new();
-    private WasapiLoopbackCapture? activeCapture;
+    private WasapiCapture? activeCapture;
     private WaveFileWriter? activeWriter;
 
     public bool IsRecording { get; private set; }
@@ -25,7 +26,7 @@ public sealed class LoopbackRecorder : IDisposable
 
             Directory.CreateDirectory(Path.GetDirectoryName(recordingFilePath) ?? AppContext.BaseDirectory);
 
-            WasapiLoopbackCapture capture = new();
+            WasapiCapture capture = new(WasapiCapture.GetDefaultCaptureDevice());
             WaveFileWriter writer = new(recordingFilePath, capture.WaveFormat);
 
             activeCapture = capture;

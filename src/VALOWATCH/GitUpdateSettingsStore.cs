@@ -14,9 +14,7 @@ public sealed class GitUpdateSettingsStore
 
     public GitUpdateSettings Load()
     {
-        IReadOnlyDictionary<string, string> envValues = File.Exists(appPaths.EnvPath)
-            ? LoadEnvFile(appPaths.EnvPath)
-            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        IReadOnlyDictionary<string, string> envValues = EnvSettingsLoader.Load(appPaths);
 
         bool enabled = !TryGetBoolean(
             envValues,
@@ -76,7 +74,7 @@ public sealed class GitUpdateSettingsStore
         [
             "VALOWATCH_UPDATE_CHECK_ENABLED=true",
             "VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH",
-            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.0",
+            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.1",
             "VALOWATCH_UPDATE_BRANCH=main",
             "VALOWATCH_UPDATE_CURRENT_COMMIT=",
             "VALOWATCH_GITHUB_TOKEN="
@@ -124,51 +122,6 @@ public sealed class GitUpdateSettingsStore
         }
 
         return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
-    }
-
-    private static IReadOnlyDictionary<string, string> LoadEnvFile(string envPath)
-    {
-        Dictionary<string, string> envValues = new(StringComparer.OrdinalIgnoreCase);
-
-        foreach (string rawLine in File.ReadLines(envPath))
-        {
-            string trimmedLine = rawLine.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith('#'))
-            {
-                continue;
-            }
-
-            int separatorIndex = trimmedLine.IndexOf('=');
-            if (separatorIndex <= 0)
-            {
-                continue;
-            }
-
-            string key = trimmedLine[..separatorIndex].Trim();
-            string value = UnquoteValue(trimmedLine[(separatorIndex + 1)..].Trim());
-            if (!string.IsNullOrWhiteSpace(key))
-            {
-                envValues[key] = value;
-            }
-        }
-
-        return envValues;
-    }
-
-    private static string UnquoteValue(string value)
-    {
-        if (value.Length < 2)
-        {
-            return value;
-        }
-
-        char firstCharacter = value[0];
-        char lastCharacter = value[^1];
-        bool hasMatchingQuotes =
-            firstCharacter == '"' && lastCharacter == '"' ||
-            firstCharacter == '\'' && lastCharacter == '\'';
-
-        return hasMatchingQuotes ? value[1..^1] : value;
     }
 
     private static bool TryGetString(

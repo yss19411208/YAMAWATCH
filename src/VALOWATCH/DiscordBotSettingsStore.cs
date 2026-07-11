@@ -17,14 +17,20 @@ public sealed class DiscordBotSettingsStore
         this.appPaths = appPaths;
     }
 
-    public bool HasConfig => File.Exists(appPaths.EnvPath) || File.Exists(appPaths.DiscordBotConfigPath);
+    public bool HasConfig => EnvSettingsLoader.HasConfig(appPaths) || File.Exists(appPaths.DiscordBotConfigPath);
 
     public DiscordBotSettings? Load()
+    {
+        return Load(out _);
+    }
+
+    public DiscordBotSettings? Load(out string statusText)
     {
         EnsureSampleConfig();
 
         if (!HasConfig)
         {
+            statusText = "Discord config missing";
             return null;
         }
 
@@ -33,14 +39,29 @@ public sealed class DiscordBotSettingsStore
 
         if (!settings.Enabled)
         {
+            statusText = "Discord disabled";
             return null;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.BotToken) || settings.GuildId == 0 || settings.VoiceChannelId == 0)
+        if (string.IsNullOrWhiteSpace(settings.BotToken))
         {
+            statusText = "Discord token missing";
             return null;
         }
 
+        if (settings.GuildId == 0)
+        {
+            statusText = "Discord guild missing";
+            return null;
+        }
+
+        if (settings.VoiceChannelId == 0)
+        {
+            statusText = "Discord VC missing";
+            return null;
+        }
+
+        statusText = "Discord config ready";
         return settings;
     }
 
@@ -59,7 +80,12 @@ public sealed class DiscordBotSettingsStore
             BotToken = "PASTE_BOT_TOKEN_HERE",
             GuildId = 0,
             VoiceChannelId = 0,
-            StreamPcAudio = true,
+            TextChannelId = 0,
+            ValorantOpenedMessage = "VALORANTを開きました",
+            StreamMicrophoneAudio = true,
+            MicrophoneDeviceName = string.Empty,
+            MicrophoneVolume = 0.85F,
+            MicrophoneNoiseGate = 0F,
             TryScreenShare = false
         };
 
@@ -76,17 +102,27 @@ public sealed class DiscordBotSettingsStore
         }
 
         string serializedSettings = File.ReadAllText(appPaths.DiscordBotConfigPath);
-        return JsonSerializer.Deserialize<DiscordBotSettings>(serializedSettings, JsonOptions);
+        DiscordBotSettings? settings = JsonSerializer.Deserialize<DiscordBotSettings>(serializedSettings, JsonOptions);
+        if (settings is null)
+        {
+            return null;
+        }
+
+        using JsonDocument document = JsonDocument.Parse(serializedSettings);
+        JsonElement rootElement = document.RootElement;
+        if (!rootElement.TryGetProperty(nameof(DiscordBotSettings.StreamMicrophoneAudio), out _) &&
+            rootElement.TryGetProperty("StreamPcAudio", out JsonElement legacyStreamPcAudioElement) &&
+            legacyStreamPcAudioElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            settings.StreamMicrophoneAudio = legacyStreamPcAudioElement.GetBoolean();
+        }
+
+        return settings;
     }
 
     private void ApplyEnvSettings(DiscordBotSettings settings)
     {
-        if (!File.Exists(appPaths.EnvPath))
-        {
-            return;
-        }
-
-        IReadOnlyDictionary<string, string> envValues = LoadEnvFile(appPaths.EnvPath);
+        IReadOnlyDictionary<string, string> envValues = EnvSettingsLoader.Load(appPaths);
 
         if (TryGetBoolean(envValues, out bool enabled, "DISCORD_BOT_ENABLED", "VALOWATCH_DISCORD_ENABLED"))
         {
@@ -108,9 +144,42 @@ public sealed class DiscordBotSettingsStore
             settings.VoiceChannelId = voiceChannelId;
         }
 
-        if (TryGetBoolean(envValues, out bool streamPcAudio, "DISCORD_STREAM_PC_AUDIO", "STREAM_PC_AUDIO"))
+        if (TryGetUnsignedLong(envValues, out ulong textChannelId, "DISCORD_TEXT_CHANNEL_ID", "DISCORD_STATUS_CHANNEL_ID", "TEXT_CHANNEL_ID", "STATUS_CHANNEL_ID"))
         {
-            settings.StreamPcAudio = streamPcAudio;
+            settings.TextChannelId = textChannelId;
+        }
+
+        if (TryGetString(envValues, out string valorantOpenedMessage, "DISCORD_VALORANT_OPENED_MESSAGE", "VALOWATCH_VALORANT_OPENED_MESSAGE"))
+        {
+            settings.ValorantOpenedMessage = valorantOpenedMessage;
+        }
+
+        if (TryGetBoolean(
+            envValues,
+            out bool streamMicrophoneAudio,
+            "DISCORD_STREAM_MIC_AUDIO",
+            "DISCORD_STREAM_MICROPHONE_AUDIO",
+            "STREAM_MIC_AUDIO",
+            "STREAM_MICROPHONE_AUDIO",
+            "DISCORD_STREAM_PC_AUDIO",
+            "STREAM_PC_AUDIO"))
+        {
+            settings.StreamMicrophoneAudio = streamMicrophoneAudio;
+        }
+
+        if (TryGetString(envValues, out string microphoneDeviceName, "DISCORD_MIC_DEVICE_NAME", "DISCORD_MICROPHONE_DEVICE_NAME"))
+        {
+            settings.MicrophoneDeviceName = microphoneDeviceName;
+        }
+
+        if (TryGetSingle(envValues, out float microphoneVolume, "DISCORD_MIC_VOLUME", "DISCORD_MICROPHONE_VOLUME"))
+        {
+            settings.MicrophoneVolume = Math.Clamp(microphoneVolume, 0.05F, 1.0F);
+        }
+
+        if (TryGetSingle(envValues, out float microphoneNoiseGate, "DISCORD_MIC_NOISE_GATE", "DISCORD_MICROPHONE_NOISE_GATE"))
+        {
+            settings.MicrophoneNoiseGate = Math.Clamp(microphoneNoiseGate, 0.0F, 0.08F);
         }
 
         if (TryGetBoolean(envValues, out bool tryScreenShare, "DISCORD_TRY_SCREEN_SHARE", "TRY_SCREEN_SHARE"))
@@ -133,55 +202,15 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_BOT_TOKEN=PASTE_BOT_TOKEN_HERE",
             "DISCORD_GUILD_ID=0",
             "DISCORD_VOICE_CHANNEL_ID=0",
-            "DISCORD_STREAM_PC_AUDIO=true",
+            "DISCORD_TEXT_CHANNEL_ID=0",
+            "DISCORD_VALORANT_OPENED_MESSAGE=VALORANTを開きました",
+            "DISCORD_STREAM_MIC_AUDIO=true",
+            "DISCORD_MIC_DEVICE_NAME=",
+            "DISCORD_MIC_VOLUME=0.85",
+            "DISCORD_MIC_NOISE_GATE=0",
             "DISCORD_TRY_SCREEN_SHARE=false"
         ];
         File.WriteAllLines(appPaths.EnvExamplePath, sampleLines);
-    }
-
-    private static IReadOnlyDictionary<string, string> LoadEnvFile(string envPath)
-    {
-        Dictionary<string, string> envValues = new(StringComparer.OrdinalIgnoreCase);
-
-        foreach (string rawLine in File.ReadLines(envPath))
-        {
-            string trimmedLine = rawLine.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedLine) || trimmedLine.StartsWith('#'))
-            {
-                continue;
-            }
-
-            int separatorIndex = trimmedLine.IndexOf('=');
-            if (separatorIndex <= 0)
-            {
-                continue;
-            }
-
-            string key = trimmedLine[..separatorIndex].Trim();
-            string value = UnquoteValue(trimmedLine[(separatorIndex + 1)..].Trim());
-            if (!string.IsNullOrWhiteSpace(key))
-            {
-                envValues[key] = value;
-            }
-        }
-
-        return envValues;
-    }
-
-    private static string UnquoteValue(string value)
-    {
-        if (value.Length < 2)
-        {
-            return value;
-        }
-
-        char firstCharacter = value[0];
-        char lastCharacter = value[^1];
-        bool hasMatchingQuotes =
-            firstCharacter == '"' && lastCharacter == '"' ||
-            firstCharacter == '\'' && lastCharacter == '\'';
-
-        return hasMatchingQuotes ? value[1..^1] : value;
     }
 
     private static bool TryGetString(
@@ -251,5 +280,19 @@ public sealed class DiscordBotSettingsStore
         }
 
         return ulong.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryGetSingle(
+        IReadOnlyDictionary<string, string> envValues,
+        out float value,
+        params string[] keys)
+    {
+        if (!TryGetString(envValues, out string rawValue, keys))
+        {
+            value = 0F;
+            return false;
+        }
+
+        return float.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
     }
 }

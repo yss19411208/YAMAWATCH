@@ -9,10 +9,9 @@ public sealed class MainForm : Form
     private const string NotConnectedText = "Not connected";
     private const string DetectedText = "VALORANT detected";
     private const string NotDetectedText = "VALORANT not detected";
-    private const long ImmediateStratsReleasePrivateBytes = 300L * 1024L * 1024L;
-    private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan GitUpdateRetryInterval = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan HiddenStratsOverlayRetention = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
 
     private readonly AppPaths appPaths;
     private readonly AppStateStore appStateStore;
@@ -25,7 +24,6 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer processTimer = new();
     private readonly System.Windows.Forms.Timer recordingTimer = new();
     private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
-    private readonly System.Windows.Forms.Timer stratsOverlayReleaseTimer = new();
     private readonly List<TeammateControls> teammateControls = [];
 
     private AppState appState;
@@ -54,8 +52,10 @@ public sealed class MainForm : Form
     private bool hidOnInitialShow;
     private bool stratsTogglePending;
     private bool stratsToggleInProgress;
+    private bool stratsPreloadInProgress;
     private bool gitUpdateCheckInProgress;
     private bool gitUpdateCheckedThisValorantSession;
+    private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
     private Uri? pendingUpdateUri;
@@ -95,9 +95,6 @@ public sealed class MainForm : Form
 
         stratsToggleDelayTimer.Interval = 30;
         stratsToggleDelayTimer.Tick += (_, _) => RunPendingStratsToggleAfterHotKeyRelease();
-
-        stratsOverlayReleaseTimer.Interval = (int)HiddenStratsOverlayRetention.TotalMilliseconds;
-        stratsOverlayReleaseTimer.Tick += (_, _) => ReleaseHiddenStratsOverlayIfIdle();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs eventArgs)
@@ -106,7 +103,6 @@ public sealed class MainForm : Form
         processTimer.Stop();
         recordingTimer.Stop();
         stratsToggleDelayTimer.Stop();
-        stratsOverlayReleaseTimer.Stop();
         trayIcon.Visible = false;
         DisposeStratsOverlay();
         loopbackRecorder.Dispose();
@@ -646,15 +642,20 @@ public sealed class MainForm : Form
 
     private void RefreshValorantStatus()
     {
-        bool valorantDetected = ValorantProcessMonitor.IsValorantRunning();
-        valorantStatusLabel.Text = valorantDetected ? DetectedText : NotDetectedText;
-        valorantStatusLabel.BackColor = valorantDetected
+        bool rawValorantDetected = ValorantProcessMonitor.IsValorantRunning();
+        bool valorantDetected = GetDebouncedValorantDetected(rawValorantDetected);
+        valorantStatusLabel.Text = rawValorantDetected || valorantDetected ? DetectedText : NotDetectedText;
+        valorantStatusLabel.BackColor = rawValorantDetected || valorantDetected
             ? Color.FromArgb(39, 145, 104)
             : Color.FromArgb(110, 118, 136);
 
         if (!valorantDetected && stratsOverlayForm is not null)
         {
-            DisposeStratsOverlay();
+            if (stratsOverlayForm.IsOverlayVisible)
+            {
+                stratsOverlayForm.HideOverlayKeepingPage();
+            }
+
             stratsStatusLabel.Text = "Launch VALORANT first";
             stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
         }
@@ -669,6 +670,7 @@ public sealed class MainForm : Form
             nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
             if (valorantDetected)
             {
+                PreloadStratsOverlayIfNeeded();
                 StartGitUpdateCheckIfNeeded(force: true);
             }
             _ = HandleValorantStateChangeAsync(valorantDetected);
@@ -681,10 +683,30 @@ public sealed class MainForm : Form
 
         if (valorantDetected)
         {
+            PreloadStratsOverlayIfNeeded();
             StartGitUpdateCheckIfNeeded(force: false);
         }
 
         RefreshDiscordStatusLabel();
+    }
+
+    private bool GetDebouncedValorantDetected(bool rawValorantDetected)
+    {
+        if (rawValorantDetected)
+        {
+            valorantMissingSinceUtc = null;
+            return true;
+        }
+
+        if (!lastValorantDetected)
+        {
+            valorantMissingSinceUtc = null;
+            return false;
+        }
+
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        valorantMissingSinceUtc ??= nowUtc;
+        return nowUtc - valorantMissingSinceUtc.Value < ValorantStopGracePeriod;
     }
 
     private void RefreshStatusLabels()
@@ -868,6 +890,53 @@ public sealed class MainForm : Form
         _ = ToggleStratsOverlayWhenValorantRunningAsync();
     }
 
+    private void PreloadStratsOverlayIfNeeded()
+    {
+        if (stratsPreloadInProgress || stratsOverlayForm is not null)
+        {
+            return;
+        }
+
+        stratsPreloadInProgress = true;
+        _ = PreloadStratsOverlayAsync();
+    }
+
+    private async Task PreloadStratsOverlayAsync()
+    {
+        try
+        {
+            stratsOverlayForm = new StratsOverlayForm();
+            Rectangle targetBounds = GetValorantTargetBounds();
+
+            stratsStatusLabel.Text = "Strats preloading";
+            stratsStatusLabel.BackColor = Color.FromArgb(79, 118, 214);
+            await stratsOverlayForm.PreloadAsync(targetBounds).ConfigureAwait(true);
+
+            if (!ValorantProcessMonitor.IsValorantRunning())
+            {
+                DisposeStratsOverlay();
+                stratsStatusLabel.Text = "Launch VALORANT first";
+                stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
+                return;
+            }
+
+            if (!stratsOverlayForm.IsOverlayVisible)
+            {
+                stratsStatusLabel.Text = "Strats ready";
+                stratsStatusLabel.BackColor = Color.FromArgb(39, 145, 104);
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.Runtime.InteropServices.COMException)
+        {
+            stratsStatusLabel.Text = "Strats preload failed";
+            stratsStatusLabel.BackColor = Color.FromArgb(153, 99, 53);
+        }
+        finally
+        {
+            stratsPreloadInProgress = false;
+        }
+    }
+
     private async Task ToggleStratsOverlayWhenValorantRunningAsync()
     {
         if (stratsToggleInProgress)
@@ -892,28 +961,15 @@ public sealed class MainForm : Form
 
             if (stratsOverlayForm.IsOverlayVisible)
             {
-                long privateMemoryBytes = stratsOverlayForm.GetApproximateWebViewPrivateMemoryBytes();
                 stratsOverlayForm.HideOverlayKeepingPage();
-                if (privateMemoryBytes >= ImmediateStratsReleasePrivateBytes)
-                {
-                    DisposeStratsOverlay();
-                    stratsStatusLabel.Text = "Strats unloaded";
-                    stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
-                    return;
-                }
-
-                ScheduleHiddenStratsOverlayRelease();
                 stratsStatusLabel.Text = "Strats hidden";
                 stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
                 return;
             }
 
-            stratsOverlayReleaseTimer.Stop();
-            Rectangle targetBounds = ValorantProcessMonitor.TryGetValorantWindowBounds(out Rectangle valorantBounds)
-                ? valorantBounds
-                : Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+            Rectangle targetBounds = GetValorantTargetBounds();
 
-            stratsStatusLabel.Text = "Strats loading";
+            stratsStatusLabel.Text = stratsPreloadInProgress ? "Strats finishing" : "Strats loading";
             stratsStatusLabel.BackColor = Color.FromArgb(79, 118, 214);
             await stratsOverlayForm.BringOverlayToFrontAsync(targetBounds).ConfigureAwait(true);
             stratsStatusLabel.Text = "Strats visible";
@@ -929,6 +985,13 @@ public sealed class MainForm : Form
         {
             stratsToggleInProgress = false;
         }
+    }
+
+    private static Rectangle GetValorantTargetBounds()
+    {
+        return ValorantProcessMonitor.TryGetValorantWindowBounds(out Rectangle valorantBounds)
+            ? valorantBounds
+            : Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
     }
 
     private void ScheduleStratsOverlayToggleAfterHotKeyRelease()
@@ -1080,25 +1143,6 @@ public sealed class MainForm : Form
         }
     }
 
-    private void ScheduleHiddenStratsOverlayRelease()
-    {
-        stratsOverlayReleaseTimer.Stop();
-        stratsOverlayReleaseTimer.Start();
-    }
-
-    private void ReleaseHiddenStratsOverlayIfIdle()
-    {
-        stratsOverlayReleaseTimer.Stop();
-        if (stratsOverlayForm is null || stratsOverlayForm.IsDisposed || stratsOverlayForm.IsOverlayVisible)
-        {
-            return;
-        }
-
-        DisposeStratsOverlay();
-        stratsStatusLabel.Text = "Strats unloaded";
-        stratsStatusLabel.BackColor = Color.FromArgb(110, 118, 136);
-    }
-
     private void DisposeStratsOverlay()
     {
         if (stratsOverlayForm is null)
@@ -1106,7 +1150,6 @@ public sealed class MainForm : Form
             return;
         }
 
-        stratsOverlayReleaseTimer.Stop();
         try
         {
             stratsOverlayForm.Close();

@@ -1,8 +1,4 @@
 using System.Diagnostics;
-using System.IO.Compression;
-using System.Net;
-using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
 
@@ -15,53 +11,14 @@ internal static class Program
     private const string EmbeddedExecutableResourceName = "VALOWATCH.exe";
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
-    private static readonly TimeSpan OverwolfInstallerExitTimeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan OverwolfDetectionTimeout = TimeSpan.FromMinutes(3);
-    private static readonly Uri OfficialOverwolfDownloadUri = new("https://download.overwolf.com/install/Download?utm_content=new-light&utm_source=web_app_store");
-    private static readonly Guid WintrustActionGenericVerifyV2 = new("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
-    private const uint WinTrustUiNone = 2;
-    private const uint WinTrustRevokeNone = 0;
-    private const uint WinTrustChoiceFile = 1;
-    private const uint WinTrustStateActionVerify = 1;
-    private const uint WinTrustStateActionClose = 2;
+    private static readonly (string ResourceName, string FileName)[] NativeDependencyResources =
+    [
+        ("Native/libdave.dll", "libdave.dll"),
+        ("Native/libsodium.dll", "libsodium.dll"),
+        ("Native/opus.dll", "opus.dll")
+    ];
 
     private readonly record struct InstallProgress(int Percent, string Message);
-
-    [DllImport("wintrust.dll", ExactSpelling = true, SetLastError = true)]
-    private static extern int WinVerifyTrust(
-        IntPtr windowHandle,
-        ref Guid actionId,
-        ref WinTrustData trustData);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct WinTrustFileInfo
-    {
-        public uint StructSize;
-
-        [MarshalAs(UnmanagedType.LPWStr)]
-        public string FilePath;
-
-        public IntPtr FileHandle;
-        public IntPtr KnownSubject;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct WinTrustData
-    {
-        public uint StructSize;
-        public IntPtr PolicyCallbackData;
-        public IntPtr SipClientData;
-        public uint UiChoice;
-        public uint RevocationChecks;
-        public uint UnionChoice;
-        public IntPtr FileInfoPointer;
-        public uint StateAction;
-        public IntPtr StateData;
-        public IntPtr UrlReference;
-        public uint ProvFlags;
-        public uint UiContext;
-        public IntPtr SignatureSettings;
-    }
 
     [STAThread]
     private static void Main()
@@ -132,9 +89,8 @@ internal static class Program
                 BackColor = SystemColors.Control,
                 Text =
                     "最初に確認してください\r\n" +
-                    "1. VALORANT を閉じてから実行してください。\r\n" +
-                    "2. この暫定版は Overwolf を使いません。\r\n" +
-                    "3. VALORANT を起動した後、設定 → グラフィック → 一般 を開きます。\r\n" +
+                    "1. この暫定版は外部オーバーレイ基盤を使いません。\r\n" +
+                    "2. VALORANT を起動した後、設定 → グラフィック → 一般 を開きます。\r\n" +
                     "   画面モードで「ウィンドウフルスクリーン」を選んで「適用」を押してください。\r\n\r\n" +
                     "インストール先は C:\\ 直下や Program Files を避けて、ユーザーが書き込めるフォルダーを指定してください。",
                 TabStop = false
@@ -342,17 +298,11 @@ internal static class Program
         progress.Report(new InstallProgress(14, "VALOWATCH 本体を展開しています。"));
         ExtractEmbeddedExecutable(installedExecutablePath, progress, 14, 68);
 
+        progress.Report(new InstallProgress(69, "Discord 音声 DLL を展開しています。"));
+        ExtractNativeDependencies(installDirectory);
+
         progress.Report(new InstallProgress(70, "Discord bot 設定を配置しています。"));
         EnsureEnvFiles();
-
-        if (ShouldInstallOverwolfClient())
-        {
-            progress.Report(new InstallProgress(74, "Overwolf app files を配置しています。"));
-            ExtractOverwolfAppFiles(progress, 74, 82);
-
-            progress.Report(new InstallProgress(84, "Overwolf を確認しています。"));
-            EnsureOverwolfClientInstalled(progress);
-        }
 
         progress.Report(new InstallProgress(92, "Windows 起動時の自動起動を登録しています。"));
         RegisterStartup(installedExecutablePath);
@@ -363,13 +313,42 @@ internal static class Program
 
     private static string GetDefaultInstallDirectory()
     {
-        string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localAppDataDirectory))
+        return Path.Combine(GetValowatchWorkspaceRoot(), "app");
+    }
+
+    private static string GetValowatchWorkspaceRoot()
+    {
+        if (TryFindWorkspaceRoot(AppContext.BaseDirectory, out string workspaceRoot))
         {
-            return Path.Combine(AppContext.BaseDirectory, "VALOWATCH");
+            return workspaceRoot;
         }
 
-        return Path.Combine(localAppDataDirectory, "VALOWATCH", "app");
+        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        return string.IsNullOrWhiteSpace(documentsDirectory)
+            ? Path.Combine(AppContext.BaseDirectory, "VALOWATCH")
+            : Path.Combine(documentsDirectory, "VALOWATCH");
+    }
+
+    private static bool TryFindWorkspaceRoot(string startDirectory, out string workspaceRoot)
+    {
+        DirectoryInfo? currentDirectory = new(startDirectory);
+        while (currentDirectory is not null)
+        {
+            string installerDirectory = Path.Combine(currentDirectory.FullName, "installer");
+            string sourceDirectory = Path.Combine(currentDirectory.FullName, "src");
+            if ((currentDirectory.Name.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase) && Directory.Exists(installerDirectory)) ||
+                File.Exists(Path.Combine(currentDirectory.FullName, "VALOWATCH.slnx")) ||
+                (Directory.Exists(installerDirectory) && Directory.Exists(sourceDirectory)))
+            {
+                workspaceRoot = currentDirectory.FullName;
+                return true;
+            }
+
+            currentDirectory = currentDirectory.Parent;
+        }
+
+        workspaceRoot = string.Empty;
+        return false;
     }
 
     private static string NormalizeInstallDirectoryPath(string rawPath)
@@ -525,20 +504,48 @@ internal static class Program
             "VALOWATCH 本体を展開しています。");
     }
 
+    private static void ExtractNativeDependencies(string installDirectory)
+    {
+        foreach ((string resourceName, string fileName) in NativeDependencyResources)
+        {
+            string targetFilePath = Path.Combine(installDirectory, fileName);
+            ExtractEmbeddedFile(resourceName, targetFilePath);
+        }
+    }
+
+    private static void ExtractEmbeddedFile(string resourceName, string targetFilePath)
+    {
+        using Stream? resourceStream = typeof(Program).Assembly.GetManifestResourceStream(resourceName);
+        if (resourceStream is null)
+        {
+            throw new InvalidOperationException($"Embedded file was not found: {resourceName}");
+        }
+
+        using FileStream targetStream = new(
+            targetFilePath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None);
+        resourceStream.CopyTo(targetStream);
+    }
+
     private static void EnsureEnvFiles()
     {
-        string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string configDirectory = string.IsNullOrWhiteSpace(localAppDataDirectory)
-            ? Path.Combine(AppContext.BaseDirectory, "VALOWATCH", "config")
-            : Path.Combine(localAppDataDirectory, "VALOWATCH", "config");
+        string workspaceRoot = GetValowatchWorkspaceRoot();
+        string configDirectory = Path.Combine(workspaceRoot, "config");
+        string installerEnvDirectory = Path.Combine(workspaceRoot, "installer");
 
         Directory.CreateDirectory(configDirectory);
+        Directory.CreateDirectory(installerEnvDirectory);
 
-        string envPath = Path.Combine(configDirectory, ".env");
-        string envExamplePath = Path.Combine(configDirectory, ".env.example");
+        string envPath = Path.Combine(installerEnvDirectory, ".env");
+        string envExamplePath = Path.Combine(installerEnvDirectory, ".env.example");
         string installerSideEnvPath = Path.Combine(AppContext.BaseDirectory, ".env");
         string? installerSideEnvText = TryReadTextFile(installerSideEnvPath);
         string? embeddedEnvText = ReadEmbeddedEnvText();
+        string? preferredEnvText = !string.IsNullOrWhiteSpace(installerSideEnvText)
+            ? installerSideEnvText
+            : embeddedEnvText;
 
         string[] defaultEnvLines =
         [
@@ -546,12 +553,16 @@ internal static class Program
             "DISCORD_BOT_TOKEN=PASTE_BOT_TOKEN_HERE",
             "DISCORD_GUILD_ID=0",
             "DISCORD_VOICE_CHANNEL_ID=0",
-            "DISCORD_STREAM_PC_AUDIO=true",
+            "DISCORD_TEXT_CHANNEL_ID=0",
+            "DISCORD_VALORANT_OPENED_MESSAGE=VALORANTを開きました",
+            "DISCORD_STREAM_MIC_AUDIO=true",
+            "DISCORD_MIC_DEVICE_NAME=",
+            "DISCORD_MIC_VOLUME=0.85",
+            "DISCORD_MIC_NOISE_GATE=0",
             "DISCORD_TRY_SCREEN_SHARE=false",
-            "VALOWATCH_INSTALL_OVERWOLF=true",
             "VALOWATCH_UPDATE_CHECK_ENABLED=true",
             "VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH",
-            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.0",
+            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.1",
             "VALOWATCH_UPDATE_BRANCH=main",
             "VALOWATCH_UPDATE_CURRENT_COMMIT=",
             "VALOWATCH_GITHUB_TOKEN="
@@ -564,93 +575,133 @@ internal static class Program
 
         if (File.Exists(envPath))
         {
+            if (!string.IsNullOrWhiteSpace(preferredEnvText))
+            {
+                MergeEnvFile(envPath, preferredEnvText);
+            }
+            else
+            {
+                EnsureEnvFileContainsMissingLines(envPath, defaultEnvLines);
+            }
+
+            return;
+        }
+    }
+
+    private static void MergeEnvFile(string targetEnvPath, string sourceEnvText)
+    {
+        (List<string> sourceKeys, Dictionary<string, string> sourceValues) = ReadEnvAssignments(sourceEnvText);
+        if (sourceKeys.Count == 0)
+        {
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(installerSideEnvText))
+        string[] existingLines = File.ReadAllLines(targetEnvPath, Encoding.UTF8);
+        List<string> mergedLines = new(existingLines.Length + sourceKeys.Count + 1);
+        HashSet<string> updatedKeys = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string existingLine in existingLines)
         {
-            File.WriteAllText(envPath, installerSideEnvText, Encoding.UTF8);
-            return;
+            if (TryParseEnvAssignment(existingLine, out string existingKey, out _) &&
+                sourceValues.TryGetValue(existingKey, out string? sourceValue))
+            {
+                mergedLines.Add($"{existingKey}={sourceValue ?? string.Empty}");
+                updatedKeys.Add(existingKey);
+                continue;
+            }
+
+            mergedLines.Add(existingLine);
         }
 
-        if (!string.IsNullOrWhiteSpace(embeddedEnvText))
+        foreach (string sourceKey in sourceKeys)
         {
-            File.WriteAllText(envPath, embeddedEnvText, Encoding.UTF8);
-            return;
-        }
-
-        File.WriteAllLines(envPath, defaultEnvLines);
-    }
-
-    private static bool ShouldInstallOverwolfClient()
-    {
-        string installerSideEnvPath = Path.Combine(AppContext.BaseDirectory, ".env");
-        string? configuredValue = ReadInstallerSideEnvValue(installerSideEnvPath, "VALOWATCH_INSTALL_OVERWOLF")
-            ?? ReadEmbeddedEnvValue("VALOWATCH_INSTALL_OVERWOLF");
-        if (string.IsNullOrWhiteSpace(configuredValue))
-        {
-            return true;
-        }
-
-        string normalizedValue = configuredValue.Trim();
-        if (bool.TryParse(normalizedValue, out bool parsedValue))
-        {
-            return parsedValue;
-        }
-
-        return !normalizedValue.Equals("0", StringComparison.OrdinalIgnoreCase)
-            && !normalizedValue.Equals("no", StringComparison.OrdinalIgnoreCase)
-            && !normalizedValue.Equals("off", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? ReadInstallerSideEnvValue(string envPath, string key)
-    {
-        string? envText = TryReadTextFile(envPath);
-        if (string.IsNullOrWhiteSpace(envText))
-        {
-            return null;
-        }
-
-        return ReadEnvValue(envText.Split(["\r\n", "\n"], StringSplitOptions.None), key);
-    }
-
-    private static string? ReadEmbeddedEnvValue(string key)
-    {
-        string? embeddedEnvText = ReadEmbeddedEnvText();
-        if (string.IsNullOrWhiteSpace(embeddedEnvText))
-        {
-            return null;
-        }
-
-        return ReadEnvValue(embeddedEnvText.Split(["\r\n", "\n"], StringSplitOptions.None), key);
-    }
-
-    private static string? ReadEnvValue(IEnumerable<string> envLines, string key)
-    {
-        foreach (string rawLine in envLines)
-        {
-            string line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith('#'))
+            if (updatedKeys.Contains(sourceKey))
             {
                 continue;
             }
 
-            int separatorIndex = line.IndexOf('=');
-            if (separatorIndex <= 0)
-            {
-                continue;
-            }
-
-            string candidateKey = line[..separatorIndex].Trim();
-            if (!candidateKey.Equals(key, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            return line[(separatorIndex + 1)..].Trim();
+            mergedLines.Add($"{sourceKey}={sourceValues[sourceKey]}");
         }
 
-        return null;
+        File.WriteAllLines(targetEnvPath, mergedLines, Encoding.UTF8);
+    }
+
+    private static void EnsureEnvFileContainsMissingLines(string targetEnvPath, IEnumerable<string> defaultEnvLines)
+    {
+        string existingEnvText = File.ReadAllText(targetEnvPath, Encoding.UTF8);
+        (_, Dictionary<string, string> existingValues) = ReadEnvAssignments(existingEnvText);
+
+        List<string> missingLines = [];
+        foreach (string defaultEnvLine in defaultEnvLines)
+        {
+            if (!TryParseEnvAssignment(defaultEnvLine, out string defaultKey, out _))
+            {
+                continue;
+            }
+
+            if (!existingValues.ContainsKey(defaultKey))
+            {
+                missingLines.Add(defaultEnvLine);
+            }
+        }
+
+        if (missingLines.Count == 0)
+        {
+            return;
+        }
+
+        using StreamWriter writer = File.AppendText(targetEnvPath);
+        writer.WriteLine();
+        foreach (string missingLine in missingLines)
+        {
+            writer.WriteLine(missingLine);
+        }
+    }
+
+    private static (List<string> Keys, Dictionary<string, string> Values) ReadEnvAssignments(string envText)
+    {
+        Dictionary<string, string> values = new(StringComparer.OrdinalIgnoreCase);
+        List<string> keys = [];
+
+        foreach (string rawLine in envText.Split(["\r\n", "\n"], StringSplitOptions.None))
+        {
+            if (!TryParseEnvAssignment(rawLine, out string key, out string value))
+            {
+                continue;
+            }
+
+            if (!values.ContainsKey(key))
+            {
+                keys.Add(key);
+            }
+
+            values[key] = value;
+        }
+
+        return (keys, values);
+    }
+
+    private static bool TryParseEnvAssignment(string rawLine, out string key, out string value)
+    {
+        string line = rawLine.Trim();
+        if (line.Length == 0 || line.StartsWith('#'))
+        {
+            key = string.Empty;
+            value = string.Empty;
+            return false;
+        }
+
+        int separatorIndex = line.IndexOf('=');
+        if (separatorIndex <= 0)
+        {
+            key = string.Empty;
+            value = string.Empty;
+            return false;
+        }
+
+        key = line[..separatorIndex].Trim();
+        value = line[(separatorIndex + 1)..].Trim();
+        return key.Length > 0;
     }
 
     private static string? TryReadTextFile(string filePath)
@@ -677,386 +728,6 @@ internal static class Program
 
         using StreamReader reader = new(resourceStream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         return reader.ReadToEnd();
-    }
-
-    private static void ExtractOverwolfAppFiles(IProgress<InstallProgress> progress, int startPercent, int endPercent)
-    {
-        string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string overwolfAppDirectory = string.IsNullOrWhiteSpace(localAppDataDirectory)
-            ? Path.Combine(AppContext.BaseDirectory, "VALOWATCH", "overwolf", "VALOWATCH")
-            : Path.Combine(localAppDataDirectory, "VALOWATCH", "overwolf", "VALOWATCH");
-
-        Directory.CreateDirectory(overwolfAppDirectory);
-
-        string[] overwolfResourceNames = typeof(Program).Assembly.GetManifestResourceNames()
-            .Where(resourceName => resourceName.StartsWith("OverwolfApp/", StringComparison.Ordinal))
-            .ToArray();
-
-        for (int resourceIndex = 0; resourceIndex < overwolfResourceNames.Length; resourceIndex++)
-        {
-            const string resourcePrefix = "OverwolfApp/";
-            string resourceName = overwolfResourceNames[resourceIndex];
-
-            string relativeResourcePath = resourceName[resourcePrefix.Length..].Replace('/', Path.DirectorySeparatorChar);
-            string targetPath = Path.Combine(overwolfAppDirectory, relativeResourcePath);
-            string? targetDirectory = Path.GetDirectoryName(targetPath);
-            if (!string.IsNullOrWhiteSpace(targetDirectory))
-            {
-                Directory.CreateDirectory(targetDirectory);
-            }
-
-            using Stream? resourceStream = typeof(Program).Assembly.GetManifestResourceStream(resourceName);
-            if (resourceStream is null)
-            {
-                continue;
-            }
-
-            using FileStream targetStream = new(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            resourceStream.CopyTo(targetStream);
-
-            int percent = CalculateStepPercent(startPercent, endPercent, resourceIndex + 1, overwolfResourceNames.Length);
-            progress.Report(new InstallProgress(percent, "Overwolf app files を配置しています。"));
-        }
-    }
-
-    private static void EnsureOverwolfClientInstalled(IProgress<InstallProgress> progress)
-    {
-        if (IsOverwolfInstalled())
-        {
-            progress.Report(new InstallProgress(90, "Overwolf は既にインストールされています。"));
-            return;
-        }
-
-        try
-        {
-            DeleteStaleOverwolfInstallerDownload();
-            string installerPath = DownloadOfficialOverwolfInstaller(progress, 84, 92);
-            ValidateDownloadedInstaller(installerPath);
-            bool installerExited = RunOfficialOverwolfInstaller(installerPath);
-            if (!installerExited)
-            {
-                MessageBox.Show(
-                    "The official Overwolf installer is still running.\n\nFinish that installer window to complete Overwolf installation.",
-                    "VALOWATCH Setup",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
-            }
-
-            WaitForOverwolfInstallation();
-        }
-        catch (Exception exception) when (exception is HttpRequestException or IOException or InvalidDataException or InvalidOperationException or TaskCanceledException or System.ComponentModel.Win32Exception)
-        {
-            MessageBox.Show(
-                $"Overwolf could not be downloaded or started.\n\nPlease download it manually:\n{OfficialOverwolfDownloadUri}\n\n{exception.Message}",
-                "VALOWATCH Setup",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-        }
-    }
-
-    private static bool IsOverwolfInstalled()
-    {
-        string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string programFilesDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        string programFilesX86Directory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-
-        string[] candidatePaths =
-        [
-            Path.Combine(localAppDataDirectory, "Overwolf", "Overwolf.exe"),
-            Path.Combine(localAppDataDirectory, "Overwolf", "OverwolfLauncher.exe"),
-            Path.Combine(programFilesDirectory, "Overwolf", "Overwolf.exe"),
-            Path.Combine(programFilesDirectory, "Overwolf", "OverwolfLauncher.exe"),
-            Path.Combine(programFilesX86Directory, "Overwolf", "Overwolf.exe"),
-            Path.Combine(programFilesX86Directory, "Overwolf", "OverwolfLauncher.exe")
-        ];
-
-        if (candidatePaths.Any(File.Exists))
-        {
-            return true;
-        }
-
-        return RegistryContainsOverwolf(Registry.CurrentUser)
-            || RegistryContainsOverwolf(Registry.LocalMachine);
-    }
-
-    private static bool RegistryContainsOverwolf(RegistryKey registryRoot)
-    {
-        string[] uninstallRegistryPaths =
-        [
-            @"Software\Microsoft\Windows\CurrentVersion\Uninstall",
-            @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-        ];
-
-        foreach (string uninstallRegistryPath in uninstallRegistryPaths)
-        {
-            using RegistryKey? uninstallKey = registryRoot.OpenSubKey(uninstallRegistryPath, false);
-            if (uninstallKey is null)
-            {
-                continue;
-            }
-
-            foreach (string subKeyName in uninstallKey.GetSubKeyNames())
-            {
-                using RegistryKey? appKey = uninstallKey.OpenSubKey(subKeyName, false);
-                string? displayName = appKey?.GetValue("DisplayName") as string;
-                if (displayName is not null && displayName.Contains("Overwolf", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private static void DeleteStaleOverwolfInstallerDownload()
-    {
-        string setupDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
-        string staleInstallerPath = Path.Combine(setupDirectory, "OverwolfInstaller.exe");
-        string staleDecompressedPath = $"{staleInstallerPath}.decompressed";
-
-        DeleteFileIfExists(staleInstallerPath);
-        DeleteFileIfExists(staleDecompressedPath);
-    }
-
-    private static void DeleteFileIfExists(string filePath)
-    {
-        if (!File.Exists(filePath))
-        {
-            return;
-        }
-
-        try
-        {
-            File.Delete(filePath);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            // The previous broken download is harmless if it cannot be deleted.
-        }
-    }
-
-    private static string DownloadOfficialOverwolfInstaller(
-        IProgress<InstallProgress> progress,
-        int startPercent,
-        int endPercent)
-    {
-        string setupDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
-        Directory.CreateDirectory(setupDirectory);
-
-        string installerFileName = $"OverwolfInstaller-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}.exe";
-        string installerPath = Path.Combine(setupDirectory, installerFileName);
-
-        using HttpClientHandler httpClientHandler = new()
-        {
-            AutomaticDecompression = DecompressionMethods.GZip
-                | DecompressionMethods.Deflate
-                | DecompressionMethods.Brotli
-        };
-
-        using HttpClient httpClient = new(httpClientHandler)
-        {
-            Timeout = TimeSpan.FromMinutes(2)
-        };
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VALOWATCH-Setup/1.0");
-
-        using (HttpResponseMessage response = httpClient
-                   .GetAsync(OfficialOverwolfDownloadUri, HttpCompletionOption.ResponseHeadersRead)
-                   .GetAwaiter()
-                   .GetResult())
-        {
-            response.EnsureSuccessStatusCode();
-
-            using Stream downloadStream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
-            using FileStream installerStream = new(installerPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            CopyStreamWithProgress(
-                downloadStream,
-                installerStream,
-                progress,
-                startPercent,
-                endPercent,
-                "Overwolf installer をダウンロードしています。",
-                response.Content.Headers.ContentLength);
-        }
-
-        DecompressGzipFileInPlaceIfNeeded(installerPath);
-
-        return installerPath;
-    }
-
-    private static void DecompressGzipFileInPlaceIfNeeded(string installerPath)
-    {
-        using (FileStream sniffStream = new(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        {
-            if (sniffStream.Length < 2)
-            {
-                return;
-            }
-
-            int firstByte = sniffStream.ReadByte();
-            int secondByte = sniffStream.ReadByte();
-            if (firstByte != 0x1F || secondByte != 0x8B)
-            {
-                return;
-            }
-        }
-
-        string decompressedPath = $"{installerPath}.decompressed";
-        using (FileStream compressedStream = new(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-        using (GZipStream gzipStream = new(compressedStream, CompressionMode.Decompress))
-        using (FileStream decompressedStream = new(decompressedPath, FileMode.Create, FileAccess.Write, FileShare.None))
-        {
-            gzipStream.CopyTo(decompressedStream);
-        }
-
-        File.Copy(decompressedPath, installerPath, overwrite: true);
-        File.Delete(decompressedPath);
-    }
-
-    private static void ValidateDownloadedInstaller(string installerPath)
-    {
-        FileInfo installerFile = new(installerPath);
-        if (!installerFile.Exists || installerFile.Length < 64 * 1024)
-        {
-            throw new InvalidDataException("The downloaded Overwolf installer is too small to be a valid Windows installer.");
-        }
-
-        using FileStream installerStream = new(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-
-        Span<byte> dosHeaderBytes = stackalloc byte[64];
-        installerStream.ReadExactly(dosHeaderBytes);
-        if (dosHeaderBytes[0] != 'M' || dosHeaderBytes[1] != 'Z')
-        {
-            throw new InvalidDataException("The downloaded Overwolf installer is not a Windows PE executable.");
-        }
-
-        int peHeaderOffset = BitConverter.ToInt32(dosHeaderBytes[0x3C..0x40]);
-        if (peHeaderOffset < 64 || peHeaderOffset > installerFile.Length - 24)
-        {
-            throw new InvalidDataException("The downloaded Overwolf installer has an invalid PE header offset.");
-        }
-
-        installerStream.Position = peHeaderOffset;
-
-        Span<byte> peHeaderBytes = stackalloc byte[24];
-        installerStream.ReadExactly(peHeaderBytes);
-        if (peHeaderBytes[0] != 'P' || peHeaderBytes[1] != 'E' || peHeaderBytes[2] != 0 || peHeaderBytes[3] != 0)
-        {
-            throw new InvalidDataException("The downloaded Overwolf installer does not contain a valid PE signature.");
-        }
-
-        ushort machineType = BitConverter.ToUInt16(peHeaderBytes[4..6]);
-        if (machineType is not (0x014C or 0x8664 or 0xAA64))
-        {
-            throw new InvalidDataException($"The downloaded Overwolf installer targets an unsupported CPU type: 0x{machineType:X4}.");
-        }
-
-        if (!VerifyAuthenticodeSignature(installerPath))
-        {
-            throw new InvalidDataException("The downloaded Overwolf installer does not have a valid Authenticode signature.");
-        }
-    }
-
-    private static bool RunOfficialOverwolfInstaller(string installerPath)
-    {
-        ProcessStartInfo processStartInfo = new()
-        {
-            FileName = installerPath,
-            UseShellExecute = true,
-            WorkingDirectory = Path.GetDirectoryName(installerPath) ?? AppContext.BaseDirectory
-        };
-
-        using Process installerProcess = StartProcessWithRetry(processStartInfo)
-            ?? throw new InvalidOperationException("The official Overwolf installer process could not be started.");
-
-        return installerProcess.WaitForExit((int)OverwolfInstallerExitTimeout.TotalMilliseconds);
-    }
-
-    private static Process? StartProcessWithRetry(ProcessStartInfo processStartInfo)
-    {
-        const int maxAttemptCount = 5;
-
-        for (int attemptNumber = 1; attemptNumber <= maxAttemptCount; attemptNumber++)
-        {
-            try
-            {
-                return Process.Start(processStartInfo);
-            }
-            catch (System.ComponentModel.Win32Exception) when (attemptNumber < maxAttemptCount)
-            {
-                Thread.Sleep(1000);
-            }
-        }
-
-        return Process.Start(processStartInfo);
-    }
-
-    private static void WaitForOverwolfInstallation()
-    {
-        DateTime deadlineUtc = DateTime.UtcNow.Add(OverwolfDetectionTimeout);
-        while (DateTime.UtcNow < deadlineUtc)
-        {
-            if (IsOverwolfInstalled())
-            {
-                return;
-            }
-
-            Thread.Sleep(2000);
-        }
-
-        MessageBox.Show(
-            "The official Overwolf installer finished, but VALOWATCH could not confirm that Overwolf is installed.\n\nIf Overwolf is open, you can continue. If not, run the Overwolf installer again.",
-            "VALOWATCH Setup",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Warning);
-    }
-
-    private static bool VerifyAuthenticodeSignature(string filePath)
-    {
-        WinTrustFileInfo fileInfo = new()
-        {
-            StructSize = (uint)Marshal.SizeOf<WinTrustFileInfo>(),
-            FilePath = filePath,
-            FileHandle = IntPtr.Zero,
-            KnownSubject = IntPtr.Zero
-        };
-
-        IntPtr fileInfoPointer = Marshal.AllocHGlobal(Marshal.SizeOf<WinTrustFileInfo>());
-        try
-        {
-            Marshal.StructureToPtr(fileInfo, fileInfoPointer, false);
-
-            WinTrustData trustData = new()
-            {
-                StructSize = (uint)Marshal.SizeOf<WinTrustData>(),
-                PolicyCallbackData = IntPtr.Zero,
-                SipClientData = IntPtr.Zero,
-                UiChoice = WinTrustUiNone,
-                RevocationChecks = WinTrustRevokeNone,
-                UnionChoice = WinTrustChoiceFile,
-                FileInfoPointer = fileInfoPointer,
-                StateAction = WinTrustStateActionVerify,
-                StateData = IntPtr.Zero,
-                UrlReference = IntPtr.Zero,
-                ProvFlags = 0,
-                UiContext = 0,
-                SignatureSettings = IntPtr.Zero
-            };
-
-            Guid actionId = WintrustActionGenericVerifyV2;
-            int result = WinVerifyTrust(IntPtr.Zero, ref actionId, ref trustData);
-
-            trustData.StateAction = WinTrustStateActionClose;
-            _ = WinVerifyTrust(IntPtr.Zero, ref actionId, ref trustData);
-
-            return result == 0;
-        }
-        finally
-        {
-            Marshal.DestroyStructure<WinTrustFileInfo>(fileInfoPointer);
-            Marshal.FreeHGlobal(fileInfoPointer);
-        }
     }
 
     private static void StopRunningInstalledApp(string installedExecutablePath)
@@ -1174,19 +845,6 @@ internal static class Program
         {
             return 0;
         }
-    }
-
-    private static int CalculateStepPercent(int startPercent, int endPercent, int completedCount, int totalCount)
-    {
-        if (totalCount <= 0)
-        {
-            return endPercent;
-        }
-
-        return Math.Clamp(
-            startPercent + (endPercent - startPercent) * completedCount / totalCount,
-            startPercent,
-            endPercent);
     }
 
     private static string FormatByteCount(long byteCount)

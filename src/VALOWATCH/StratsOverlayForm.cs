@@ -1,7 +1,5 @@
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace VALOWATCH;
 
@@ -26,14 +24,22 @@ public sealed class StratsOverlayForm : Form
 
     public bool IsOverlayVisible { get; private set; }
 
+    public async Task PreloadAsync(Rectangle targetBounds)
+    {
+        ApplyTargetBounds(targetBounds);
+        lastOverlayBounds = Bounds;
+        await EnsureWebViewReadyAsync().ConfigureAwait(true);
+    }
+
     public async Task BringOverlayToFrontAsync(Rectangle targetBounds)
     {
         ApplyTargetBounds(targetBounds);
         lastOverlayBounds = Bounds;
 
         await EnsureWebViewReadyAsync().ConfigureAwait(true);
-        ResumeWebViewIfSuspended();
+        errorLabel.Visible = false;
         webView.Visible = true;
+        webView.BringToFront();
 
         NativeMethods.ShowWindow(Handle, NativeMethods.SwShownoactivate);
         IsOverlayVisible = true;
@@ -44,41 +50,8 @@ public sealed class StratsOverlayForm : Form
     public void HideOverlayKeepingPage()
     {
         topMostPulseTimer.Stop();
-        webView.Visible = false;
         Hide();
         IsOverlayVisible = false;
-        _ = SuspendWebViewAsync();
-    }
-
-    public long GetApproximateWebViewPrivateMemoryBytes()
-    {
-        CoreWebView2? coreWebView = webView.CoreWebView2;
-        if (coreWebView is null)
-        {
-            return 0;
-        }
-
-        long totalPrivateBytes = 0;
-        try
-        {
-            foreach (CoreWebView2ProcessInfo processInfo in coreWebView.Environment.GetProcessInfos())
-            {
-                try
-                {
-                    using Process webViewProcess = Process.GetProcessById(processInfo.ProcessId);
-                    totalPrivateBytes += webViewProcess.PrivateMemorySize64;
-                }
-                catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception)
-                {
-                }
-            }
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or COMException)
-        {
-            return 0;
-        }
-
-        return totalPrivateBytes;
     }
 
     protected override bool ShowWithoutActivation => true;
@@ -167,38 +140,6 @@ public sealed class StratsOverlayForm : Form
 
         webViewInitializationTask ??= InitializeWebViewAsync();
         return webViewInitializationTask;
-    }
-
-    private void ResumeWebViewIfSuspended()
-    {
-        CoreWebView2? coreWebView = webView.CoreWebView2;
-        if (coreWebView is null || !coreWebView.IsSuspended)
-        {
-            return;
-        }
-
-        coreWebView.Resume();
-    }
-
-    private async Task SuspendWebViewAsync()
-    {
-        CoreWebView2? coreWebView = webView.CoreWebView2;
-        if (coreWebView is null || coreWebView.IsSuspended || IsOverlayVisible)
-        {
-            return;
-        }
-
-        try
-        {
-            await coreWebView.TrySuspendAsync().ConfigureAwait(true);
-        }
-        catch (System.Runtime.InteropServices.COMException)
-        {
-            // WebView2 only allows suspension once the controller is invisible.
-        }
-        catch (InvalidOperationException)
-        {
-        }
     }
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs eventArgs)
