@@ -116,14 +116,15 @@ Microsoft は `Run` レジストリキーのプログラムがユーザーログ
 - GitHub Releases latest API による最新公開リリース確認
 - release が無い場合の branch 最新commit確認
 - 通信失敗時の5分間隔再試行
-- 更新がある場合だけ通知
+- GitHub Release の `VALOWATCH_Setup.exe` asset が新しい場合の自動ダウンロード
+- silent installer による無人更新
 
 `.env` のキー:
 
 ```dotenv
 VALOWATCH_UPDATE_CHECK_ENABLED=true
 VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH
-VALOWATCH_UPDATE_CURRENT_VERSION=0.1.1
+VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2
 VALOWATCH_UPDATE_BRANCH=main
 VALOWATCH_UPDATE_CURRENT_COMMIT=
 VALOWATCH_GITHUB_TOKEN=
@@ -132,6 +133,8 @@ VALOWATCH_GITHUB_TOKEN=
 注意:
 
 公開リポジトリなら `VALOWATCH_GITHUB_TOKEN` は空で構いません。非公開リポジトリを確認する場合だけ、読み取り権限のある token が必要です。
+
+自動更新は `.exe` の release asset のみ実行します。branch zip はソースコードなので、自動実行対象にはしません。
 
 ## Phase 6: 後回し
 

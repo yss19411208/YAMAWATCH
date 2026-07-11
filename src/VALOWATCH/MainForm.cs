@@ -19,6 +19,7 @@ public sealed class MainForm : Form
     private readonly GoogleDriveUploader googleDriveUploader;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
     private readonly GitUpdateChecker gitUpdateChecker;
+    private readonly GitAutoUpdater gitAutoUpdater;
     private readonly StartupService startupService;
     private readonly bool disableDiscordAutomation;
     private readonly System.Windows.Forms.Timer processTimer = new();
@@ -67,6 +68,7 @@ public sealed class MainForm : Form
         GoogleDriveUploader googleDriveUploader,
         DiscordBotVoiceRelay discordBotVoiceRelay,
         GitUpdateChecker gitUpdateChecker,
+        GitAutoUpdater gitAutoUpdater,
         StartupService startupService,
         bool disableDiscordAutomation)
     {
@@ -76,6 +78,7 @@ public sealed class MainForm : Form
         this.googleDriveUploader = googleDriveUploader;
         this.discordBotVoiceRelay = discordBotVoiceRelay;
         this.gitUpdateChecker = gitUpdateChecker;
+        this.gitAutoUpdater = gitAutoUpdater;
         this.startupService = startupService;
         this.disableDiscordAutomation = disableDiscordAutomation;
         appState = appStateStore.Load();
@@ -820,6 +823,20 @@ public sealed class MainForm : Form
         }
     }
 
+    private void WriteUpdateLog(string message, Exception? exception = null)
+    {
+        try
+        {
+            string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
+            string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
+            File.AppendAllText(logFilePath, $"{DateTimeOffset.Now:O} [Update] {message}{exceptionText}{Environment.NewLine}");
+        }
+        catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
     private void RestoreFromTray()
     {
         ShowInTaskbar = true;
@@ -1110,14 +1127,31 @@ public sealed class MainForm : Form
             {
                 gitUpdateCheckedThisValorantSession = true;
                 pendingUpdateUri = updateResult.DownloadUri ?? updateResult.ReleaseUri;
-                string latestVersionText = string.IsNullOrWhiteSpace(updateResult.LatestVersion)
-                    ? "new version"
-                    : updateResult.LatestVersion;
-                trayIcon.ShowBalloonTip(
-                    8000,
-                    "VALOWATCH update available",
-                    $"Latest: {latestVersionText}\nCurrent: {updateResult.CurrentVersion}\nClick to open the release.",
-                    ToolTipIcon.Info);
+                WriteUpdateLog(
+                    $"Update found. Current: {updateResult.CurrentVersion}. Latest: {updateResult.LatestVersion}. " +
+                    $"Download: {updateResult.DownloadUri}.");
+
+                GitAutoUpdateResult autoUpdateResult = await gitAutoUpdater
+                    .DownloadAndStartInstallerAsync(updateResult, CancellationToken.None)
+                    .ConfigureAwait(true);
+
+                if (autoUpdateResult.StartedInstaller)
+                {
+                    WriteUpdateLog("Silent installer was started. Exiting current VALOWATCH process for replacement.");
+                    BeginInvoke((MethodInvoker)(() =>
+                    {
+                        trayIcon.Visible = false;
+                        Application.Exit();
+                    }));
+                    return;
+                }
+
+                WriteUpdateLog(
+                    $"Auto update did not start. Status: {autoUpdateResult.Status}. Message: {autoUpdateResult.Message}.");
+                if (autoUpdateResult.ShouldRetry)
+                {
+                    nextGitUpdateRetryAtUtc = DateTimeOffset.UtcNow.Add(GitUpdateRetryInterval);
+                }
                 return;
             }
 

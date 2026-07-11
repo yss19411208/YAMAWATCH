@@ -46,6 +46,7 @@ static class Program
             new GoogleDriveUploader(appPaths),
             new DiscordBotVoiceRelay(new DiscordBotSettingsStore(appPaths), appPaths),
             new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
+            new GitAutoUpdater(new GitUpdateSettingsStore(appPaths), appPaths),
             new StartupService(),
             disableDiscordAutomation));
 

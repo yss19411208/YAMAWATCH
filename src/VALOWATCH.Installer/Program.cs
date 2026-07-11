@@ -19,12 +19,88 @@ internal static class Program
     ];
 
     private readonly record struct InstallProgress(int Percent, string Message);
+    private sealed record InstallerOptions(
+        bool Silent,
+        string? InstallDirectory,
+        bool StartAfterInstall,
+        bool RegisterStartup);
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        InstallerOptions options = ParseInstallerOptions(args);
+        if (options.Silent)
+        {
+            Environment.ExitCode = RunSilentInstallation(options);
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
         Application.Run(new SetupForm());
+    }
+
+    private static InstallerOptions ParseInstallerOptions(IReadOnlyList<string> args)
+    {
+        bool silent = false;
+        bool startAfterInstall = true;
+        bool registerStartup = true;
+        string? installDirectory = null;
+
+        for (int argumentIndex = 0; argumentIndex < args.Count; argumentIndex++)
+        {
+            string argument = args[argumentIndex];
+            if (IsOption(argument, "--silent", "/silent", "/s", "--quiet", "/quiet"))
+            {
+                silent = true;
+                continue;
+            }
+
+            if (IsOption(argument, "--no-start", "/no-start"))
+            {
+                startAfterInstall = false;
+                continue;
+            }
+
+            if (IsOption(argument, "--no-startup", "/no-startup"))
+            {
+                registerStartup = false;
+                continue;
+            }
+
+            const string installDirectoryPrefix = "--install-dir=";
+            if (argument.StartsWith(installDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                installDirectory = argument[installDirectoryPrefix.Length..];
+                continue;
+            }
+
+            if (IsOption(argument, "--install-dir", "/install-dir") && argumentIndex + 1 < args.Count)
+            {
+                installDirectory = args[++argumentIndex];
+            }
+        }
+
+        return new InstallerOptions(silent, installDirectory, startAfterInstall, registerStartup);
+    }
+
+    private static bool IsOption(string argument, params string[] optionNames)
+    {
+        return optionNames.Any(optionName => string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static void WriteInstallerLog(string message, Exception? exception = null)
+    {
+        try
+        {
+            string logDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
+            Directory.CreateDirectory(logDirectory);
+            string logFilePath = Path.Combine(logDirectory, "VALOWATCH_Setup.log");
+            string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
+            File.AppendAllText(logFilePath, $"{DateTimeOffset.Now:O} [Setup] {message}{exceptionText}{Environment.NewLine}");
+        }
+        catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     private sealed class SetupForm : Form
@@ -238,7 +314,11 @@ internal static class Program
 
             try
             {
-                await Task.Run(() => RunInstallation(selectedInstallDirectory, progress));
+                await Task.Run(() => RunInstallation(
+                    selectedInstallDirectory,
+                    progress,
+                    startAfterInstall: true,
+                    registerStartup: true));
                 ReportProgress(new InstallProgress(100, "インストールが完了しました。VALOWATCH を起動しています。"));
                 MessageBox.Show(
                     this,
@@ -284,7 +364,32 @@ internal static class Program
         }
     }
 
-    private static void RunInstallation(string installDirectory, IProgress<InstallProgress> progress)
+    private static int RunSilentInstallation(InstallerOptions options)
+    {
+        string installDirectory = string.IsNullOrWhiteSpace(options.InstallDirectory)
+            ? GetDefaultInstallDirectory()
+            : options.InstallDirectory;
+        InlineProgress progress = new(progressValue =>
+            WriteInstallerLog($"{progressValue.Percent}% {progressValue.Message}"));
+
+        try
+        {
+            RunInstallation(installDirectory, progress, options.StartAfterInstall, options.RegisterStartup);
+            WriteInstallerLog("Silent installation completed.");
+            return 0;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            WriteInstallerLog("Silent installation failed.", exception);
+            return 1;
+        }
+    }
+
+    private static void RunInstallation(
+        string installDirectory,
+        IProgress<InstallProgress> progress,
+        bool startAfterInstall,
+        bool registerStartup)
     {
         progress.Report(new InstallProgress(2, "インストール先を準備しています。"));
         installDirectory = NormalizeInstallDirectoryPath(installDirectory);
@@ -304,11 +409,25 @@ internal static class Program
         progress.Report(new InstallProgress(70, "Discord bot 設定を配置しています。"));
         EnsureEnvFiles();
 
-        progress.Report(new InstallProgress(92, "Windows 起動時の自動起動を登録しています。"));
-        RegisterStartup(installedExecutablePath);
+        if (registerStartup)
+        {
+            progress.Report(new InstallProgress(92, "Windows 起動時の自動起動を登録しています。"));
+            RegisterStartup(installedExecutablePath);
+        }
+        else
+        {
+            progress.Report(new InstallProgress(92, "Windows 起動時の自動起動登録をスキップしています。"));
+        }
 
-        progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
-        StartInstalledApp(installedExecutablePath);
+        if (startAfterInstall)
+        {
+            progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
+            StartInstalledApp(installedExecutablePath);
+        }
+        else
+        {
+            progress.Report(new InstallProgress(98, "VALOWATCH の起動をスキップしています。"));
+        }
     }
 
     private static string GetDefaultInstallDirectory()
@@ -562,7 +681,7 @@ internal static class Program
             "DISCORD_TRY_SCREEN_SHARE=false",
             "VALOWATCH_UPDATE_CHECK_ENABLED=true",
             "VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH",
-            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.1",
+            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2",
             "VALOWATCH_UPDATE_BRANCH=main",
             "VALOWATCH_UPDATE_CURRENT_COMMIT=",
             "VALOWATCH_GITHUB_TOKEN="
@@ -586,6 +705,14 @@ internal static class Program
 
             return;
         }
+
+        if (!string.IsNullOrWhiteSpace(preferredEnvText))
+        {
+            File.WriteAllText(envPath, preferredEnvText, Encoding.UTF8);
+            return;
+        }
+
+        File.WriteAllLines(envPath, defaultEnvLines, Encoding.UTF8);
     }
 
     private static void MergeEnvFile(string targetEnvPath, string sourceEnvText)
@@ -732,11 +859,17 @@ internal static class Program
 
     private static void StopRunningInstalledApp(string installedExecutablePath)
     {
+        string normalizedInstalledExecutablePath = NormalizeExecutablePath(installedExecutablePath);
         foreach (Process candidateProcess in Process.GetProcessesByName("VALOWATCH"))
         {
             using (candidateProcess)
             {
                 if (candidateProcess.Id == Environment.ProcessId)
+                {
+                    continue;
+                }
+
+                if (!IsInstalledAppProcess(candidateProcess, normalizedInstalledExecutablePath))
                 {
                     continue;
                 }
@@ -755,6 +888,33 @@ internal static class Program
                 }
             }
         }
+    }
+
+    private static bool IsInstalledAppProcess(Process candidateProcess, string normalizedInstalledExecutablePath)
+    {
+        try
+        {
+            string? processFileName = candidateProcess.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(processFileName))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeExecutablePath(processFileName),
+                normalizedInstalledExecutablePath,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeExecutablePath(string executablePath)
+    {
+        return Path.GetFullPath(executablePath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
     }
 
     private static void RegisterStartup(string installedExecutablePath)
@@ -863,5 +1023,20 @@ internal static class Program
         }
 
         return $"{byteCount} B";
+    }
+
+    private sealed class InlineProgress : IProgress<InstallProgress>
+    {
+        private readonly Action<InstallProgress> reportAction;
+
+        public InlineProgress(Action<InstallProgress> reportAction)
+        {
+            this.reportAction = reportAction;
+        }
+
+        public void Report(InstallProgress value)
+        {
+            reportAction(value);
+        }
     }
 }

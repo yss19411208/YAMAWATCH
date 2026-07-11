@@ -74,7 +74,7 @@ public sealed class GitUpdateSettingsStore
         [
             "VALOWATCH_UPDATE_CHECK_ENABLED=true",
             "VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH",
-            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.1",
+            "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2",
             "VALOWATCH_UPDATE_BRANCH=main",
             "VALOWATCH_UPDATE_CURRENT_COMMIT=",
             "VALOWATCH_GITHUB_TOKEN="
