@@ -23,7 +23,8 @@ internal static class Program
         bool Silent,
         string? InstallDirectory,
         bool StartAfterInstall,
-        bool RegisterStartup);
+        bool RegisterStartup,
+        bool StopAllValowatchProcesses);
 
     [STAThread]
     private static void Main(string[] args)
@@ -44,6 +45,7 @@ internal static class Program
         bool silent = false;
         bool startAfterInstall = true;
         bool registerStartup = true;
+        bool stopAllValowatchProcesses = true;
         string? installDirectory = null;
 
         for (int argumentIndex = 0; argumentIndex < args.Count; argumentIndex++)
@@ -67,6 +69,12 @@ internal static class Program
                 continue;
             }
 
+            if (IsOption(argument, "--only-target-process", "/only-target-process"))
+            {
+                stopAllValowatchProcesses = false;
+                continue;
+            }
+
             const string installDirectoryPrefix = "--install-dir=";
             if (argument.StartsWith(installDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
             {
@@ -80,7 +88,12 @@ internal static class Program
             }
         }
 
-        return new InstallerOptions(silent, installDirectory, startAfterInstall, registerStartup);
+        return new InstallerOptions(
+            silent,
+            installDirectory,
+            startAfterInstall,
+            registerStartup,
+            stopAllValowatchProcesses);
     }
 
     private static bool IsOption(string argument, params string[] optionNames)
@@ -318,7 +331,8 @@ internal static class Program
                     selectedInstallDirectory,
                     progress,
                     startAfterInstall: true,
-                    registerStartup: true));
+                    registerStartup: true,
+                    stopAllValowatchProcesses: true));
                 ReportProgress(new InstallProgress(100, "インストールが完了しました。VALOWATCH を起動しています。"));
                 MessageBox.Show(
                     this,
@@ -374,7 +388,12 @@ internal static class Program
 
         try
         {
-            RunInstallation(installDirectory, progress, options.StartAfterInstall, options.RegisterStartup);
+            RunInstallation(
+                installDirectory,
+                progress,
+                options.StartAfterInstall,
+                options.RegisterStartup,
+                options.StopAllValowatchProcesses);
             WriteInstallerLog("Silent installation completed.");
             return 0;
         }
@@ -389,7 +408,8 @@ internal static class Program
         string installDirectory,
         IProgress<InstallProgress> progress,
         bool startAfterInstall,
-        bool registerStartup)
+        bool registerStartup,
+        bool stopAllValowatchProcesses)
     {
         progress.Report(new InstallProgress(2, "インストール先を準備しています。"));
         installDirectory = NormalizeInstallDirectoryPath(installDirectory);
@@ -398,7 +418,7 @@ internal static class Program
         string installedExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
 
         progress.Report(new InstallProgress(8, "起動中の VALOWATCH をすべて停止しています。"));
-        StopRunningInstalledApp(installedExecutablePath);
+        StopRunningInstalledApp(installedExecutablePath, stopAllValowatchProcesses);
 
         progress.Report(new InstallProgress(14, "VALOWATCH 本体を展開しています。"));
         ExtractEmbeddedExecutable(installedExecutablePath, progress, 14, 68);
@@ -857,7 +877,7 @@ internal static class Program
         return reader.ReadToEnd();
     }
 
-    private static void StopRunningInstalledApp(string installedExecutablePath)
+    private static void StopRunningInstalledApp(string installedExecutablePath, bool stopAllValowatchProcesses)
     {
         string normalizedInstalledExecutablePath = NormalizeExecutablePath(installedExecutablePath);
         foreach (Process candidateProcess in Process.GetProcessesByName("VALOWATCH"))
@@ -869,7 +889,8 @@ internal static class Program
                     continue;
                 }
 
-                if (!IsInstalledAppProcess(candidateProcess, normalizedInstalledExecutablePath))
+                if (!stopAllValowatchProcesses &&
+                    !IsInstalledAppProcess(candidateProcess, normalizedInstalledExecutablePath))
                 {
                     continue;
                 }
