@@ -49,6 +49,23 @@ jobs:
             -p:IncludeSourceRevisionInInformationalVersion=false `
             -o .\exe
 
+      - name: Bundle FFmpeg capture tools
+        shell: pwsh
+        run: |
+          $ffmpegUri = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-lgpl-shared-8.1.zip"
+          $zipPath = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $extractPath = Join-Path $env:RUNNER_TEMP "ffmpeg"
+          Invoke-WebRequest -Uri $ffmpegUri -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
+
+          $ffmpegExe = Get-ChildItem -Path $extractPath -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ffmpegExe) {
+            throw "ffmpeg.exe was not found in downloaded archive."
+          }
+
+          New-Item -ItemType Directory -Path .\exe\ffmpeg\bin -Force | Out-Null
+          Copy-Item -Path (Join-Path $ffmpegExe.Directory.FullName '*') -Destination .\exe\ffmpeg\bin -Recurse -Force
+
       - name: Publish update installer
         shell: pwsh
         run: |

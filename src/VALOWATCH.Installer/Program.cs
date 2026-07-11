@@ -10,6 +10,7 @@ internal static class Program
     private const string RegistryValueName = "VALOWATCH";
     private const string EmbeddedExecutableResourceName = "VALOWATCH.exe";
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
+    private const string EmbeddedFfmpegResourcePrefix = "Tools/ffmpeg/";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private static readonly (string ResourceName, string FileName)[] NativeDependencyResources =
     [
@@ -425,6 +426,7 @@ internal static class Program
 
         progress.Report(new InstallProgress(69, "Discord 音声 DLL を展開しています。"));
         ExtractNativeDependencies(installDirectory);
+        ExtractFfmpegTools(installDirectory);
 
         progress.Report(new InstallProgress(70, "Discord bot 設定を配置しています。"));
         EnsureEnvFiles();
@@ -668,6 +670,30 @@ internal static class Program
         resourceStream.CopyTo(targetStream);
     }
 
+    private static void ExtractFfmpegTools(string installDirectory)
+    {
+        string[] resourceNames = typeof(Program).Assembly.GetManifestResourceNames();
+        foreach (string resourceName in resourceNames)
+        {
+            if (!resourceName.StartsWith(EmbeddedFfmpegResourcePrefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string relativePath = resourceName[EmbeddedFfmpegResourcePrefix.Length..]
+                .Replace('/', Path.DirectorySeparatorChar)
+                .Replace('\\', Path.DirectorySeparatorChar);
+            if (string.IsNullOrWhiteSpace(relativePath))
+            {
+                continue;
+            }
+
+            string targetFilePath = Path.Combine(installDirectory, "ffmpeg", relativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(targetFilePath) ?? installDirectory);
+            ExtractEmbeddedFile(resourceName, targetFilePath);
+        }
+    }
+
     private static void EnsureEnvFiles()
     {
         string workspaceRoot = GetValowatchWorkspaceRoot();
@@ -704,7 +730,18 @@ internal static class Program
             "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2",
             "VALOWATCH_UPDATE_BRANCH=main",
             "VALOWATCH_UPDATE_CURRENT_COMMIT=",
-            "VALOWATCH_GITHUB_TOKEN="
+            "VALOWATCH_GITHUB_TOKEN=",
+            "GOOGLE_DRIVE_CREDENTIAL_USER=VALOWATCH",
+            "GOOGLE_DRIVE_FOLDER_ID=",
+            "VALOWATCH_VIDEO_CAPTURE_ENABLED=false",
+            "VALOWATCH_VIDEO_CAPTURE_SCREEN=true",
+            "VALOWATCH_VIDEO_CAPTURE_CAMERA=true",
+            "VALOWATCH_FFMPEG_PATH=",
+            "VALOWATCH_SCREEN_CAPTURE_INPUT=desktop",
+            "VALOWATCH_CAMERA_DEVICE_NAME=",
+            "VALOWATCH_SCREEN_FPS=20",
+            "VALOWATCH_CAMERA_FPS=20",
+            "VALOWATCH_VIDEO_QUALITY=5"
         ];
 
         if (!File.Exists(envExamplePath))

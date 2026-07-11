@@ -19,12 +19,14 @@ VALORANTを起動すると自動でバックグラウンド動作し、Discord b
 - Discord botを指定VCへ自動参加させる
 - Discord botから物理マイク音声をVCへ流す
 - VALORANT起動時に指定テキストチャンネルへ `VALORANTを開きました` を送る
+- Google Drive認証済みの場合、VALORANT終了後に録音WAVをDriveへアップロードする
+- 明示的に有効化した場合、VALORANT起動中の画面MP4とカメラMP4を保存し、Driveへアップロードする
 - VALORANT起動時にGitHub更新確認を行う
 - 音声トラブル時に `data/logs/valowatch.log` へ診断ログを残す
 
 ## まだできないこと
 
-- Discord botによる画面共有
+- Discord botによる安定した画面共有/カメラ映像送信
 - VALORANTの試合開始/終了の完全検知
 - VALORANT内部情報やランク情報の取得
 - フルスクリーン排他モード上への完全なオーバーレイ表示
@@ -126,7 +128,9 @@ Audio stats. CapturedPeak: ... WrittenPeak: ...
 3. VALORANT起動時にbotがVCへ入ります。
 4. bot音声はPC内部音ではなく、マイク音声を流します。
 5. Alt + T でラインナップページを表示/非表示できます。
-6. 音が変な場合は valowatch.log を送ってください。
+6. Google Drive連携を使う場合、初回OAuthで選んだGoogleアカウントに保存されます。
+7. 画面/カメラ録画を有効化する場合は、録画される内容を本人が理解している状態で使ってください。
+8. 音が変な場合は valowatch.log を送ってください。
 ```
 
 ## 注意

@@ -45,6 +45,7 @@ static class Program
             new AppStateStore(appPaths),
             new LoopbackRecorder(discordBotSettingsStore),
             new GoogleDriveUploader(appPaths),
+            new VideoCaptureSession(appPaths, new VideoCaptureSettingsStore(appPaths)),
             new DiscordBotVoiceRelay(discordBotSettingsStore, appPaths),
             new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
             new GitAutoUpdater(new GitUpdateSettingsStore(appPaths), appPaths),

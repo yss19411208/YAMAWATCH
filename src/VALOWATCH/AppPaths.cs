@@ -10,6 +10,7 @@ public sealed class AppPaths
     {
         DataDirectory = dataDirectory;
         RecordingsDirectory = Path.Combine(dataDirectory, "recordings");
+        VideoRecordingsDirectory = Path.Combine(dataDirectory, "video-recordings");
         ConfigDirectory = configDirectory ?? Path.Combine(dataDirectory, "config");
         GoogleTokenDirectory = Path.Combine(dataDirectory, "google-token");
         HistoryPath = Path.Combine(dataDirectory, "history.json");
@@ -23,6 +24,8 @@ public sealed class AppPaths
     public string DataDirectory { get; }
 
     public string RecordingsDirectory { get; }
+
+    public string VideoRecordingsDirectory { get; }
 
     public string ConfigDirectory { get; }
 
@@ -69,6 +72,7 @@ public sealed class AppPaths
     {
         Directory.CreateDirectory(DataDirectory);
         Directory.CreateDirectory(RecordingsDirectory);
+        Directory.CreateDirectory(VideoRecordingsDirectory);
         Directory.CreateDirectory(ConfigDirectory);
         Directory.CreateDirectory(GoogleTokenDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(EnvPath) ?? ConfigDirectory);

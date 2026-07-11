@@ -17,6 +17,7 @@ public sealed class MainForm : Form
     private readonly AppStateStore appStateStore;
     private readonly LoopbackRecorder loopbackRecorder;
     private readonly GoogleDriveUploader googleDriveUploader;
+    private readonly VideoCaptureSession videoCaptureSession;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
     private readonly GitUpdateChecker gitUpdateChecker;
     private readonly GitAutoUpdater gitAutoUpdater;
@@ -57,6 +58,7 @@ public sealed class MainForm : Form
     private bool gitUpdateCheckInProgress;
     private bool gitUpdateCheckedThisValorantSession;
     private bool automaticRecordingStarted;
+    private bool automaticVideoCaptureStarted;
     private bool automaticUploadInProgress;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
@@ -67,6 +69,7 @@ public sealed class MainForm : Form
         AppStateStore appStateStore,
         LoopbackRecorder loopbackRecorder,
         GoogleDriveUploader googleDriveUploader,
+        VideoCaptureSession videoCaptureSession,
         DiscordBotVoiceRelay discordBotVoiceRelay,
         GitUpdateChecker gitUpdateChecker,
         GitAutoUpdater gitAutoUpdater,
@@ -77,6 +80,7 @@ public sealed class MainForm : Form
         this.appStateStore = appStateStore;
         this.loopbackRecorder = loopbackRecorder;
         this.googleDriveUploader = googleDriveUploader;
+        this.videoCaptureSession = videoCaptureSession;
         this.discordBotVoiceRelay = discordBotVoiceRelay;
         this.gitUpdateChecker = gitUpdateChecker;
         this.gitAutoUpdater = gitAutoUpdater;
@@ -115,7 +119,21 @@ public sealed class MainForm : Form
             StopRecordingCore(showUserMessage: false);
         }
 
+        if (videoCaptureSession.IsRecording)
+        {
+            automaticVideoCaptureStarted = false;
+            try
+            {
+                videoCaptureSession.StopAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                WriteAppLog("Video", "Video capture stop during shutdown failed.", exception);
+            }
+        }
+
         loopbackRecorder.Dispose();
+        videoCaptureSession.Dispose();
         discordBotVoiceRelay.Dispose();
         base.OnFormClosing(eventArgs);
     }
@@ -528,15 +546,17 @@ public sealed class MainForm : Form
         StartRecordingCore(showUserMessage: true);
     }
 
-    private RecordingHistoryEntry? StartRecordingCore(bool showUserMessage)
+    private RecordingHistoryEntry? StartRecordingCore(bool showUserMessage, string? timestampText = null)
     {
         if (loopbackRecorder.IsRecording)
         {
             return null;
         }
 
-        string timestampText = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
-        string recordingFilePath = Path.Combine(appPaths.RecordingsDirectory, $"VALOWATCH_{timestampText}.wav");
+        string safeTimestampText = string.IsNullOrWhiteSpace(timestampText)
+            ? DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture)
+            : timestampText;
+        string recordingFilePath = Path.Combine(appPaths.RecordingsDirectory, $"VALOWATCH_{safeTimestampText}.wav");
 
         try
         {
@@ -713,6 +733,48 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task UploadVideoCaptureAsync(
+        VideoCaptureResult videoCaptureResult,
+        bool requireStoredDriveCredential)
+    {
+        if (!File.Exists(videoCaptureResult.FilePath))
+        {
+            WriteAppLog("Drive", $"Video capture file missing: {videoCaptureResult.FilePath}");
+            return;
+        }
+
+        if (!googleDriveUploader.HasClientSecret)
+        {
+            WriteAppLog("Drive", $"Video upload skipped because Google client secret is missing: {appPaths.GoogleClientSecretPath}");
+            return;
+        }
+
+        if (requireStoredDriveCredential && !googleDriveUploader.HasStoredCredential)
+        {
+            WriteAppLog("Drive", "Video upload skipped because Google Drive has not been authorized on this PC.");
+            return;
+        }
+
+        try
+        {
+            DriveUploadResult uploadResult = await googleDriveUploader.UploadAsync(
+                videoCaptureResult.FilePath,
+                $"VALOWATCH {videoCaptureResult.Kind} video capture",
+                "video/mp4",
+                CancellationToken.None).ConfigureAwait(true);
+            WriteAppLog(
+                "Drive",
+                $"Video capture uploaded to Google Drive. Kind: {videoCaptureResult.Kind}. FileId: {uploadResult.FileId}");
+        }
+        catch (Exception exception)
+        {
+            WriteAppLog(
+                "Drive",
+                $"Automatic video capture upload failed. Kind: {videoCaptureResult.Kind}.",
+                exception);
+        }
+    }
+
     private void OpenTrackerProfile(int teammateIndex)
     {
         string riotId = teammateControls[teammateIndex].RiotIdTextBox.Text.Trim();
@@ -804,31 +866,77 @@ public sealed class MainForm : Form
 
     private void StartAutomaticRecordingIfNeeded()
     {
-        if (automaticRecordingStarted || loopbackRecorder.IsRecording)
+        string timestampText = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
+
+        if (!automaticRecordingStarted && !loopbackRecorder.IsRecording)
+        {
+            RecordingHistoryEntry? recordingEntry = StartRecordingCore(showUserMessage: false, timestampText);
+            if (recordingEntry is not null)
+            {
+                automaticRecordingStarted = true;
+                WriteAppLog("Recording", "Automatic audio recording started for VALORANT session.");
+            }
+        }
+
+        if (automaticVideoCaptureStarted || videoCaptureSession.IsRecording)
         {
             return;
         }
 
-        RecordingHistoryEntry? recordingEntry = StartRecordingCore(showUserMessage: false);
-        if (recordingEntry is null)
+        try
         {
-            return;
-        }
+            IReadOnlyList<VideoCaptureResult> videoCaptureResults = videoCaptureSession.Start(timestampText);
+            foreach (string startupWarning in videoCaptureSession.LastStartupWarnings)
+            {
+                WriteAppLog("Video", startupWarning);
+            }
 
-        automaticRecordingStarted = true;
-        WriteAppLog("Recording", "Automatic recording started for VALORANT session.");
+            if (videoCaptureResults.Count > 0)
+            {
+                automaticVideoCaptureStarted = true;
+                WriteAppLog(
+                    "Video",
+                    $"Automatic video capture started for VALORANT session. Files: {string.Join(", ", videoCaptureResults.Select(result => result.FilePath))}");
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteAppLog("Video", "Automatic video capture start failed.", exception);
+        }
     }
 
     private async Task StopAutomaticRecordingAndUploadAsync()
     {
-        if (!automaticRecordingStarted)
+        if (!automaticRecordingStarted && !automaticVideoCaptureStarted)
         {
             return;
         }
 
-        automaticRecordingStarted = false;
-        RecordingHistoryEntry? finishedEntry = StopRecordingCore(showUserMessage: false);
-        if (finishedEntry is null)
+        RecordingHistoryEntry? finishedEntry = null;
+        if (automaticRecordingStarted)
+        {
+            automaticRecordingStarted = false;
+            finishedEntry = StopRecordingCore(showUserMessage: false);
+        }
+
+        IReadOnlyList<VideoCaptureResult> finishedVideoCaptures = [];
+        if (automaticVideoCaptureStarted)
+        {
+            automaticVideoCaptureStarted = false;
+            try
+            {
+                finishedVideoCaptures = await videoCaptureSession.StopAsync().ConfigureAwait(true);
+                WriteAppLog(
+                    "Video",
+                    $"Automatic video capture stopped. Files: {string.Join(", ", finishedVideoCaptures.Select(result => result.FilePath))}");
+            }
+            catch (Exception exception)
+            {
+                WriteAppLog("Video", "Automatic video capture stop failed.", exception);
+            }
+        }
+
+        if (finishedEntry is null && finishedVideoCaptures.Count == 0)
         {
             return;
         }
@@ -842,10 +950,20 @@ public sealed class MainForm : Form
         automaticUploadInProgress = true;
         try
         {
-            await UploadRecordingAsync(
-                finishedEntry,
-                showUserMessage: false,
-                requireStoredDriveCredential: true).ConfigureAwait(true);
+            if (finishedEntry is not null)
+            {
+                await UploadRecordingAsync(
+                    finishedEntry,
+                    showUserMessage: false,
+                    requireStoredDriveCredential: true).ConfigureAwait(true);
+            }
+
+            foreach (VideoCaptureResult finishedVideoCapture in finishedVideoCaptures)
+            {
+                await UploadVideoCaptureAsync(
+                    finishedVideoCapture,
+                    requireStoredDriveCredential: true).ConfigureAwait(true);
+            }
         }
         finally
         {

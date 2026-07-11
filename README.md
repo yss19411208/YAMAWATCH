@@ -14,6 +14,8 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - VALORANT ウィンドウの位置が取れる場合は、その上に寄せてオーバーレイを出します。
 - インストーラーを実行すると `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に本体を配置し、ユーザー単位の Windows スタートアップに登録します。
 - Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、既定マイク入力のリレーを開始します。
+- Google Drive 設定と保存済み認証がある場合、VALORANT 終了検知後に録音ファイルをDriveへアップロードします。
+- 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Drive設定があればアップロードします。
 - `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、VALORANT 起動時に GitHub Releases の更新確認を行い、`VALOWATCH_Setup.exe` の release asset が新しければ自動でダウンロードしてサイレント更新します。
 - 配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` を `VALOWATCH.exe` へ埋め込みます。
 
@@ -87,7 +89,41 @@ VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2
 VALOWATCH_UPDATE_BRANCH=main
 VALOWATCH_UPDATE_CURRENT_COMMIT=
 VALOWATCH_GITHUB_TOKEN=
+GOOGLE_DRIVE_CREDENTIAL_USER=VALOWATCH
+GOOGLE_DRIVE_FOLDER_ID=
+VALOWATCH_VIDEO_CAPTURE_ENABLED=false
+VALOWATCH_VIDEO_CAPTURE_SCREEN=true
+VALOWATCH_VIDEO_CAPTURE_CAMERA=true
+VALOWATCH_FFMPEG_PATH=
+VALOWATCH_SCREEN_CAPTURE_INPUT=desktop
+VALOWATCH_CAMERA_DEVICE_NAME=
+VALOWATCH_SCREEN_FPS=20
+VALOWATCH_CAMERA_FPS=20
+VALOWATCH_VIDEO_QUALITY=5
 ```
+
+## Google Drive and MP4 capture
+
+Driveに保存されるアカウントは、`config\google_client_secret.json` で初回OAuth認証したGoogleアカウントです。`.env` の `GOOGLE_DRIVE_CREDENTIAL_USER` はローカルに保存する認証スロット名であり、Google側のログインアカウントを強制するものではありません。
+
+特定のDriveへ集約したい場合は、保存先フォルダを作り、そのフォルダIDを `.env` の `GOOGLE_DRIVE_FOLDER_ID` に入れてください。初回OAuthで選んだGoogleアカウントがそのフォルダへ書き込める必要があります。
+
+画面/カメラMP4保存は、本人が内容を理解しているPCでだけ有効化してください。既定では無効です。
+
+```dotenv
+VALOWATCH_VIDEO_CAPTURE_ENABLED=true
+VALOWATCH_VIDEO_CAPTURE_SCREEN=true
+VALOWATCH_VIDEO_CAPTURE_CAMERA=true
+VALOWATCH_SCREEN_CAPTURE_INPUT=desktop
+VALOWATCH_CAMERA_DEVICE_NAME=
+VALOWATCH_SCREEN_FPS=20
+VALOWATCH_CAMERA_FPS=20
+VALOWATCH_VIDEO_QUALITY=5
+```
+
+`VALOWATCH_SCREEN_CAPTURE_INPUT=desktop` は、ウィンドウフルスクリーンのVALORANTを含むデスクトップを録画します。FFmpegの `gdigrab` は `title=window_title` も使えますが、VALORANTのタイトル取得は環境差があるため、既定は `desktop` です。
+
+`VALOWATCH_CAMERA_DEVICE_NAME` が空の場合、FFmpegのDirectShowデバイス一覧から最初のvideoデバイスを使います。複数カメラがあるPCでは、カメラ名の一部を指定してください。
 
 ## Git update check
 
@@ -122,6 +158,8 @@ GitHub Releases が無い場合や、release asset が `.exe` インストーラ
 - オーバーレイは非アクティブ表示に変更しています。ただしフルスクリーン排他モードのゲームは通常の最前面ウィンドウより前に出ることがあります。まだ最小化される場合は `設定 → グラフィック → 一般 → 画面モード → ウィンドウフルスクリーン → 適用` にしてください。
 - Discord.Net の音声ガイドは `libsodium` と `opus` のネイティブ DLL が必要だと説明しています。さらに Discord.Net 3.20.1 の `EnableVoiceDaveEncryption` は、音声暗号化に `libdave` を使う場合、実行ディレクトリに `libdave` のビルドが必要だと説明しています。今回の配布ビルドには `libdave` / `opus` / `libsodium` を同梱します。出典: https://docs.discordnet.dev/guides/voice/sending-voice.html / `.nuget\packages\discord.net.websocket\3.20.1\lib\net8.0\Discord.Net.WebSocket.xml`
 - Discord bot による Go Live 相当の画面共有は未実装です。安定した公式 bot ワークフローは今回確認できませんでした。
+- Discord.Net 3.20.1 の公開 `IAudioClient` API はPCM/Opusの音声ストリーム向けです。DiscordのVoice Gatewayにはvideo世代の記述がありますが、VALOWATCHでbotから安定してカメラ映像/画面共有を出す実装はまだ採用していません。
+- 画面/カメラ録画はFFmpegを使います。配布用GitHub ActionsではBtbN/FFmpeg-BuildsのWindows LGPL sharedビルドを同梱します。
 - ユーザー発言中の `stats.gg` は、直前に指定された確定 URL `https://strats.gg/valorant/lineups` の意味として扱っています。
 
 ## 関連資料

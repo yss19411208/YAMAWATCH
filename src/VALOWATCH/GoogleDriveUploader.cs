@@ -12,10 +12,12 @@ public sealed class GoogleDriveUploader
     private static readonly string[] Scopes = [DriveService.Scope.DriveFile];
 
     private readonly AppPaths appPaths;
+    private readonly GoogleDriveSettingsStore settingsStore;
 
     public GoogleDriveUploader(AppPaths appPaths)
     {
         this.appPaths = appPaths;
+        settingsStore = new GoogleDriveSettingsStore(appPaths);
     }
 
     public bool HasClientSecret => File.Exists(appPaths.GoogleClientSecretPath);
@@ -26,17 +28,31 @@ public sealed class GoogleDriveUploader
 
     public async Task<DriveUploadResult> UploadAsync(string recordingFilePath, CancellationToken cancellationToken)
     {
-        if (!File.Exists(recordingFilePath))
+        return await UploadAsync(
+            recordingFilePath,
+            "VALOWATCH match audio recording",
+            "audio/wav",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<DriveUploadResult> UploadAsync(
+        string filePath,
+        string description,
+        string mimeType,
+        CancellationToken cancellationToken)
+    {
+        if (!File.Exists(filePath))
         {
-            throw new FileNotFoundException("アップロード対象の録音ファイルが見つかりません。", recordingFilePath);
+            throw new FileNotFoundException("Upload target file was not found.", filePath);
         }
 
         if (!HasClientSecret)
         {
             throw new InvalidOperationException(
-                $"Google Drive連携には {appPaths.GoogleClientSecretPath} が必要です。Google CloudでDesktop app用OAuthクライアントを作成し、この名前で配置してください。");
+                $"Google Drive integration requires {appPaths.GoogleClientSecretPath}.");
         }
 
+        GoogleDriveSettings settings = settingsStore.Load();
         UserCredential userCredential = await AuthorizeAsync(cancellationToken).ConfigureAwait(false);
         using DriveService driveService = new(new BaseClientService.Initializer
         {
@@ -45,21 +61,25 @@ public sealed class GoogleDriveUploader
         });
 
         await using FileStream recordingStream = new(
-            recordingFilePath,
+            filePath,
             FileMode.Open,
             FileAccess.Read,
             FileShare.Read);
 
         DriveFile fileMetadata = new()
         {
-            Name = Path.GetFileName(recordingFilePath),
-            Description = "VALOWATCH match audio recording"
+            Name = Path.GetFileName(filePath),
+            Description = description
         };
+        if (!string.IsNullOrWhiteSpace(settings.FolderId))
+        {
+            fileMetadata.Parents = [settings.FolderId.Trim()];
+        }
 
         FilesResource.CreateMediaUpload uploadRequest = driveService.Files.Create(
             fileMetadata,
             recordingStream,
-            "audio/wav");
+            mimeType);
         uploadRequest.Fields = "id,name,webViewLink";
 
         IUploadProgress uploadProgress = await uploadRequest.UploadAsync(cancellationToken).ConfigureAwait(false);
@@ -67,7 +87,7 @@ public sealed class GoogleDriveUploader
         {
             Exception? uploadException = uploadProgress.Exception;
             throw new InvalidOperationException(
-                uploadException is null ? "Google Driveアップロードが完了しませんでした。" : uploadException.Message,
+                uploadException is null ? "Google Drive upload did not complete." : uploadException.Message,
                 uploadException);
         }
 
@@ -77,6 +97,7 @@ public sealed class GoogleDriveUploader
 
     private async Task<UserCredential> AuthorizeAsync(CancellationToken cancellationToken)
     {
+        GoogleDriveSettings settings = settingsStore.Load();
         await using FileStream clientSecretStream = new(
             appPaths.GoogleClientSecretPath,
             FileMode.Open,
@@ -84,10 +105,14 @@ public sealed class GoogleDriveUploader
             FileShare.Read);
 
         GoogleClientSecrets clientSecrets = GoogleClientSecrets.FromStream(clientSecretStream);
+        string credentialUser = string.IsNullOrWhiteSpace(settings.CredentialUser)
+            ? "VALOWATCH"
+            : settings.CredentialUser.Trim();
+
         return await GoogleWebAuthorizationBroker.AuthorizeAsync(
             clientSecrets.Secrets,
             Scopes,
-            "VALOWATCH",
+            credentialUser,
             cancellationToken,
             new FileDataStore(appPaths.GoogleTokenDirectory, true)).ConfigureAwait(false);
     }
