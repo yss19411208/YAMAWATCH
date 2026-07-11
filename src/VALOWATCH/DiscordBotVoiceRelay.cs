@@ -37,7 +37,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private AudioOutStream? discordStream;
     private CancellationTokenSource? relayCancellationTokenSource;
     private Task? relayTask;
-    private SocketTextChannel? discordStatusTextChannel;
     private bool stopRequested;
     private long capturedCallbackCount;
     private long capturedByteCount;
@@ -147,12 +146,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             audioClient = await voiceChannel.ConnectAsync(selfDeaf: false, selfMute: false).ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: false. SelfMute: false.");
-            discordStatusTextChannel = GetStatusTextChannel(guild, settings);
-            string? notificationFailure = await TrySendValorantOpenedMessageAsync(discordStatusTextChannel, settings).ConfigureAwait(false);
-            if (!string.IsNullOrWhiteSpace(notificationFailure))
-            {
-                WriteLog(notificationFailure);
-            }
+            WriteLog("Discord text notifications are disabled.");
 
             bool audioRelayStarted = false;
 
@@ -166,17 +160,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 catch (Exception audioException)
                 {
                     WriteLog("Discord voice channel joined, but microphone audio relay could not start.", audioException);
-                    QueueDiscordStatusMessage(
-                        "VALOWATCH 音声開始失敗\n" +
-                        audioException.Message +
-                        "\nWindowsのマイク権限、既定の入力デバイス、または DISCORD_MIC_DEVICE_NAME を確認してください。");
                     DisposeAudioObjects();
                     lock (stateLock)
                     {
                         IsRunning = true;
                         StatusText = FormatRunningStatus(
                             "Discord joined VC, audio failed",
-                            notificationFailure,
                             audioException.Message);
                     }
 
@@ -187,9 +176,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             lock (stateLock)
             {
                 IsRunning = true;
-                StatusText = FormatRunningStatus(
-                    audioRelayStarted ? "Discord mic live" : "Discord joined VC",
-                    notificationFailure);
+                StatusText = FormatRunningStatus(audioRelayStarted ? "Discord mic live" : "Discord joined VC");
             }
         }
         catch (Exception exception)
@@ -252,7 +239,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await discordClient.StopAsync().ConfigureAwait(false);
             await discordClient.DisposeAsync().ConfigureAwait(false);
             discordClient = null;
-            discordStatusTextChannel = null;
         }
     }
 
@@ -399,53 +385,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return Task.CompletedTask;
     }
 
-    private static SocketTextChannel? GetStatusTextChannel(SocketGuild guild, DiscordBotSettings settings)
-    {
-        if (settings.TextChannelId == 0)
-        {
-            return null;
-        }
-
-        return guild.GetTextChannel(settings.TextChannelId);
-    }
-
-    private static async Task<string?> TrySendValorantOpenedMessageAsync(SocketTextChannel? textChannel, DiscordBotSettings settings)
-    {
-        if (settings.TextChannelId == 0)
-        {
-            return "text channel missing";
-        }
-
-        if (textChannel is null)
-        {
-            return "text channel not found";
-        }
-
-        string message = string.IsNullOrWhiteSpace(settings.ValorantOpenedMessage)
-            ? "VALORANTを開きました"
-            : settings.ValorantOpenedMessage.Trim();
-
-        try
-        {
-            await textChannel.SendMessageAsync(message).ConfigureAwait(false);
-            return null;
-        }
-        catch (Exception exception)
-        {
-            return $"notify failed: {exception.Message}";
-        }
-    }
-
-    private static string FormatRunningStatus(string baseStatus, string? notificationFailure, string? audioFailure = null)
+    private static string FormatRunningStatus(string baseStatus, string? audioFailure = null)
     {
         if (!string.IsNullOrWhiteSpace(audioFailure))
         {
             return $"{baseStatus}: {audioFailure}";
         }
 
-        return string.IsNullOrWhiteSpace(notificationFailure)
-            ? baseStatus
-            : $"{baseStatus}, {notificationFailure}";
+        return baseStatus;
     }
 
     private void EnsureVoiceChannelPermissions(SocketGuild guild, SocketVoiceChannel voiceChannel)
@@ -978,24 +925,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private void QueueDiscordStatusMessage(string message)
     {
-        SocketTextChannel? textChannel = discordStatusTextChannel;
-        if (textChannel is null)
-        {
-            WriteLog($"Discord status message skipped because text channel is missing. Message: {message}");
-            return;
-        }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await textChannel.SendMessageAsync(message).ConfigureAwait(false);
-            }
-            catch (Exception exception)
-            {
-                WriteLog("Discord status message failed.", exception);
-            }
-        });
+        WriteLog($"Discord status message suppressed because notifications are disabled. Message: {message}");
     }
 
     private static float CalculateFloat32Peak(byte[] buffer, int offset, int byteCount)
