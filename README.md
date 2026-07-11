@@ -18,7 +18,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - VALORANT 終了検知後、録音WAVをMP3へ変換し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセス起動中だけPCの既定出力音声をDiscord音声へミックスします。
-- `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、VALORANT 起動時に GitHub Releases の更新確認を行い、`VALOWATCH_Setup.exe` の release asset が新しければ自動でダウンロードしてサイレント更新します。
+- `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、常駐中は5分ごとに GitHub Releases の更新確認を行い、VALORANT 起動時にも即時確認します。`VALOWATCH_Setup.exe` の release asset が現在のcommit/versionと違えば自動でダウンロードしてサイレント更新します。
 - 配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` を `VALOWATCH.exe` へ埋め込みます。
 
 ## 使い方
@@ -161,7 +161,7 @@ VALOWATCH_VIDEO_QUALITY=5
 
 ## Git update check
 
-VALORANT を起動したタイミングで、GitHub Releases の最新公開リリースを確認できます。
+VALOWATCH 常駐中に、5分ごとに GitHub Releases の最新公開リリースを確認できます。VALORANT 起動時は5分周期を待たずに即時確認します。
 
 `.env` に次のように設定します。
 
@@ -180,7 +180,7 @@ VALOWATCH_GITHUB_TOKEN=
 
 GitHub Releases が無い場合は、`VALOWATCH_UPDATE_BRANCH` の最新commit確認に切り替えます。`VALOWATCH_UPDATE_CURRENT_COMMIT` が空の場合、branchにcommitが存在した時点で更新ありとして扱います。
 
-通信環境が悪い場合は、VALORANT 起動中に5分間隔で再試行します。更新が見つかった場合、GitHub Release の `VALOWATCH_Setup.exe` asset を自動でダウンロードし、`--silent` で起動して現在のインストール先を置き換えます。ユーザー操作は不要です。
+VALOWATCH は最新リリースのtag/target commitと、現在の `VALOWATCH_UPDATE_CURRENT_COMMIT` / version を比較します。違いがある場合だけ、GitHub Release の `VALOWATCH_Setup.exe` asset を自動でダウンロードし、`--silent` で起動して現在のインストール先を置き換えます。ユーザー操作は不要です。通信環境が悪い場合も、次の5分周期で再確認します。
 
 GitHub Releases が無い場合や、release asset が `.exe` インストーラーではなく branch zip だけの場合、自動更新は実行しません。branch zip はソースコードであり、実行中アプリが安全に自己更新できる配布物ではないためです。
 

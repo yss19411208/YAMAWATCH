@@ -116,14 +116,16 @@ Microsoft は `Run` レジストリキーのプログラムがユーザーログ
 
 ## Phase 5: Git update check
 
-目的: VALORANT 起動時に GitHub Releases の更新を自動確認する。
+目的: VALOWATCH 常駐中に5分ごとに GitHub Releases の更新を自動確認し、VALORANT 起動時は即時確認する。
 
 完了:
 
 - `.env` による更新確認設定
 - GitHub Releases latest API による最新公開リリース確認
 - release が無い場合の branch 最新commit確認
-- 通信失敗時の5分間隔再試行
+- 常駐中の5分間隔チェック
+- VALORANT 起動時の即時チェック
+- 最新リリースのtag/target commitと現在のcommit/version比較
 - GitHub Release の `VALOWATCH_Setup.exe` asset が新しい場合の自動ダウンロード
 - silent installer による無人更新
 

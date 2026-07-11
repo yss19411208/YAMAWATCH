@@ -11,7 +11,7 @@ public sealed class MainForm : Form
     private const string DetectedText = "VALORANT detected";
     private const string NotDetectedText = "VALORANT not detected";
     private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan GitUpdateRetryInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan GitUpdateCheckInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
 
     private readonly AppPaths appPaths;
@@ -56,13 +56,12 @@ public sealed class MainForm : Form
     private bool stratsToggleInProgress;
     private bool stratsPreloadInProgress;
     private bool gitUpdateCheckInProgress;
-    private bool gitUpdateCheckedThisValorantSession;
     private bool automaticRecordingStarted;
     private bool automaticVideoCaptureStarted;
     private bool automaticUploadInProgress;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
-    private DateTimeOffset nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset nextGitUpdateCheckAtUtc = DateTimeOffset.MinValue;
 
     public MainForm(
         AppPaths appPaths,
@@ -712,10 +711,9 @@ public sealed class MainForm : Form
             nextDiscordRetryAtUtc = valorantDetected
                 ? DateTimeOffset.UtcNow.Add(DiscordRetryInterval)
                 : DateTimeOffset.MinValue;
-            gitUpdateCheckedThisValorantSession = false;
-            nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
             if (valorantDetected)
             {
+                nextGitUpdateCheckAtUtc = DateTimeOffset.MinValue;
                 PreloadStratsOverlayIfNeeded();
                 StartGitUpdateCheckIfNeeded(force: true);
             }
@@ -732,9 +730,9 @@ public sealed class MainForm : Form
         if (valorantDetected)
         {
             PreloadStratsOverlayIfNeeded();
-            StartGitUpdateCheckIfNeeded(force: false);
         }
 
+        StartGitUpdateCheckIfNeeded(force: false);
         RefreshDiscordStatusLabel();
     }
 
@@ -1302,17 +1300,10 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (!force)
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (!force && nowUtc < nextGitUpdateCheckAtUtc)
         {
-            if (gitUpdateCheckedThisValorantSession)
-            {
-                return;
-            }
-
-            if (DateTimeOffset.UtcNow < nextGitUpdateRetryAtUtc)
-            {
-                return;
-            }
+            return;
         }
 
         _ = RunGitUpdateCheckAsync();
@@ -1334,7 +1325,6 @@ public sealed class MainForm : Form
 
             if (updateResult.HasUpdate)
             {
-                gitUpdateCheckedThisValorantSession = true;
                 WriteUpdateLog(
                     $"Update found. Current: {updateResult.CurrentVersion}. Latest: {updateResult.LatestVersion}. " +
                     $"Download: {updateResult.DownloadUri}.");
@@ -1356,24 +1346,14 @@ public sealed class MainForm : Form
 
                 WriteUpdateLog(
                     $"Auto update did not start. Status: {autoUpdateResult.Status}. Message: {autoUpdateResult.Message}.");
-                if (autoUpdateResult.ShouldRetry)
-                {
-                    nextGitUpdateRetryAtUtc = DateTimeOffset.UtcNow.Add(GitUpdateRetryInterval);
-                }
                 return;
             }
 
-            if (updateResult.ShouldRetry)
-            {
-                nextGitUpdateRetryAtUtc = DateTimeOffset.UtcNow.Add(GitUpdateRetryInterval);
-                return;
-            }
-
-            gitUpdateCheckedThisValorantSession = true;
             WriteUpdateLog($"Update check finished. Status: {updateResult.Status}. Message: {updateResult.Message}.");
         }
         finally
         {
+            nextGitUpdateCheckAtUtc = DateTimeOffset.UtcNow.Add(GitUpdateCheckInterval);
             gitUpdateCheckInProgress = false;
         }
     }
