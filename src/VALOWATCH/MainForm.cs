@@ -59,7 +59,6 @@ public sealed class MainForm : Form
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
-    private Uri? pendingUpdateUri;
 
     public MainForm(
         AppPaths appPaths,
@@ -189,7 +188,6 @@ public sealed class MainForm : Form
             ContextMenuStrip = BuildTrayMenu()
         };
         trayIcon.DoubleClick += (_, _) => ToggleStratsOverlayWhenValorantRunning();
-        trayIcon.BalloonTipClicked += (_, _) => OpenPendingUpdateUri();
     }
 
     private Control BuildHeaderPanel()
@@ -418,7 +416,7 @@ public sealed class MainForm : Form
     {
         ContextMenuStrip trayMenu = new();
         trayMenu.Items.Add("Strats overlay (Alt+T)", null, (_, _) => ToggleStratsOverlayWhenValorantRunning());
-        trayMenu.Items.Add("Check updates now", null, async (_, _) => await RunGitUpdateCheckAsync(showUpToDateNotice: true).ConfigureAwait(true));
+        trayMenu.Items.Add("Check updates now", null, async (_, _) => await RunGitUpdateCheckAsync().ConfigureAwait(true));
         trayMenu.Items.Add("Open config folder", null, (_, _) => OpenFolder(appPaths.ConfigDirectory));
         trayMenu.Items.Add("Exit", null, (_, _) => Close());
         return trayMenu;
@@ -802,35 +800,24 @@ public sealed class MainForm : Form
         }
     }
 
-    private void OpenPendingUpdateUri()
+    private void WriteUpdateLog(string message, Exception? exception = null)
     {
-        if (pendingUpdateUri is null)
-        {
-            return;
-        }
-
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = pendingUpdateUri.ToString(),
-                UseShellExecute = true
-            });
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-            ShowError($"更新ページを開けませんでした。{exception.Message}");
-        }
+        WriteAppLog("Update", message, exception);
     }
 
-    private void WriteUpdateLog(string message, Exception? exception = null)
+    private void WriteUserMessageLog(string severity, string message)
+    {
+        WriteAppLog("UI", $"{severity}: {message}");
+    }
+
+    private void WriteAppLog(string category, string message, Exception? exception = null)
     {
         try
         {
             string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
             string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
-            File.AppendAllText(logFilePath, $"{DateTimeOffset.Now:O} [Update] {message}{exceptionText}{Environment.NewLine}");
+            File.AppendAllText(logFilePath, $"{DateTimeOffset.Now:O} [{category}] {message}{exceptionText}{Environment.NewLine}");
         }
         catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
         {
@@ -845,14 +832,14 @@ public sealed class MainForm : Form
         Activate();
     }
 
-    private static void ShowInfo(string message)
+    private void ShowInfo(string message)
     {
-        MessageBox.Show(message, "VALOWATCH", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        WriteUserMessageLog("Info", message);
     }
 
-    private static void ShowError(string message)
+    private void ShowError(string message)
     {
-        MessageBox.Show(message, "VALOWATCH", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        WriteUserMessageLog("Error", message);
     }
 
     private bool SafeIsStartupEnabled()
@@ -1106,10 +1093,10 @@ public sealed class MainForm : Form
             }
         }
 
-        _ = RunGitUpdateCheckAsync(showUpToDateNotice: false);
+        _ = RunGitUpdateCheckAsync();
     }
 
-    private async Task RunGitUpdateCheckAsync(bool showUpToDateNotice)
+    private async Task RunGitUpdateCheckAsync()
     {
         if (gitUpdateCheckInProgress)
         {
@@ -1126,7 +1113,6 @@ public sealed class MainForm : Form
             if (updateResult.HasUpdate)
             {
                 gitUpdateCheckedThisValorantSession = true;
-                pendingUpdateUri = updateResult.DownloadUri ?? updateResult.ReleaseUri;
                 WriteUpdateLog(
                     $"Update found. Current: {updateResult.CurrentVersion}. Latest: {updateResult.LatestVersion}. " +
                     $"Download: {updateResult.DownloadUri}.");
@@ -1162,14 +1148,7 @@ public sealed class MainForm : Form
             }
 
             gitUpdateCheckedThisValorantSession = true;
-            if (showUpToDateNotice && updateResult.Status == GitUpdateCheckStatus.UpToDate)
-            {
-                trayIcon.ShowBalloonTip(
-                    5000,
-                    "VALOWATCH update check",
-                    "VALOWATCH is already up to date.",
-                    ToolTipIcon.Info);
-            }
+            WriteUpdateLog($"Update check finished. Status: {updateResult.Status}. Message: {updateResult.Message}.");
         }
         finally
         {
