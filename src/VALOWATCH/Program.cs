@@ -28,6 +28,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-discord-audio-mix", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDiscordAudioMixDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--list-microphones", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneListDiagnostic();
@@ -294,6 +300,70 @@ static class Program
         }
     }
 
+    private static void RunDiscordAudioMixDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            byte[] micOnlyFrameBuffer = new byte[3840];
+            IWaveProvider micOnlyProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.18F),
+                0.85F,
+                0F);
+            int micOnlyBytesRead = micOnlyProvider.Read(micOnlyFrameBuffer, 0, micOnlyFrameBuffer.Length);
+            float micOnlyPeak = DiscordBotVoiceRelay.CalculateAudioPeak(
+                micOnlyProvider.WaveFormat,
+                micOnlyFrameBuffer,
+                0,
+                micOnlyBytesRead);
+
+            byte[] mixedFrameBuffer = new byte[3840];
+            IWaveProvider mixedProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.18F),
+                0.85F,
+                0F,
+                new DiagnosticToneWaveProvider(880F, 0.18F),
+                0.45F);
+            int mixedBytesRead = mixedProvider.Read(mixedFrameBuffer, 0, mixedFrameBuffer.Length);
+            float mixedPeak = DiscordBotVoiceRelay.CalculateAudioPeak(
+                mixedProvider.WaveFormat,
+                mixedFrameBuffer,
+                0,
+                mixedBytesRead);
+
+            bool mixLooksReady = micOnlyBytesRead == micOnlyFrameBuffer.Length &&
+                mixedBytesRead == mixedFrameBuffer.Length &&
+                mixedPeak > micOnlyPeak * 1.10F;
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Discord audio mix check: {(mixLooksReady ? "ready" : "failed")}. " +
+                $"MicOnlyBytes: {micOnlyBytesRead}. MixedBytes: {mixedBytesRead}. " +
+                $"MicOnlyPeak: {micOnlyPeak:0.0000}. MixedPeak: {mixedPeak:0.0000}. " +
+                "Sources: microphone+LINE. OutputPlayback: unchanged; no render device opened by this diagnostic." +
+                $"{Environment.NewLine}");
+            Environment.ExitCode = mixLooksReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+                File.AppendAllText(
+                    logFilePath,
+                    $"{DateTimeOffset.Now:O} [Diagnostics] Discord audio mix check failed: {exception.Message}{Environment.NewLine}");
+            }
+            catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+            {
+            }
+
+            Environment.ExitCode = 1;
+        }
+    }
+
     private static string DescribeMatchingProcesses(IEnumerable<string> processNames)
     {
         List<string> processDescriptions = [];
@@ -334,5 +404,57 @@ static class Program
         }
 
         return processDescriptions.Count == 0 ? "none" : string.Join(",", processDescriptions);
+    }
+
+    private sealed class DiagnosticToneWaveProvider : IWaveProvider
+    {
+        private const int SampleRate = 48000;
+        private readonly float amplitude;
+        private readonly double phaseStep;
+        private double phase;
+
+        public DiagnosticToneWaveProvider(float frequencyHz, float amplitude)
+        {
+            if (frequencyHz <= 0F)
+            {
+                throw new ArgumentOutOfRangeException(nameof(frequencyHz), "Frequency must be positive.");
+            }
+
+            this.amplitude = Math.Clamp(amplitude, 0.0F, 0.95F);
+            phaseStep = (Math.PI * 2.0 * frequencyHz) / SampleRate;
+        }
+
+        public WaveFormat WaveFormat { get; } = new(SampleRate, 16, 1);
+
+        public int Read(byte[] buffer, int offset, int count)
+        {
+            if (offset < 0 || count <= 0 || offset >= buffer.Length)
+            {
+                return 0;
+            }
+
+            int writableBytes = Math.Min(count, buffer.Length - offset);
+            int alignedBytes = writableBytes - (writableBytes % 2);
+            int endOffset = offset + alignedBytes;
+
+            for (int byteOffset = offset; byteOffset < endOffset; byteOffset += 2)
+            {
+                short sampleValue = (short)(Math.Sin(phase) * amplitude * short.MaxValue);
+                buffer[byteOffset] = (byte)(sampleValue & 0xFF);
+                buffer[byteOffset + 1] = (byte)((sampleValue >> 8) & 0xFF);
+                phase += phaseStep;
+                if (phase >= Math.PI * 2.0)
+                {
+                    phase -= Math.PI * 2.0;
+                }
+            }
+
+            if (alignedBytes < writableBytes)
+            {
+                buffer[offset + alignedBytes] = 0;
+            }
+
+            return writableBytes;
+        }
     }
 }

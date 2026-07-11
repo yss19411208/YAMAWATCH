@@ -44,9 +44,11 @@ VALORANT側は次の設定にしてください。
 
 ## 音声の現在の仕様
 
-現在はマイク入力をDiscord botへ送ります。`DISCORD_STREAM_LINE_AUDIO=true` の場合だけ、Windowsのprocess loopbackでLINEプロセス音声を追加ミックスします。
+現在はマイク入力を外部音としてDiscord botへ送ります。`DISCORD_STREAM_LINE_AUDIO=true` の場合だけ、Windowsのprocess loopbackでLINEプロセス音声を追加ミックスします。Discord側には「外部音 + LINE音声」が届きます。
 
 LINEが起動していない間は、LINE音声側は待機します。対応していないWindows環境ではLINE音声だけ取得できず、ログに理由を残してマイク音声だけで続行します。
+
+このミックスはDiscord botへ送る音声だけに使います。Windowsの再生デバイス、スピーカー/ヘッドホン音量、LINEの出力先は変更しないため、このPCで聞こえる音は通常どおりです。
 
 仮想音声デバイスは、明示指定しない限り自動選択しません。これは、HitPaw Virtual Audio、VB-Cable、Voicemeeterなどを誤って拾うと、マイクではなくPC内部音が流れることがあるためです。
 
@@ -130,7 +132,7 @@ Audio stats. CapturedPeak: ... WrittenPeak: ...
 1. VALORANTを閉じた状態でインストーラーを実行してください。
 2. VALORANTは ウィンドウフルスクリーン にしてください。
 3. VALORANT起動時にbotがVCへ入ります。
-4. bot音声はマイク音声を流します。LINE音声中継が有効な場合は、LINEプロセスの音だけを追加で流します。
+4. bot音声はマイクで拾う外部音を流します。LINE音声中継が有効な場合は、LINEプロセスの音だけを追加で混ぜます。
 5. Alt + T でラインナップページを表示/非表示できます。
 6. VALORANT終了後、MP3/MP4は指定Discordチャンネルへ通知抑制付きで添付されます。
 7. Google Drive は使いません。

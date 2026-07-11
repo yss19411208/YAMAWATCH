@@ -64,7 +64,7 @@
 - Discord.Net による VC 接続
 - NAudio による既定マイク入力取得
 - 48kHz/16bit/stereo PCM への変換
-- LINEプロセス音声だけのprocess loopbackミックス
+- 外部音としての既定マイク入力 + LINEプロセス音声だけのDiscord送信用ミックス
 - VALORANT終了後のDiscord MP3/MP4添付共有
 - 通信状態が悪い場合、VALORANT 起動中は一定間隔で Discord VC 接続を再試行
 

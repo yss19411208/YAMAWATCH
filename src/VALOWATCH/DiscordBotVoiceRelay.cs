@@ -571,6 +571,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Volume: {settings.MicrophoneVolume:0.00}. Noise gate: {settings.MicrophoneNoiseGate:0.000}. " +
             $"Line loopback: {(lineAudioProvider is null ? "off" : currentLineLoopbackSourceName)}. " +
             $"Line volume: {settings.LineAudioVolume:0.00}. " +
+            "Output playback: unchanged; capture-only relay. " +
             $"Preferred device: {settings.MicrophoneDeviceName}.");
 
         relayTask = Task.Run(
