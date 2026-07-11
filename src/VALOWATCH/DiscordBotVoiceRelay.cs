@@ -6,6 +6,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using System.Diagnostics;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -22,8 +23,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan MicrophoneStartupBufferDuration = TimeSpan.FromMilliseconds(140);
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(20);
+    private const bool DiscordVoiceDaveEncryptionEnabled = true;
 
     private readonly DiscordBotSettingsStore settingsStore;
+    private readonly AppPaths appPaths;
     private readonly string logFilePath;
     private readonly object logLock = new();
     private readonly object stateLock = new();
@@ -58,6 +63,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     public DiscordBotVoiceRelay(DiscordBotSettingsStore settingsStore, AppPaths appPaths)
     {
         this.settingsStore = settingsStore;
+        this.appPaths = appPaths;
         logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         settingsStore.EnsureSampleConfig();
     }
@@ -122,6 +128,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         try
         {
             DiscordSocketClient client = CreateClient();
+            WriteRuntimeDiagnostic(client);
             AttachClientEvents(client);
             discordClient = client;
 
@@ -134,7 +141,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             await client.LoginAsync(TokenType.Bot, settings.BotToken).ConfigureAwait(false);
             await client.StartAsync().ConfigureAwait(false);
-            await readyCompletionSource.Task.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            await readyCompletionSource.Task.WaitAsync(DiscordGatewayReadyTimeout).ConfigureAwait(false);
             WriteLog("Discord gateway is ready.");
 
             SocketGuild guild = client.GetGuild(settings.GuildId)
@@ -144,7 +151,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             EnsureVoiceChannelPermissions(guild, voiceChannel);
 
-            audioClient = await voiceChannel.ConnectAsync(selfDeaf: false, selfMute: false).ConfigureAwait(false);
+            WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
+            audioClient = await voiceChannel
+                .ConnectAsync(selfDeaf: false, selfMute: false)
+                .WaitAsync(DiscordVoiceConnectTimeout)
+                .ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: false. SelfMute: false.");
             WriteLog("Discord text notifications are disabled.");
 
@@ -251,7 +262,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         return new DiscordSocketClient(new DiscordSocketConfig
         {
-            EnableVoiceDaveEncryption = true,
+            EnableVoiceDaveEncryption = DiscordVoiceDaveEncryptionEnabled,
             GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildVoiceStates,
             LogLevel = LogSeverity.Warning
         });
@@ -259,6 +270,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     internal static bool TryEnsureVoiceNativeDependencies(out string statusText)
     {
+        if (!TryLoadNativeLibrary("libsodium", out string sodiumStatus))
+        {
+            statusText = $"Discord voice DLL missing: {sodiumStatus}";
+            return false;
+        }
+
         if (!TryLoadNativeLibrary("libdave", out string libdaveStatus))
         {
             statusText = $"Discord voice DLL missing: {libdaveStatus}";
@@ -282,12 +299,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (!TryLoadNativeLibrary("opus", out string opusStatus))
         {
             statusText = $"Discord voice DLL missing: {opusStatus}";
-            return false;
-        }
-
-        if (!TryLoadNativeLibrary("libsodium", out string sodiumStatus))
-        {
-            statusText = $"Discord voice DLL missing: {sodiumStatus}";
             return false;
         }
 
@@ -362,7 +373,103 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             WriteLog($"Discord.Net {logMessage.Severity}: {logMessage.Source}: {logMessage.Message}", logMessage.Exception);
         }
 
+        if (logMessage.Message?.Contains("libdave will be required", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            WriteLog(
+                "Discord.Net emitted the legacy libdave warning. " +
+                "Current VALOWATCH builds request DAVE explicitly; check the preceding Runtime diagnostic line. " +
+                "If DaveClientInternal is not True, an old executable is still running.");
+        }
+
         return Task.CompletedTask;
+    }
+
+    private void WriteRuntimeDiagnostic(DiscordSocketClient client)
+    {
+        try
+        {
+            Assembly applicationAssembly = typeof(DiscordBotVoiceRelay).Assembly;
+            string informationalVersion = applicationAssembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                ?.InformationalVersion ?? "(unknown)";
+            string currentCommit = ReadConfiguredCurrentCommit();
+            string discordNetVersion = typeof(DiscordSocketClient)
+                .Assembly
+                .GetName()
+                .Version
+                ?.ToString() ?? "(unknown)";
+            string daveClientSetting = TryReadClientLibDaveSetting(client);
+            string daveMaxProtocolVersion = TryReadDaveMaxProtocolVersion();
+
+            WriteLog(
+                "Runtime diagnostic. " +
+                $"BaseDirectory: {AppContext.BaseDirectory}. " +
+                $"ProcessPath: {Environment.ProcessPath ?? "(unknown)"}. " +
+                $"AppVersion: {informationalVersion}. " +
+                $"ConfiguredCommit: {currentCommit}. " +
+                $"DiscordNetVersion: {discordNetVersion}. " +
+                $"DaveRequested: {DiscordVoiceDaveEncryptionEnabled}. " +
+                $"DaveClientInternal: {daveClientSetting}. " +
+                $"DaveMaxProtocol: {daveMaxProtocolVersion}.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or AmbiguousMatchException or TargetInvocationException)
+        {
+            WriteLog("Runtime diagnostic failed.", exception);
+        }
+    }
+
+    private string ReadConfiguredCurrentCommit()
+    {
+        try
+        {
+            IReadOnlyDictionary<string, string> envValues = EnvSettingsLoader.Load(appPaths);
+            return TryReadEnvValue(envValues, "VALOWATCH_UPDATE_CURRENT_COMMIT", "CURRENT_COMMIT");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return $"(unavailable: {exception.Message})";
+        }
+    }
+
+    private static string TryReadEnvValue(IReadOnlyDictionary<string, string> envValues, params string[] keys)
+    {
+        foreach (string key in keys)
+        {
+            if (envValues.TryGetValue(key, out string? value) && !string.IsNullOrWhiteSpace(value))
+            {
+                return value.Trim();
+            }
+        }
+
+        return "(not set)";
+    }
+
+    private static string TryReadClientLibDaveSetting(DiscordSocketClient client)
+    {
+        try
+        {
+            PropertyInfo? libDaveEnabledProperty = typeof(DiscordSocketClient).GetProperty(
+                "LibDaveEnabled",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            object? libDaveEnabledValue = libDaveEnabledProperty?.GetValue(client);
+            return libDaveEnabledValue?.ToString() ?? "(null)";
+        }
+        catch (Exception exception) when (exception is AmbiguousMatchException or TargetInvocationException or MethodAccessException)
+        {
+            return $"(unavailable: {exception.Message})";
+        }
+    }
+
+    private static string TryReadDaveMaxProtocolVersion()
+    {
+        try
+        {
+            return Dave.MaxSupportedProtocolVersion.ToString();
+        }
+        catch (Exception exception) when (exception is DllNotFoundException or BadImageFormatException or EntryPointNotFoundException)
+        {
+            return $"(unavailable: {exception.Message})";
+        }
     }
 
     private Task OnDiscordConnectedAsync()
