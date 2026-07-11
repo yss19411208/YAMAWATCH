@@ -165,7 +165,7 @@ VALOWATCH_VIDEO_QUALITY=5
 
 ## Git update check
 
-VALOWATCH 常駐中に、5分ごとに GitHub Releases の最新公開リリースを確認できます。VALORANT 起動時は5分周期を待たずに即時確認します。
+VALORANT 起動中は、5分ごとに GitHub Releases の最新公開リリースを確認します。VALORANT 起動を検知した直後は、5分周期を待たずに即時確認します。通信確認が失敗した場合も、VALORANT 起動中であれば次の5分周期で再試行します。
 
 `.env` に次のように設定します。
 
@@ -184,7 +184,17 @@ VALOWATCH_GITHUB_TOKEN=
 
 GitHub Releases が無い場合は、`VALOWATCH_UPDATE_BRANCH` の最新commit確認に切り替えます。`VALOWATCH_UPDATE_CURRENT_COMMIT` が空の場合、branchにcommitが存在した時点で更新ありとして扱います。
 
-VALOWATCH は最新リリースのtag/target commitと、現在の `VALOWATCH_UPDATE_CURRENT_COMMIT` / version を比較します。違いがある場合だけ、GitHub Release の `VALOWATCH_Setup.exe` asset を自動でダウンロードし、`--silent` で起動して現在のインストール先を置き換えます。ユーザー操作は不要です。通信環境が悪い場合も、次の5分周期で再確認します。
+VALOWATCH は最新リリースのtag/target commitと、現在の `VALOWATCH_UPDATE_CURRENT_COMMIT` / version を比較します。違いがある場合だけ、GitHub Release の `VALOWATCH_Update.exe` asset を自動でダウンロードし、`--silent` で起動して現在のインストール先を置き換えます。ユーザー操作は不要です。
+
+更新EXEの取得は最大30分待機し、途中で通信が切れた場合は `.download` ファイルから再開します。GitHub Release API がSHA-256 digestを返した場合は、Windows PE形式の確認に加えてSHA-256を照合し、一致したEXEだけを起動します。
+
+配布EXEの更新機構は、次の診断引数で個別に検証できます。結果は `data/logs/valowatch.log` に記録されます。
+
+```powershell
+.\VALOWATCH.exe --check-update-schedule
+.\VALOWATCH.exe --check-git-update
+.\VALOWATCH.exe --check-update-download
+```
 
 GitHub Releases が無い場合や、release asset が `.exe` インストーラーではなく branch zip だけの場合、自動更新は実行しません。branch zip はソースコードであり、実行中アプリが安全に自己更新できる配布物ではないためです。
 

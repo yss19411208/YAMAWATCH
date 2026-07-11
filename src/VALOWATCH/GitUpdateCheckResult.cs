@@ -6,7 +6,8 @@ public sealed record GitUpdateCheckResult(
     string LatestVersion,
     Uri? ReleaseUri,
     Uri? DownloadUri,
-    string Message)
+    string Message,
+    string ExpectedSha256 = "")
 {
     public bool HasUpdate => Status == GitUpdateCheckStatus.UpdateAvailable;
 

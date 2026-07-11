@@ -7,7 +7,7 @@ namespace VALOWATCH;
 
 public sealed class GitUpdateChecker
 {
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
     private readonly GitUpdateSettingsStore settingsStore;
 
     public GitUpdateChecker(GitUpdateSettingsStore settingsStore)
@@ -141,7 +141,8 @@ public sealed class GitUpdateChecker
         JsonElement root = releaseJson.RootElement;
         string latestVersion = ReadJsonString(root, "tag_name");
         Uri? releaseUri = TryReadUri(root, "html_url");
-        Uri? downloadUri = TryReadDownloadUri(root);
+        ReleaseAsset? installerAsset = TryReadInstallerAsset(root);
+        Uri? downloadUri = installerAsset?.DownloadUri;
         string releaseCommit = TryReadReleaseCommit(root, latestVersion);
 
         if (string.IsNullOrWhiteSpace(latestVersion))
@@ -162,7 +163,8 @@ public sealed class GitUpdateChecker
             latestVersion,
             releaseUri,
             downloadUri,
-            hasUpdate ? "Update available." : "Already up to date.");
+            hasUpdate ? "Update available." : "Already up to date.",
+            installerAsset?.ExpectedSha256 ?? string.Empty);
     }
 
     private static async Task<GitUpdateCheckResult> CheckLatestCommitAsync(
@@ -311,7 +313,7 @@ public sealed class GitUpdateChecker
         return Uri.TryCreate(rawUri, UriKind.Absolute, out Uri? uri) ? uri : null;
     }
 
-    private static Uri? TryReadDownloadUri(JsonElement releaseElement)
+    private static ReleaseAsset? TryReadInstallerAsset(JsonElement releaseElement)
     {
         if (!releaseElement.TryGetProperty("assets", out JsonElement assetsElement) ||
             assetsElement.ValueKind != JsonValueKind.Array)
@@ -319,26 +321,45 @@ public sealed class GitUpdateChecker
             return null;
         }
 
-        Uri? fallbackUri = null;
+        ReleaseAsset? preferredAsset = null;
         foreach (JsonElement assetElement in assetsElement.EnumerateArray())
         {
             string assetName = ReadJsonString(assetElement, "name");
             Uri? browserDownloadUri = TryReadUri(assetElement, "browser_download_url");
-            if (browserDownloadUri is null)
+            if (browserDownloadUri is null || !assetName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            fallbackUri ??= browserDownloadUri;
-            if (assetName.Contains("setup", StringComparison.OrdinalIgnoreCase) ||
-                assetName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
-                assetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            ReleaseAsset releaseAsset = new(browserDownloadUri, NormalizeSha256Digest(ReadJsonString(assetElement, "digest")));
+            if (string.Equals(assetName, "VALOWATCH_Update.exe", StringComparison.OrdinalIgnoreCase))
             {
-                return browserDownloadUri;
+                return releaseAsset;
+            }
+
+            if (preferredAsset is null &&
+                (assetName.Contains("setup", StringComparison.OrdinalIgnoreCase) ||
+                    assetName.Contains("installer", StringComparison.OrdinalIgnoreCase) ||
+                    assetName.Contains("valowatch", StringComparison.OrdinalIgnoreCase)))
+            {
+                preferredAsset = releaseAsset;
             }
         }
 
-        return fallbackUri;
+        return preferredAsset;
+    }
+
+    private static string NormalizeSha256Digest(string digest)
+    {
+        const string sha256Prefix = "sha256:";
+        string normalizedDigest = digest.StartsWith(sha256Prefix, StringComparison.OrdinalIgnoreCase)
+            ? digest[sha256Prefix.Length..]
+            : digest;
+
+        normalizedDigest = normalizedDigest.Trim();
+        return normalizedDigest.Length == 64 && normalizedDigest.All(Uri.IsHexDigit)
+            ? normalizedDigest.ToUpperInvariant()
+            : string.Empty;
     }
 
     private static string TryReadReleaseCommit(JsonElement releaseElement, string tagName)
@@ -448,4 +469,6 @@ public sealed class GitUpdateChecker
 
         return Version.TryParse(string.Join('.', paddedParts), out version);
     }
+
+    private sealed record ReleaseAsset(Uri DownloadUri, string ExpectedSha256);
 }

@@ -10,6 +10,24 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Any(argument => string.Equals(argument, "--check-update-schedule", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunUpdateScheduleDiagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-git-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunGitUpdateDiagnostic(downloadInstaller: false);
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-update-download", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunGitUpdateDiagnostic(downloadInstaller: true);
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-discord-voice-native", StringComparison.OrdinalIgnoreCase)))
         {
             RunDiscordVoiceNativeDiagnostic();
@@ -66,6 +84,103 @@ static class Program
             disableDiscordAutomation));
 
         GC.KeepAlive(singleInstanceMutex);
+    }
+
+    private static void RunUpdateScheduleDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            DateTimeOffset startAtUtc = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            GitUpdateSchedule schedule = new(GitUpdateSchedule.DefaultInterval);
+            bool initialCheckIsDue = schedule.IsDue(startAtUtc, force: false);
+            schedule.MarkCompleted(startAtUtc);
+            bool earlyCheckIsBlocked = !schedule.IsDue(startAtUtc.AddMinutes(4).AddSeconds(59), force: false);
+            bool fiveMinuteCheckIsDue = schedule.IsDue(startAtUtc.AddMinutes(5), force: false);
+            bool forcedCheckIsDue = schedule.IsDue(startAtUtc.AddSeconds(1), force: true);
+            schedule.Reset();
+            bool resetCheckIsDue = schedule.IsDue(startAtUtc, force: false);
+            bool scheduleIsReady = initialCheckIsDue &&
+                earlyCheckIsBlocked &&
+                fiveMinuteCheckIsDue &&
+                forcedCheckIsDue &&
+                resetCheckIsDue;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Update schedule check: {(scheduleIsReady ? "ready" : "failed")}. " +
+                $"IntervalMinutes: {GitUpdateSchedule.DefaultInterval.TotalMinutes:0}. " +
+                $"InitialDue: {initialCheckIsDue}. EarlyBlocked: {earlyCheckIsBlocked}. " +
+                $"FiveMinuteDue: {fiveMinuteCheckIsDue}. ForcedDue: {forcedCheckIsDue}. ResetDue: {resetCheckIsDue}." +
+                Environment.NewLine);
+            Environment.ExitCode = scheduleIsReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Update schedule check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunGitUpdateDiagnostic(bool downloadInstaller)
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            GitUpdateSettingsStore settingsStore = new(appPaths);
+            GitUpdateCheckResult updateResult = new GitUpdateChecker(settingsStore)
+                .CheckLatestReleaseAsync(CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            bool checkIsReady = updateResult.Status is GitUpdateCheckStatus.UpToDate or GitUpdateCheckStatus.UpdateAvailable;
+            string downloadStatus = "not requested";
+
+            if (downloadInstaller)
+            {
+                GitAutoUpdateResult downloadResult = new GitAutoUpdater(settingsStore, appPaths)
+                    .DownloadAndValidateInstallerAsync(updateResult, CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+                downloadStatus = $"{downloadResult.Status}: {downloadResult.Message}";
+                checkIsReady &= downloadResult.InstallerReady;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Git update {(downloadInstaller ? "download" : "check")}: " +
+                $"{(checkIsReady ? "ready" : "failed")}. Status: {updateResult.Status}. " +
+                $"Current: {updateResult.CurrentVersion}. Latest: {updateResult.LatestVersion}. " +
+                $"InstallerAsset: {updateResult.DownloadUri}. DigestAvailable: {!string.IsNullOrWhiteSpace(updateResult.ExpectedSha256)}. " +
+                $"DownloadValidation: {downloadStatus}.{Environment.NewLine}");
+            Environment.ExitCode = checkIsReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, downloadInstaller ? "Git update download" : "Git update check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void TryWriteDiagnosticFailure(string logFilePath, string diagnosticName, Exception exception)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] {diagnosticName} failed: {exception.Message}{Environment.NewLine}");
+        }
+        catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     private static void RunDiscordVoiceNativeDiagnostic()

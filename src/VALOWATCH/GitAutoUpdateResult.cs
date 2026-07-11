@@ -8,6 +8,8 @@ public sealed record GitAutoUpdateResult(
 {
     public bool StartedInstaller => Status == GitAutoUpdateStatus.InstallerStarted;
 
+    public bool InstallerReady => Status == GitAutoUpdateStatus.InstallerReady;
+
     public bool ShouldRetry => Status is
         GitAutoUpdateStatus.DownloadFailed or
         GitAutoUpdateStatus.InvalidInstaller or
@@ -20,6 +22,7 @@ public enum GitAutoUpdateStatus
     DownloadUriNotInstaller,
     DownloadFailed,
     InvalidInstaller,
+    InstallerReady,
     InstallerStarted,
     LaunchFailed
 }

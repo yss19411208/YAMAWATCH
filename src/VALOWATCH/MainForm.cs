@@ -11,7 +11,6 @@ public sealed class MainForm : Form
     private const string DetectedText = "VALORANT detected";
     private const string NotDetectedText = "VALORANT not detected";
     private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromMinutes(2);
-    private static readonly TimeSpan GitUpdateCheckInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
 
     private readonly AppPaths appPaths;
@@ -22,6 +21,7 @@ public sealed class MainForm : Form
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
     private readonly GitUpdateChecker gitUpdateChecker;
     private readonly GitAutoUpdater gitAutoUpdater;
+    private readonly GitUpdateSchedule gitUpdateSchedule = new(GitUpdateSchedule.DefaultInterval);
     private readonly StartupService startupService;
     private readonly bool disableDiscordAutomation;
     private readonly System.Windows.Forms.Timer processTimer = new();
@@ -61,7 +61,6 @@ public sealed class MainForm : Form
     private bool automaticUploadInProgress;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
-    private DateTimeOffset nextGitUpdateCheckAtUtc = DateTimeOffset.MinValue;
 
     public MainForm(
         AppPaths appPaths,
@@ -713,7 +712,7 @@ public sealed class MainForm : Form
                 : DateTimeOffset.MinValue;
             if (valorantDetected)
             {
-                nextGitUpdateCheckAtUtc = DateTimeOffset.MinValue;
+                gitUpdateSchedule.Reset();
                 PreloadStratsOverlayIfNeeded();
                 StartGitUpdateCheckIfNeeded(force: true);
             }
@@ -730,9 +729,9 @@ public sealed class MainForm : Form
         if (valorantDetected)
         {
             PreloadStratsOverlayIfNeeded();
+            StartGitUpdateCheckIfNeeded(force: false);
         }
 
-        StartGitUpdateCheckIfNeeded(force: false);
         RefreshDiscordStatusLabel();
     }
 
@@ -1301,7 +1300,7 @@ public sealed class MainForm : Form
         }
 
         DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
-        if (!force && nowUtc < nextGitUpdateCheckAtUtc)
+        if (!gitUpdateSchedule.IsDue(nowUtc, force))
         {
             return;
         }
@@ -1353,7 +1352,7 @@ public sealed class MainForm : Form
         }
         finally
         {
-            nextGitUpdateCheckAtUtc = DateTimeOffset.UtcNow.Add(GitUpdateCheckInterval);
+            gitUpdateSchedule.MarkCompleted(DateTimeOffset.UtcNow);
             gitUpdateCheckInProgress = false;
         }
     }
