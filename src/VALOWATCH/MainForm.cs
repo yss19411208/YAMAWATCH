@@ -56,6 +56,8 @@ public sealed class MainForm : Form
     private bool stratsPreloadInProgress;
     private bool gitUpdateCheckInProgress;
     private bool gitUpdateCheckedThisValorantSession;
+    private bool automaticRecordingStarted;
+    private bool automaticUploadInProgress;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextGitUpdateRetryAtUtc = DateTimeOffset.MinValue;
@@ -107,6 +109,12 @@ public sealed class MainForm : Form
         stratsToggleDelayTimer.Stop();
         trayIcon.Visible = false;
         DisposeStratsOverlay();
+        if (loopbackRecorder.IsRecording)
+        {
+            automaticRecordingStarted = false;
+            StopRecordingCore(showUserMessage: false);
+        }
+
         loopbackRecorder.Dispose();
         discordBotVoiceRelay.Dispose();
         base.OnFormClosing(eventArgs);
@@ -517,9 +525,14 @@ public sealed class MainForm : Form
 
     private void StartRecording()
     {
+        StartRecordingCore(showUserMessage: true);
+    }
+
+    private RecordingHistoryEntry? StartRecordingCore(bool showUserMessage)
+    {
         if (loopbackRecorder.IsRecording)
         {
-            return;
+            return null;
         }
 
         string timestampText = DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture);
@@ -533,35 +546,62 @@ public sealed class MainForm : Form
             stopRecordingButton.Enabled = true;
             RefreshStatusLabels();
             RefreshRecordingTimer();
+            WriteAppLog("Recording", $"Recording started: {recordingFilePath}");
+            return activeRecordingEntry;
         }
         catch (Exception exception)
         {
-            ShowError($"録音を開始できませんでした。{exception.Message}");
+            if (showUserMessage)
+            {
+                ShowError($"録音を開始できませんでした。{exception.Message}");
+            }
+            else
+            {
+                WriteAppLog("Recording", "Automatic recording start failed.", exception);
+            }
+
+            return null;
         }
     }
 
     private void StopRecording()
     {
+        automaticRecordingStarted = false;
+        StopRecordingCore(showUserMessage: true);
+    }
+
+    private RecordingHistoryEntry? StopRecordingCore(bool showUserMessage)
+    {
         if (!loopbackRecorder.IsRecording)
         {
-            return;
+            return null;
         }
 
+        RecordingHistoryEntry? finishedEntry = null;
         try
         {
             loopbackRecorder.Stop();
             if (activeRecordingEntry is not null)
             {
                 activeRecordingEntry.Finish();
+                finishedEntry = activeRecordingEntry;
                 appState.History.Insert(0, activeRecordingEntry);
                 activeRecordingEntry = null;
                 appStateStore.Save(appState);
                 RefreshHistoryList();
+                WriteAppLog("Recording", $"Recording stopped: {finishedEntry.FilePath}");
             }
         }
         catch (Exception exception)
         {
-            ShowError($"録音を停止できませんでした。{exception.Message}");
+            if (showUserMessage)
+            {
+                ShowError($"録音を停止できませんでした。{exception.Message}");
+            }
+            else
+            {
+                WriteAppLog("Recording", "Automatic recording stop failed.", exception);
+            }
         }
         finally
         {
@@ -570,6 +610,8 @@ public sealed class MainForm : Form
             RefreshStatusLabels();
             RefreshRecordingTimer();
         }
+
+        return finishedEntry;
     }
 
     private async Task UploadLatestRecordingAsync()
@@ -581,9 +623,54 @@ public sealed class MainForm : Form
             return;
         }
 
+        await UploadRecordingAsync(
+            latestEntry,
+            showUserMessage: true,
+            requireStoredDriveCredential: false).ConfigureAwait(true);
+    }
+
+    private async Task UploadRecordingAsync(
+        RecordingHistoryEntry latestEntry,
+        bool showUserMessage,
+        bool requireStoredDriveCredential)
+    {
         if (!File.Exists(latestEntry.FilePath))
         {
-            ShowError("録音ファイルが見つかりません。履歴のファイルを確認してください。");
+            latestEntry.UploadStatus = "File missing";
+            appStateStore.Save(appState);
+            RefreshHistoryList();
+            if (showUserMessage)
+            {
+                ShowError("録音ファイルが見つかりません。履歴のファイルを確認してください。");
+            }
+            else
+            {
+                WriteAppLog("Drive", $"Recording file missing: {latestEntry.FilePath}");
+            }
+
+            return;
+        }
+
+        if (!googleDriveUploader.HasClientSecret)
+        {
+            latestEntry.UploadStatus = "Drive not configured";
+            appStateStore.Save(appState);
+            RefreshHistoryList();
+            WriteAppLog("Drive", $"Automatic upload skipped because Google client secret is missing: {appPaths.GoogleClientSecretPath}");
+            if (showUserMessage)
+            {
+                ShowError($"Google Drive連携には {appPaths.GoogleClientSecretPath} が必要です。");
+            }
+
+            return;
+        }
+
+        if (requireStoredDriveCredential && !googleDriveUploader.HasStoredCredential)
+        {
+            latestEntry.UploadStatus = "Drive auth missing";
+            appStateStore.Save(appState);
+            RefreshHistoryList();
+            WriteAppLog("Drive", "Automatic upload skipped because Google Drive has not been authorized on this PC.");
             return;
         }
 
@@ -599,14 +686,25 @@ public sealed class MainForm : Form
             latestEntry.DriveWebViewLink = uploadResult.WebViewLink;
             appStateStore.Save(appState);
             RefreshHistoryList();
-            ShowInfo("Google Driveへアップロードしました。");
+            WriteAppLog("Drive", $"Recording uploaded to Google Drive. FileId: {uploadResult.FileId}");
+            if (showUserMessage)
+            {
+                ShowInfo("Google Driveへアップロードしました。");
+            }
         }
         catch (Exception exception)
         {
             latestEntry.UploadStatus = "Upload failed";
             appStateStore.Save(appState);
             RefreshHistoryList();
-            ShowError(exception.Message);
+            if (showUserMessage)
+            {
+                ShowError(exception.Message);
+            }
+            else
+            {
+                WriteAppLog("Drive", "Automatic recording upload failed.", exception);
+            }
         }
         finally
         {
@@ -674,6 +772,8 @@ public sealed class MainForm : Form
                 PreloadStratsOverlayIfNeeded();
                 StartGitUpdateCheckIfNeeded(force: true);
             }
+
+            HandleRecordingAutomationStateChange(valorantDetected);
             _ = HandleValorantStateChangeAsync(valorantDetected);
         }
         else if (ShouldRetryDiscordStart(valorantDetected))
@@ -689,6 +789,68 @@ public sealed class MainForm : Form
         }
 
         RefreshDiscordStatusLabel();
+    }
+
+    private void HandleRecordingAutomationStateChange(bool valorantDetected)
+    {
+        if (valorantDetected)
+        {
+            StartAutomaticRecordingIfNeeded();
+            return;
+        }
+
+        _ = StopAutomaticRecordingAndUploadAsync();
+    }
+
+    private void StartAutomaticRecordingIfNeeded()
+    {
+        if (automaticRecordingStarted || loopbackRecorder.IsRecording)
+        {
+            return;
+        }
+
+        RecordingHistoryEntry? recordingEntry = StartRecordingCore(showUserMessage: false);
+        if (recordingEntry is null)
+        {
+            return;
+        }
+
+        automaticRecordingStarted = true;
+        WriteAppLog("Recording", "Automatic recording started for VALORANT session.");
+    }
+
+    private async Task StopAutomaticRecordingAndUploadAsync()
+    {
+        if (!automaticRecordingStarted)
+        {
+            return;
+        }
+
+        automaticRecordingStarted = false;
+        RecordingHistoryEntry? finishedEntry = StopRecordingCore(showUserMessage: false);
+        if (finishedEntry is null)
+        {
+            return;
+        }
+
+        if (automaticUploadInProgress)
+        {
+            WriteAppLog("Drive", "Automatic upload skipped because another upload is already running.");
+            return;
+        }
+
+        automaticUploadInProgress = true;
+        try
+        {
+            await UploadRecordingAsync(
+                finishedEntry,
+                showUserMessage: false,
+                requireStoredDriveCredential: true).ConfigureAwait(true);
+        }
+        finally
+        {
+            automaticUploadInProgress = false;
+        }
     }
 
     private bool GetDebouncedValorantDetected(bool rawValorantDetected)

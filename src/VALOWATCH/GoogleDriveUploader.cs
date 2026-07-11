@@ -20,6 +20,10 @@ public sealed class GoogleDriveUploader
 
     public bool HasClientSecret => File.Exists(appPaths.GoogleClientSecretPath);
 
+    public bool HasStoredCredential =>
+        Directory.Exists(appPaths.GoogleTokenDirectory) &&
+        Directory.EnumerateFiles(appPaths.GoogleTokenDirectory, "*", SearchOption.AllDirectories).Any();
+
     public async Task<DriveUploadResult> UploadAsync(string recordingFilePath, CancellationToken cancellationToken)
     {
         if (!File.Exists(recordingFilePath))

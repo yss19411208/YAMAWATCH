@@ -36,15 +36,16 @@ static class Program
         ApplicationConfiguration.Initialize();
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
+        DiscordBotSettingsStore discordBotSettingsStore = new(appPaths);
         bool disableDiscordAutomation = args.Any(argument =>
             string.Equals(argument, "--no-discord", StringComparison.OrdinalIgnoreCase));
 
         Application.Run(new MainForm(
             appPaths,
             new AppStateStore(appPaths),
-            new LoopbackRecorder(),
+            new LoopbackRecorder(discordBotSettingsStore),
             new GoogleDriveUploader(appPaths),
-            new DiscordBotVoiceRelay(new DiscordBotSettingsStore(appPaths), appPaths),
+            new DiscordBotVoiceRelay(discordBotSettingsStore, appPaths),
             new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
             new GitAutoUpdater(new GitUpdateSettingsStore(appPaths), appPaths),
             new StartupService(),

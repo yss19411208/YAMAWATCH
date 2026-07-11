@@ -6,8 +6,14 @@ namespace VALOWATCH;
 public sealed class LoopbackRecorder : IDisposable
 {
     private readonly object recorderLock = new();
+    private readonly DiscordBotSettingsStore? discordBotSettingsStore;
     private WasapiCapture? activeCapture;
     private WaveFileWriter? activeWriter;
+
+    public LoopbackRecorder(DiscordBotSettingsStore? discordBotSettingsStore = null)
+    {
+        this.discordBotSettingsStore = discordBotSettingsStore;
+    }
 
     public bool IsRecording { get; private set; }
 
@@ -26,7 +32,9 @@ public sealed class LoopbackRecorder : IDisposable
 
             Directory.CreateDirectory(Path.GetDirectoryName(recordingFilePath) ?? AppContext.BaseDirectory);
 
-            WasapiCapture capture = new(WasapiCapture.GetDefaultCaptureDevice());
+            DiscordBotSettings? discordSettings = discordBotSettingsStore?.Load();
+            MMDevice captureDevice = DiscordBotVoiceRelay.GetDefaultMicrophoneDevice(discordSettings?.MicrophoneDeviceName);
+            WasapiCapture capture = new(captureDevice);
             WaveFileWriter writer = new(recordingFilePath, capture.WaveFormat);
 
             activeCapture = capture;
