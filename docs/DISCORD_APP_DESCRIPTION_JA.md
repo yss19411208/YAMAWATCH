@@ -6,7 +6,7 @@
 
 VALOWATCHは、VALORANT用の補助アプリです。
 
-VALORANTを起動すると自動でバックグラウンド動作し、Discord botが指定VCに入ります。VCでは基本的に物理マイクの音声を流し、LINEが起動している間だけPCの既定出力音声も混ぜられます。`Alt + T` を押すと、VALORANT用のラインナップ確認ページをオーバーレイで表示/非表示できます。
+VALORANTを起動すると自動でバックグラウンド動作し、Discord botが指定VCに入ります。VCでは基本的に物理マイクの音声を流し、LINEプロセスの音だけをDiscord側へ中継できます。`Alt + T` を押すと、VALORANT用のラインナップ確認ページをオーバーレイで表示/非表示できます。
 
 インストール後はWindows起動時に自動で常駐します。通常の設定画面や履歴画面は出ず、表に出るUIは `Alt + T` のラインナップページだけです。VALORANTをウィンドウフルスクリーンにして使ってください。
 
@@ -18,7 +18,7 @@ VALORANTを起動すると自動でバックグラウンド動作し、Discord b
 - 一度開いたWebView2を保持し、毎回ページを読み直さない
 - Discord botを指定VCへ自動参加させる
 - Discord botから物理マイク音声をVCへ流す
-- LINEが起動している間だけ、既定出力音声をDiscord bot音声へミックスする
+- LINEプロセスの音だけをDiscord bot音声へミックスする
 - VALORANT終了後に録音WAVをMP3へ変換し、指定テキストチャンネルへ通知抑制付きで添付する
 - 明示的に有効化した場合、VALORANT起動中の画面MP4とカメラMP4を保存し、指定テキストチャンネルへ通知抑制付きで添付する
 - VALORANT起動時にGitHub更新確認を行う
@@ -44,9 +44,9 @@ VALORANT側は次の設定にしてください。
 
 ## 音声の現在の仕様
 
-現在はマイク入力をDiscord botへ送ります。`DISCORD_STREAM_LINE_AUDIO=true` の場合だけ、LINEプロセスが起動している間にWindowsの既定出力音声もミックスします。
+現在はマイク入力をDiscord botへ送ります。`DISCORD_STREAM_LINE_AUDIO=true` の場合だけ、Windowsのprocess loopbackでLINEプロセス音声を追加ミックスします。
 
-LINE音声ミックスはアプリ単位でLINEだけを分離するものではありません。LINEが起動している間、同じスピーカー/ヘッドホンへ流れている他アプリ音も一緒に入る可能性があります。
+LINEが起動していない間は、LINE音声側は待機します。対応していないWindows環境ではLINE音声だけ取得できず、ログに理由を残してマイク音声だけで続行します。
 
 仮想音声デバイスは、明示指定しない限り自動選択しません。これは、HitPaw Virtual Audio、VB-Cable、Voicemeeterなどを誤って拾うと、マイクではなくPC内部音が流れることがあるためです。
 
@@ -130,7 +130,7 @@ Audio stats. CapturedPeak: ... WrittenPeak: ...
 1. VALORANTを閉じた状態でインストーラーを実行してください。
 2. VALORANTは ウィンドウフルスクリーン にしてください。
 3. VALORANT起動時にbotがVCへ入ります。
-4. bot音声はマイク音声を流します。LINEが起動中の場合だけ、既定出力音声も混ざることがあります。
+4. bot音声はマイク音声を流します。LINE音声中継が有効な場合は、LINEプロセスの音だけを追加で流します。
 5. Alt + T でラインナップページを表示/非表示できます。
 6. VALORANT終了後、MP3/MP4は指定Discordチャンネルへ通知抑制付きで添付されます。
 7. Google Drive は使いません。

@@ -17,7 +17,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、既定マイク入力のリレーを開始します。
 - VALORANT 終了検知後、録音WAVをMP3へ変換し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
-- `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセス起動中だけPCの既定出力音声をDiscord音声へミックスします。
+- `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセスの音だけをDiscord音声へミックスします。
 - `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、常駐中は5分ごとに GitHub Releases の更新確認を行い、VALORANT 起動時にも即時確認します。`VALOWATCH_Setup.exe` の release asset が現在のcommit/versionと違えば自動でダウンロードしてサイレント更新します。
 - 配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` を `VALOWATCH.exe` へ埋め込みます。
 
@@ -128,9 +128,9 @@ Discordの通常メッセージ作成APIは、ファイルを `multipart/form-da
 
 Discordメッセージには `SuppressNotification` フラグを付けます。チャンネルには投稿されますが、通常の通知を鳴らさない運用です。
 
-## LINE audio mix
+## LINE process audio mix
 
-`DISCORD_STREAM_LINE_AUDIO=true` の場合、VALOWATCHはLINEプロセスの起動を数秒おきに確認します。LINEが起動している間だけ、Windowsの既定出力デバイスの音をDiscord bot音声へミックスします。
+`DISCORD_STREAM_LINE_AUDIO=true` の場合、VALOWATCHはLINEプロセスを数秒おきに探し、見つかったLINEプロセスIDだけをWindowsのprocess loopbackでDiscord bot音声へミックスします。LINEが起動していない間は待機し、マイク音声だけを流します。
 
 ```dotenv
 DISCORD_STREAM_LINE_AUDIO=true
@@ -138,7 +138,9 @@ DISCORD_LINE_PROCESS_NAMES=LINE,Line,line
 DISCORD_LINE_AUDIO_VOLUME=0.45
 ```
 
-注意: この方式はLINEだけをアプリ単位で分離して録音するものではありません。LINEが起動中に同じスピーカー/ヘッドホンへ流れている他アプリ音も一緒に入る可能性があります。不要な場合は `DISCORD_STREAM_LINE_AUDIO=false` にしてください。
+対象プロセスの選択には `DISCORD_LINE_PROCESS_NAMES` を使います。配布先PCでLINEの実プロセス名が異なる場合は、`data\logs\valowatch.log` の `LINE process-only loopback` 行を見て調整してください。
+
+この方式はWindowsのApplication Loopbackを使います。対応していないWindows環境ではLINE音声だけ取得できず、ログに理由を残してマイク音声だけで続行します。出典: https://github.com/microsoft/Windows-classic-samples/tree/main/Samples/ApplicationLoopback
 
 ## MP4 capture
 

@@ -1,5 +1,6 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace VALOWATCH;
@@ -18,6 +19,12 @@ static class Program
         if (args.Any(argument => string.Equals(argument, "--check-microphone", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneDiagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-line-loopback", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunLineLoopbackDiagnostic();
             return;
         }
 
@@ -233,5 +240,99 @@ static class Program
 
             Environment.ExitCode = 1;
         }
+    }
+
+    private static void RunLineLoopbackDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            DiscordBotSettings? settings = new DiscordBotSettingsStore(appPaths).Load();
+            string[] processNames = settings?.LineAudioProcessNames.Length > 0
+                ? settings.LineAudioProcessNames
+                : ["LINE", "Line", "line"];
+            string matchingLineProcesses = DescribeMatchingProcesses(processNames);
+            int callbackCount = 0;
+            long byteCount = 0;
+            using ProcessLoopbackCapture capture = new(Environment.ProcessId);
+            capture.DataAvailable += (_, eventArgs) =>
+            {
+                callbackCount++;
+                byteCount += eventArgs.BytesRecorded;
+            };
+
+            capture.StartRecording();
+            Thread.Sleep(700);
+            capture.StopRecording();
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] LINE process loopback check: ready. " +
+                $"TestTargetPid: {Environment.ProcessId}. Format: {capture.WaveFormat}. " +
+                $"Callbacks: {callbackCount}. Bytes: {byteCount}. " +
+                $"ConfiguredProcessNames: {string.Join(",", processNames)}. MatchingProcesses: {matchingLineProcesses}{Environment.NewLine}");
+            Environment.ExitCode = 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or InvalidCastException or TimeoutException or COMException)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+                File.AppendAllText(
+                    logFilePath,
+                    $"{DateTimeOffset.Now:O} [Diagnostics] LINE process loopback check failed: {exception.Message}{Environment.NewLine}");
+            }
+            catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+            {
+            }
+
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static string DescribeMatchingProcesses(IEnumerable<string> processNames)
+    {
+        List<string> processDescriptions = [];
+        foreach (string rawProcessName in processNames)
+        {
+            string processName = Path.GetFileNameWithoutExtension(rawProcessName.Trim());
+            if (string.IsNullOrWhiteSpace(processName))
+            {
+                continue;
+            }
+
+            Process[] matchingProcesses;
+            try
+            {
+                matchingProcesses = Process.GetProcessesByName(processName);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                continue;
+            }
+
+            foreach (Process process in matchingProcesses)
+            {
+                using (process)
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            processDescriptions.Add($"{process.ProcessName}:{process.Id}");
+                        }
+                    }
+                    catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+                    {
+                    }
+                }
+            }
+        }
+
+        return processDescriptions.Count == 0 ? "none" : string.Join(",", processDescriptions);
     }
 }

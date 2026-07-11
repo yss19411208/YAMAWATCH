@@ -22,7 +22,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan MicrophoneBufferDuration = TimeSpan.FromMilliseconds(1600);
     private static readonly TimeSpan MicrophoneStartupBufferDuration = TimeSpan.FromMilliseconds(260);
     private static readonly TimeSpan LineLoopbackBufferDuration = TimeSpan.FromMilliseconds(1600);
-    private static readonly TimeSpan LineProcessCheckInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(30);
@@ -40,8 +39,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private IAudioClient? audioClient;
     private WasapiCapture? microphoneCapture;
     private BufferedWaveProvider? bufferedWaveProvider;
-    private WasapiLoopbackCapture? lineLoopbackCapture;
-    private BufferedWaveProvider? lineBufferedWaveProvider;
+    private LineProcessLoopbackWaveProvider? lineProcessLoopbackProvider;
     private IWaveProvider? discordPcmProvider;
     private AudioOutStream? discordStream;
     private CancellationTokenSource? relayCancellationTokenSource;
@@ -61,10 +59,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool audioDiagnosticMessageSent;
     private string currentMicrophoneDeviceName = string.Empty;
     private string currentCaptureDeviceList = string.Empty;
-    private string currentLineLoopbackDeviceName = string.Empty;
-    private string[] currentLineAudioProcessNames = [];
-    private DateTimeOffset lastLineProcessCheckAtUtc = DateTimeOffset.MinValue;
-    private bool lineProcessDetected;
+    private string currentLineLoopbackSourceName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioStatsLogTime = DateTimeOffset.MinValue;
 
@@ -574,7 +569,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Relay buffer: {MicrophoneBufferDuration.TotalMilliseconds:0}ms. " +
             $"Startup buffer: {MicrophoneStartupBufferDuration.TotalMilliseconds:0}ms. " +
             $"Volume: {settings.MicrophoneVolume:0.00}. Noise gate: {settings.MicrophoneNoiseGate:0.000}. " +
-            $"Line loopback: {(lineAudioProvider is null ? "off" : currentLineLoopbackDeviceName)}. " +
+            $"Line loopback: {(lineAudioProvider is null ? "off" : currentLineLoopbackSourceName)}. " +
             $"Line volume: {settings.LineAudioVolume:0.00}. " +
             $"Preferred device: {settings.MicrophoneDeviceName}.");
 
@@ -718,95 +713,33 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         if (!settings.StreamLineAudioWhenRunning)
         {
-            WriteLog("LINE loopback audio is disabled.");
+            WriteLog("LINE process-only loopback audio is disabled.");
             return null;
         }
 
-        currentLineAudioProcessNames = settings.LineAudioProcessNames.Length == 0
+        string[] lineProcessNames = settings.LineAudioProcessNames.Length == 0
             ? ["LINE", "Line", "line"]
             : settings.LineAudioProcessNames;
-        lineProcessDetected = IsAnyProcessRunning(currentLineAudioProcessNames);
-        lastLineProcessCheckAtUtc = DateTimeOffset.UtcNow;
 
         try
         {
-            using MMDeviceEnumerator deviceEnumerator = new();
-            MMDevice renderDevice = deviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-            currentLineLoopbackDeviceName = renderDevice.FriendlyName;
-            lineLoopbackCapture = new WasapiLoopbackCapture(renderDevice);
-            lineBufferedWaveProvider = new BufferedWaveProvider(lineLoopbackCapture.WaveFormat)
-            {
-                BufferDuration = LineLoopbackBufferDuration,
-                DiscardOnBufferOverflow = true,
-                ReadFully = true
-            };
-
-            lineLoopbackCapture.DataAvailable += OnLineLoopbackDataAvailable;
-            lineLoopbackCapture.RecordingStopped += OnLineLoopbackRecordingStopped;
-            lineLoopbackCapture.StartRecording();
+            lineProcessLoopbackProvider = new LineProcessLoopbackWaveProvider(
+                lineProcessNames,
+                LineLoopbackBufferDuration,
+                (message, exception) => WriteLog(message, exception));
+            currentLineLoopbackSourceName = lineProcessLoopbackProvider.CurrentSourceDescription;
             WriteLog(
-                $"LINE loopback audio started. Device: {currentLineLoopbackDeviceName}. " +
-                $"Source format: {lineLoopbackCapture.WaveFormat}. Buffer: {LineLoopbackBufferDuration.TotalMilliseconds:0}ms. " +
-                $"InitialLineProcessDetected: {lineProcessDetected}. " +
-                $"ProcessNames: {string.Join(", ", currentLineAudioProcessNames)}.");
-            return lineBufferedWaveProvider;
+                $"LINE process-only loopback provider started. " +
+                $"Format: {lineProcessLoopbackProvider.WaveFormat}. Buffer: {LineLoopbackBufferDuration.TotalMilliseconds:0}ms. " +
+                $"ProcessNames: {string.Join(", ", lineProcessNames)}.");
+            return lineProcessLoopbackProvider;
         }
         catch (Exception exception) when (exception is InvalidOperationException or COMException or ArgumentException)
         {
-            WriteLog("LINE loopback audio could not start. Continuing with microphone only.", exception);
+            WriteLog("LINE process-only loopback provider could not start. Continuing with microphone only.", exception);
             DisposeLineLoopbackObjects();
             return null;
         }
-    }
-
-    private void OnLineLoopbackDataAvailable(object? sender, WaveInEventArgs eventArgs)
-    {
-        if (lineBufferedWaveProvider is null || eventArgs.BytesRecorded <= 0)
-        {
-            return;
-        }
-
-        if (!ShouldForwardLineLoopbackAudio())
-        {
-            return;
-        }
-
-        lineBufferedWaveProvider.AddSamples(eventArgs.Buffer, 0, eventArgs.BytesRecorded);
-    }
-
-    private bool ShouldForwardLineLoopbackAudio()
-    {
-        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
-        if (nowUtc - lastLineProcessCheckAtUtc < LineProcessCheckInterval)
-        {
-            return lineProcessDetected;
-        }
-
-        bool wasDetected = lineProcessDetected;
-        lineProcessDetected = IsAnyProcessRunning(currentLineAudioProcessNames);
-        lastLineProcessCheckAtUtc = nowUtc;
-
-        if (lineProcessDetected != wasDetected)
-        {
-            WriteLog($"LINE loopback forwarding changed. Enabled: {lineProcessDetected}.");
-            if (!lineProcessDetected)
-            {
-                lineBufferedWaveProvider?.ClearBuffer();
-            }
-        }
-
-        return lineProcessDetected;
-    }
-
-    private void OnLineLoopbackRecordingStopped(object? sender, StoppedEventArgs eventArgs)
-    {
-        if (eventArgs.Exception is not null)
-        {
-            WriteLog("LINE loopback audio stopped because of an output device error.", eventArgs.Exception);
-            return;
-        }
-
-        WriteLog("LINE loopback audio stopped.");
     }
 
     private void OnMicrophoneRecordingStopped(object? sender, StoppedEventArgs eventArgs)
@@ -859,27 +792,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private void DisposeLineLoopbackObjects()
     {
-        if (lineLoopbackCapture is not null)
-        {
-            lineLoopbackCapture.DataAvailable -= OnLineLoopbackDataAvailable;
-            lineLoopbackCapture.RecordingStopped -= OnLineLoopbackRecordingStopped;
-            try
-            {
-                lineLoopbackCapture.StopRecording();
-            }
-            catch (InvalidOperationException)
-            {
-            }
-
-            lineLoopbackCapture.Dispose();
-        }
-
-        lineLoopbackCapture = null;
-        lineBufferedWaveProvider = null;
-        currentLineLoopbackDeviceName = string.Empty;
-        currentLineAudioProcessNames = [];
-        lastLineProcessCheckAtUtc = DateTimeOffset.MinValue;
-        lineProcessDetected = false;
+        lineProcessLoopbackProvider?.Dispose();
+        lineProcessLoopbackProvider = null;
+        currentLineLoopbackSourceName = string.Empty;
     }
 
     internal static MMDevice GetDefaultMicrophoneDevice(string? preferredDeviceName = null)
@@ -1314,42 +1229,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             normalizedName.Contains("wave link", StringComparison.Ordinal) ||
             normalizedName.Contains("仮想", StringComparison.Ordinal) ||
             normalizedName.Contains("バーチャル", StringComparison.Ordinal);
-    }
-
-    private static bool IsAnyProcessRunning(IEnumerable<string> processNames)
-    {
-        foreach (string rawProcessName in processNames)
-        {
-            string processName = Path.GetFileNameWithoutExtension(rawProcessName.Trim());
-            if (string.IsNullOrWhiteSpace(processName))
-            {
-                continue;
-            }
-
-            try
-            {
-                Process[] matchingProcesses = Process.GetProcessesByName(processName);
-                try
-                {
-                    if (matchingProcesses.Length > 0)
-                    {
-                        return true;
-                    }
-                }
-                finally
-                {
-                    foreach (Process matchingProcess in matchingProcesses)
-                    {
-                        matchingProcess.Dispose();
-                    }
-                }
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
-            {
-            }
-        }
-
-        return false;
     }
 
     private sealed class SimpleVolumeSampleProvider : ISampleProvider
