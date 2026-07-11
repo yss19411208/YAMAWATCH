@@ -7,6 +7,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - 起動すると通常画面を出さず、タスクトレイでバックグラウンド常駐します。
 - `Alt + T` は VALORANT が起動している時だけ反応します。
 - オーバーレイには `https://strats.gg/valorant/lineups` だけを表示します。
+- 通常の設定画面や履歴画面は表示しません。表に出るUIは `Alt + T` の strats.gg オーバーレイだけです。
 - 初回表示後は同じ WebView2 ウィンドウを保持し、`Alt + T` は表示/非表示だけを切り替えます。
 - 非表示中も WebView2 を破棄せず、strats.gg のページ状態を保持します。
 - オーバーレイ表示時は VALORANT のフォーカスを奪わないように、非アクティブ表示を使います。
@@ -16,7 +17,6 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、既定マイク入力のリレーを開始します。
 - VALORANT 終了検知後、録音WAVをMP3へ変換し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
-- Google Drive 設定と保存済み認証がある場合は、従来どおりDriveアップロードも併用できます。
 - `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセス起動中だけPCの既定出力音声をDiscord音声へミックスします。
 - `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、VALORANT 起動時に GitHub Releases の更新確認を行い、`VALOWATCH_Setup.exe` の release asset が新しければ自動でダウンロードしてサイレント更新します。
 - 配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` を `VALOWATCH.exe` へ埋め込みます。
@@ -98,8 +98,6 @@ VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2
 VALOWATCH_UPDATE_BRANCH=main
 VALOWATCH_UPDATE_CURRENT_COMMIT=
 VALOWATCH_GITHUB_TOKEN=
-GOOGLE_DRIVE_CREDENTIAL_USER=VALOWATCH
-GOOGLE_DRIVE_FOLDER_ID=
 VALOWATCH_VIDEO_CAPTURE_ENABLED=false
 VALOWATCH_VIDEO_CAPTURE_SCREEN=true
 VALOWATCH_VIDEO_CAPTURE_CAMERA=true
@@ -113,7 +111,7 @@ VALOWATCH_VIDEO_QUALITY=5
 
 ## Discord MP3 / MP4 sharing
 
-Driveを使わない共有先として、Discordの指定テキストチャンネルへファイル添付します。
+VALORANT 終了後の共有先として、Discordの指定テキストチャンネルへファイル添付します。Google Drive 連携は使いません。
 
 ```dotenv
 DISCORD_TEXT_CHANNEL_ID=123456789012345678
@@ -142,11 +140,7 @@ DISCORD_LINE_AUDIO_VOLUME=0.45
 
 注意: この方式はLINEだけをアプリ単位で分離して録音するものではありません。LINEが起動中に同じスピーカー/ヘッドホンへ流れている他アプリ音も一緒に入る可能性があります。不要な場合は `DISCORD_STREAM_LINE_AUDIO=false` にしてください。
 
-## Google Drive and MP4 capture
-
-Driveに保存されるアカウントは、`config\google_client_secret.json` で初回OAuth認証したGoogleアカウントです。`.env` の `GOOGLE_DRIVE_CREDENTIAL_USER` はローカルに保存する認証スロット名であり、Google側のログインアカウントを強制するものではありません。
-
-特定のDriveへ集約したい場合は、保存先フォルダを作り、そのフォルダIDを `.env` の `GOOGLE_DRIVE_FOLDER_ID` に入れてください。初回OAuthで選んだGoogleアカウントがそのフォルダへ書き込める必要があります。
+## MP4 capture
 
 画面/カメラMP4保存は、本人が内容を理解しているPCでだけ有効化してください。既定では無効です。
 

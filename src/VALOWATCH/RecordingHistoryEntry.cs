@@ -12,10 +12,6 @@ public sealed class RecordingHistoryEntry
 
     public string UploadStatus { get; set; } = "Not uploaded";
 
-    public string DriveFileId { get; set; } = string.Empty;
-
-    public string DriveWebViewLink { get; set; } = string.Empty;
-
     public List<TeammateSlot> Teammates { get; set; } = [];
 
     public static RecordingHistoryEntry Start(string recordingFilePath, IEnumerable<TeammateSlot> teammates)

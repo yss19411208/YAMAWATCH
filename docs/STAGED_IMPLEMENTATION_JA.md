@@ -150,7 +150,6 @@ VALOWATCH_GITHUB_TOKEN=
 
 - Discord bot による画面共有
 - 試合開始/終了の安定検知
-- Google Drive への自動アップロードの最終調整
 - tracker.gg 風のランク/名前パネル
 - `Alt + T` のキー変更UI
 - オーバーレイ位置/サイズ保存

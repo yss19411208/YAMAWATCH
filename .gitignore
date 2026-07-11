@@ -16,9 +16,7 @@ data/
 config/discord_bot.sample.json
 config/.env.example
 config/.env
-config/google_client_secret.json
 config/discord_bot.json
-google-token/
 
 # VALOWATCH generated installers and packaged artifacts
 exe/

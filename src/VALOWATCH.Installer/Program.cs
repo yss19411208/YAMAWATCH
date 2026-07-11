@@ -738,8 +738,6 @@ internal static class Program
             "VALOWATCH_UPDATE_BRANCH=main",
             "VALOWATCH_UPDATE_CURRENT_COMMIT=",
             "VALOWATCH_GITHUB_TOKEN=",
-            "GOOGLE_DRIVE_CREDENTIAL_USER=VALOWATCH",
-            "GOOGLE_DRIVE_FOLDER_ID=",
             "VALOWATCH_VIDEO_CAPTURE_ENABLED=false",
             "VALOWATCH_VIDEO_CAPTURE_SCREEN=true",
             "VALOWATCH_VIDEO_CAPTURE_CAMERA=true",

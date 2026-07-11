@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace VALOWATCH;
 
@@ -16,7 +17,6 @@ public sealed class MainForm : Form
     private readonly AppPaths appPaths;
     private readonly AppStateStore appStateStore;
     private readonly LoopbackRecorder loopbackRecorder;
-    private readonly GoogleDriveUploader googleDriveUploader;
     private readonly DiscordMediaSharer discordMediaSharer;
     private readonly VideoCaptureSession videoCaptureSession;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
@@ -33,15 +33,14 @@ public sealed class MainForm : Form
     private RecordingHistoryEntry? activeRecordingEntry;
     private Label valorantStatusLabel = null!;
     private Label recordingStatusLabel = null!;
-    private Label driveStatusLabel = null!;
     private Label discordStatusLabel = null!;
     private Label stratsStatusLabel = null!;
     private Label recordingElapsedLabel = null!;
     private Button startRecordingButton = null!;
     private Button stopRecordingButton = null!;
-    private Button uploadLatestButton = null!;
+    private Button shareLatestButton = null!;
     private Button openRecordingsButton = null!;
-    private Button credentialsFolderButton = null!;
+    private Button openSharedMediaButton = null!;
     private Button openStratsButton = null!;
     private CheckBox topMostCheckBox = null!;
     private CheckBox startupCheckBox = null!;
@@ -69,7 +68,6 @@ public sealed class MainForm : Form
         AppPaths appPaths,
         AppStateStore appStateStore,
         LoopbackRecorder loopbackRecorder,
-        GoogleDriveUploader googleDriveUploader,
         DiscordMediaSharer discordMediaSharer,
         VideoCaptureSession videoCaptureSession,
         DiscordBotVoiceRelay discordBotVoiceRelay,
@@ -81,7 +79,6 @@ public sealed class MainForm : Form
         this.appPaths = appPaths;
         this.appStateStore = appStateStore;
         this.loopbackRecorder = loopbackRecorder;
-        this.googleDriveUploader = googleDriveUploader;
         this.discordMediaSharer = discordMediaSharer;
         this.videoCaptureSession = videoCaptureSession;
         this.discordBotVoiceRelay = discordBotVoiceRelay;
@@ -180,34 +177,18 @@ public sealed class MainForm : Form
     private void BuildInterface()
     {
         Text = "VALOWATCH";
-        MinimumSize = new Size(860, 560);
-        Size = new Size(980, 640);
-        StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(16, 18, 24);
+        Size = new Size(1, 1);
+        StartPosition = FormStartPosition.Manual;
+        Location = new Point(-32000, -32000);
+        BackColor = Color.Black;
         ForeColor = Color.White;
         Font = new Font("Segoe UI", 10F);
-        Opacity = 0.96;
+        FormBorderStyle = FormBorderStyle.FixedToolWindow;
+        Opacity = 1;
         TopMost = false;
         ShowInTaskbar = false;
 
-        TableLayoutPanel rootLayout = new()
-        {
-            Dock = DockStyle.Fill,
-            BackColor = BackColor,
-            ColumnCount = 1,
-            RowCount = 4,
-            Padding = new Padding(16)
-        };
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 72));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 52));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 48));
-        Controls.Add(rootLayout);
-
-        rootLayout.Controls.Add(BuildHeaderPanel(), 0, 0);
-        rootLayout.Controls.Add(BuildActionPanel(), 0, 1);
-        rootLayout.Controls.Add(BuildTeammatePanel(), 0, 2);
-        rootLayout.Controls.Add(BuildHistoryPanel(), 0, 3);
+        InitializeHeadlessControls();
 
         trayIcon = new NotifyIcon
         {
@@ -217,6 +198,31 @@ public sealed class MainForm : Form
             ContextMenuStrip = BuildTrayMenu()
         };
         trayIcon.DoubleClick += (_, _) => ToggleStratsOverlayWhenValorantRunning();
+    }
+
+    private void InitializeHeadlessControls()
+    {
+        valorantStatusLabel = CreateStatusPill(NotDetectedText, Color.FromArgb(110, 118, 136));
+        stratsStatusLabel = CreateStatusPill("Alt + T ready", Color.FromArgb(110, 118, 136));
+        discordStatusLabel = CreateStatusPill(discordBotVoiceRelay.StatusText, Color.FromArgb(110, 118, 136));
+        recordingStatusLabel = CreateStatusPill("Recording idle", Color.FromArgb(110, 118, 136));
+        recordingElapsedLabel = new Label { Text = "No active recording" };
+
+        startRecordingButton = new Button { Enabled = true };
+        stopRecordingButton = new Button { Enabled = false };
+        shareLatestButton = new Button { Enabled = true };
+        openRecordingsButton = new Button();
+        openSharedMediaButton = new Button();
+        openStratsButton = new Button();
+        topMostCheckBox = new CheckBox { Checked = true };
+        startupCheckBox = new CheckBox { Checked = SafeIsStartupEnabled() };
+        historyListView = new ListView();
+
+        teammateControls.Clear();
+        for (int teammateIndex = 0; teammateIndex < appState.Teammates.Count; teammateIndex++)
+        {
+            teammateControls.Add(new TeammateControls(new TextBox(), new Label()));
+        }
     }
 
     private Control BuildHeaderPanel()
@@ -252,12 +258,10 @@ public sealed class MainForm : Form
         stratsStatusLabel = CreateStatusPill("Alt + T ready", Color.FromArgb(110, 118, 136));
         discordStatusLabel = CreateStatusPill(discordBotVoiceRelay.StatusText, Color.FromArgb(110, 118, 136));
         recordingStatusLabel = CreateStatusPill("Recording idle", Color.FromArgb(110, 118, 136));
-        driveStatusLabel = CreateStatusPill(NotConnectedText, Color.FromArgb(110, 118, 136));
         statusPanel.Controls.Add(valorantStatusLabel);
         statusPanel.Controls.Add(stratsStatusLabel);
         statusPanel.Controls.Add(discordStatusLabel);
         statusPanel.Controls.Add(recordingStatusLabel);
-        statusPanel.Controls.Add(driveStatusLabel);
         headerPanel.Controls.Add(statusPanel);
 
         return headerPanel;
@@ -287,14 +291,14 @@ public sealed class MainForm : Form
         stopRecordingButton.Enabled = false;
         stopRecordingButton.Click += (_, _) => StopRecording();
 
-        uploadLatestButton = CreateCommandButton("Upload latest");
-        uploadLatestButton.Click += async (_, _) => await UploadLatestRecordingAsync().ConfigureAwait(true);
+        shareLatestButton = CreateCommandButton("Share latest");
+        shareLatestButton.Click += async (_, _) => await ShareLatestRecordingAsync().ConfigureAwait(true);
 
         openRecordingsButton = CreateCommandButton("Open recordings");
         openRecordingsButton.Click += (_, _) => OpenFolder(appPaths.RecordingsDirectory);
 
-        credentialsFolderButton = CreateSecondaryButton("Open credentials folder");
-        credentialsFolderButton.Click += (_, _) => OpenFolder(appPaths.ConfigDirectory);
+        openSharedMediaButton = CreateSecondaryButton("Open shared media");
+        openSharedMediaButton.Click += (_, _) => OpenFolder(appPaths.SharedMediaDirectory);
 
         openStratsButton = CreateSecondaryButton("Open strats overlay");
         openStratsButton.Click += (_, _) => ToggleStratsOverlayWhenValorantRunning();
@@ -307,9 +311,9 @@ public sealed class MainForm : Form
 
         actionLayout.Controls.Add(startRecordingButton, 0, 0);
         actionLayout.Controls.Add(stopRecordingButton, 1, 0);
-        actionLayout.Controls.Add(uploadLatestButton, 2, 0);
+        actionLayout.Controls.Add(shareLatestButton, 2, 0);
         actionLayout.Controls.Add(openRecordingsButton, 3, 0);
-        actionLayout.Controls.Add(credentialsFolderButton, 0, 1);
+        actionLayout.Controls.Add(openSharedMediaButton, 0, 1);
         actionLayout.Controls.Add(openStratsButton, 1, 1);
         actionLayout.Controls.Add(topMostCheckBox, 2, 1);
         actionLayout.Controls.Add(startupCheckBox, 3, 1);
@@ -445,8 +449,6 @@ public sealed class MainForm : Form
     {
         ContextMenuStrip trayMenu = new();
         trayMenu.Items.Add("Strats overlay (Alt+T)", null, (_, _) => ToggleStratsOverlayWhenValorantRunning());
-        trayMenu.Items.Add("Check updates now", null, async (_, _) => await RunGitUpdateCheckAsync().ConfigureAwait(true));
-        trayMenu.Items.Add("Open config folder", null, (_, _) => OpenFolder(appPaths.ConfigDirectory));
         trayMenu.Items.Add("Exit", null, (_, _) => Close());
         return trayMenu;
     }
@@ -637,144 +639,24 @@ public sealed class MainForm : Form
         return finishedEntry;
     }
 
-    private async Task UploadLatestRecordingAsync()
+    private async Task ShareLatestRecordingAsync()
     {
         RecordingHistoryEntry? latestEntry = appState.History.FirstOrDefault();
         if (latestEntry is null)
         {
-            ShowInfo("アップロードできる録音履歴がありません。");
+            ShowInfo("共有できる録音履歴がありません。");
             return;
         }
 
-        await UploadRecordingAsync(
-            latestEntry,
-            showUserMessage: true,
-            requireStoredDriveCredential: false).ConfigureAwait(true);
-    }
-
-    private async Task UploadRecordingAsync(
-        RecordingHistoryEntry latestEntry,
-        bool showUserMessage,
-        bool requireStoredDriveCredential)
-    {
-        if (!File.Exists(latestEntry.FilePath))
-        {
-            latestEntry.UploadStatus = "File missing";
-            appStateStore.Save(appState);
-            RefreshHistoryList();
-            if (showUserMessage)
-            {
-                ShowError("録音ファイルが見つかりません。履歴のファイルを確認してください。");
-            }
-            else
-            {
-                WriteAppLog("Drive", $"Recording file missing: {latestEntry.FilePath}");
-            }
-
-            return;
-        }
-
-        if (!googleDriveUploader.HasClientSecret)
-        {
-            latestEntry.UploadStatus = "Drive not configured";
-            appStateStore.Save(appState);
-            RefreshHistoryList();
-            WriteAppLog("Drive", $"Automatic upload skipped because Google client secret is missing: {appPaths.GoogleClientSecretPath}");
-            if (showUserMessage)
-            {
-                ShowError($"Google Drive連携には {appPaths.GoogleClientSecretPath} が必要です。");
-            }
-
-            return;
-        }
-
-        if (requireStoredDriveCredential && !googleDriveUploader.HasStoredCredential)
-        {
-            latestEntry.UploadStatus = "Drive auth missing";
-            appStateStore.Save(appState);
-            RefreshHistoryList();
-            WriteAppLog("Drive", "Automatic upload skipped because Google Drive has not been authorized on this PC.");
-            return;
-        }
-
-        uploadLatestButton.Enabled = false;
-        driveStatusLabel.Text = "Drive uploading";
-        driveStatusLabel.BackColor = Color.FromArgb(79, 118, 214);
-
+        shareLatestButton.Enabled = false;
         try
         {
-            DriveUploadResult uploadResult = await googleDriveUploader.UploadAsync(latestEntry.FilePath, CancellationToken.None);
-            latestEntry.UploadStatus = string.IsNullOrWhiteSpace(uploadResult.FileId) ? "Uploaded" : "Uploaded";
-            latestEntry.DriveFileId = uploadResult.FileId;
-            latestEntry.DriveWebViewLink = uploadResult.WebViewLink;
-            appStateStore.Save(appState);
-            RefreshHistoryList();
-            WriteAppLog("Drive", $"Recording uploaded to Google Drive. FileId: {uploadResult.FileId}");
-            if (showUserMessage)
-            {
-                ShowInfo("Google Driveへアップロードしました。");
-            }
-        }
-        catch (Exception exception)
-        {
-            latestEntry.UploadStatus = "Upload failed";
-            appStateStore.Save(appState);
-            RefreshHistoryList();
-            if (showUserMessage)
-            {
-                ShowError(exception.Message);
-            }
-            else
-            {
-                WriteAppLog("Drive", "Automatic recording upload failed.", exception);
-            }
+            await ShareRecordingToDiscordAsync(latestEntry, showUserMessage: true).ConfigureAwait(true);
         }
         finally
         {
-            uploadLatestButton.Enabled = true;
+            shareLatestButton.Enabled = true;
             RefreshStatusLabels();
-        }
-    }
-
-    private async Task UploadVideoCaptureAsync(
-        VideoCaptureResult videoCaptureResult,
-        bool requireStoredDriveCredential)
-    {
-        if (!File.Exists(videoCaptureResult.FilePath))
-        {
-            WriteAppLog("Drive", $"Video capture file missing: {videoCaptureResult.FilePath}");
-            return;
-        }
-
-        if (!googleDriveUploader.HasClientSecret)
-        {
-            WriteAppLog("Drive", $"Video upload skipped because Google client secret is missing: {appPaths.GoogleClientSecretPath}");
-            return;
-        }
-
-        if (requireStoredDriveCredential && !googleDriveUploader.HasStoredCredential)
-        {
-            WriteAppLog("Drive", "Video upload skipped because Google Drive has not been authorized on this PC.");
-            return;
-        }
-
-        try
-        {
-            DriveUploadResult uploadResult = await googleDriveUploader.UploadAsync(
-                videoCaptureResult.FilePath,
-                $"VALOWATCH {videoCaptureResult.Kind} video capture",
-                "video/mp4",
-                CancellationToken.None).ConfigureAwait(true);
-            WriteAppLog(
-                "Drive",
-                $"Video capture uploaded to Google Drive. Kind: {videoCaptureResult.Kind}. FileId: {uploadResult.FileId}");
-        }
-        catch (Exception exception)
-        {
-            WriteAppLog(
-                "Drive",
-                $"Automatic video capture upload failed. Kind: {videoCaptureResult.Kind}.",
-                exception);
         }
     }
 
@@ -956,32 +838,11 @@ public sealed class MainForm : Form
             if (finishedEntry is not null)
             {
                 await ShareRecordingToDiscordAsync(finishedEntry).ConfigureAwait(true);
-                if (ShouldAttemptAutomaticDriveUpload())
-                {
-                    await UploadRecordingAsync(
-                        finishedEntry,
-                        showUserMessage: false,
-                        requireStoredDriveCredential: true).ConfigureAwait(true);
-                }
-                else
-                {
-                    WriteAppLog("Drive", "Automatic recording upload skipped because Drive is not fully configured.");
-                }
             }
 
             foreach (VideoCaptureResult finishedVideoCapture in finishedVideoCaptures)
             {
                 await ShareVideoCaptureToDiscordAsync(finishedVideoCapture).ConfigureAwait(true);
-                if (ShouldAttemptAutomaticDriveUpload())
-                {
-                    await UploadVideoCaptureAsync(
-                        finishedVideoCapture,
-                        requireStoredDriveCredential: true).ConfigureAwait(true);
-                }
-                else
-                {
-                    WriteAppLog("Drive", $"Automatic video upload skipped because Drive is not fully configured. Kind: {finishedVideoCapture.Kind}.");
-                }
             }
         }
         finally
@@ -990,25 +851,41 @@ public sealed class MainForm : Form
         }
     }
 
-    private bool ShouldAttemptAutomaticDriveUpload()
-    {
-        return googleDriveUploader.HasClientSecret && googleDriveUploader.HasStoredCredential;
-    }
-
-    private async Task ShareRecordingToDiscordAsync(RecordingHistoryEntry recordingEntry)
+    private async Task ShareRecordingToDiscordAsync(RecordingHistoryEntry recordingEntry, bool showUserMessage = false)
     {
         try
         {
             DiscordMediaShareResult shareResult = await discordMediaSharer
                 .ShareAudioRecordingAsync(recordingEntry, CancellationToken.None)
                 .ConfigureAwait(true);
+            recordingEntry.UploadStatus = shareResult.Sent ? "Discord shared" : "Share skipped";
+            appStateStore.Save(appState);
+            RefreshHistoryList();
             WriteAppLog(
                 "DiscordShare",
                 $"{shareResult.StatusText} Attempted: {shareResult.Attempted}. Sent: {shareResult.Sent}. File: {shareResult.SharedFilePath ?? "(none)"}");
+            if (showUserMessage)
+            {
+                if (shareResult.Sent)
+                {
+                    ShowInfo("Discordへ共有しました。");
+                }
+                else
+                {
+                    ShowInfo(shareResult.StatusText);
+                }
+            }
         }
         catch (Exception exception)
         {
+            recordingEntry.UploadStatus = "Share failed";
+            appStateStore.Save(appState);
+            RefreshHistoryList();
             WriteAppLog("DiscordShare", "Automatic audio MP3 share failed.", exception);
+            if (showUserMessage)
+            {
+                ShowError(exception.Message);
+            }
         }
     }
 
@@ -1059,11 +936,6 @@ public sealed class MainForm : Form
         recordingStatusLabel.Text = isRecording ? "Recording" : "Recording idle";
         recordingStatusLabel.BackColor = isRecording
             ? Color.FromArgb(255, 76, 86)
-            : Color.FromArgb(110, 118, 136);
-
-        driveStatusLabel.Text = googleDriveUploader.HasClientSecret ? "Drive ready" : NotConnectedText;
-        driveStatusLabel.BackColor = googleDriveUploader.HasClientSecret
-            ? Color.FromArgb(39, 145, 104)
             : Color.FromArgb(110, 118, 136);
 
         RefreshDiscordStatusLabel();
@@ -1207,6 +1079,15 @@ public sealed class MainForm : Form
             StratsHotKeyId,
             NativeMethods.ModAlt,
             NativeMethods.VirtualKeyT);
+
+        if (hotKeyRegistered)
+        {
+            WriteAppLog("Overlay", "Alt + T hotkey registered.");
+        }
+        else
+        {
+            WriteAppLog("Overlay", $"Alt + T hotkey registration failed. Win32Error: {Marshal.GetLastWin32Error()}.");
+        }
 
         if (stratsStatusLabel is null)
         {

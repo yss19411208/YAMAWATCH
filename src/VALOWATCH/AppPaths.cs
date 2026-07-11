@@ -13,9 +13,7 @@ public sealed class AppPaths
         VideoRecordingsDirectory = Path.Combine(dataDirectory, "video-recordings");
         SharedMediaDirectory = Path.Combine(dataDirectory, "shared-media");
         ConfigDirectory = configDirectory ?? Path.Combine(dataDirectory, "config");
-        GoogleTokenDirectory = Path.Combine(dataDirectory, "google-token");
         HistoryPath = Path.Combine(dataDirectory, "history.json");
-        GoogleClientSecretPath = Path.Combine(ConfigDirectory, "google_client_secret.json");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
         DiscordBotSampleConfigPath = Path.Combine(ConfigDirectory, "discord_bot.sample.json");
         EnvPath = envPath ?? Path.Combine(ConfigDirectory, ".env");
@@ -32,11 +30,7 @@ public sealed class AppPaths
 
     public string ConfigDirectory { get; }
 
-    public string GoogleTokenDirectory { get; }
-
     public string HistoryPath { get; }
-
-    public string GoogleClientSecretPath { get; }
 
     public string DiscordBotConfigPath { get; }
 
@@ -78,7 +72,6 @@ public sealed class AppPaths
         Directory.CreateDirectory(VideoRecordingsDirectory);
         Directory.CreateDirectory(SharedMediaDirectory);
         Directory.CreateDirectory(ConfigDirectory);
-        Directory.CreateDirectory(GoogleTokenDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(EnvPath) ?? ConfigDirectory);
     }
 
