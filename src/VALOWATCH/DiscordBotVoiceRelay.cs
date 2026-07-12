@@ -23,9 +23,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan MicrophoneStartupBufferDuration = TimeSpan.FromMilliseconds(260);
     private static readonly TimeSpan LineLoopbackBufferDuration = TimeSpan.FromMilliseconds(1600);
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
+    private static readonly TimeSpan RelayShutdownTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan DiscordFrameWriteTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan MicrophoneRecentActivityDuration = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan MicrophoneSilentCandidateDuration = TimeSpan.FromSeconds(30);
     private const float MicrophoneActivityPeakThreshold = 0.0002F;
@@ -62,6 +64,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private DateTimeOffset microphoneAttemptStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastMicrophoneCallbackAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastMicrophoneActivityAt = DateTimeOffset.MinValue;
+    private DateTimeOffset lastDiscordFrameWrittenAt = DateTimeOffset.MinValue;
     private bool microphoneSignalLocked;
     private int discordRecoveryScheduled;
     private bool stopRequested;
@@ -283,10 +286,23 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             try
             {
-                await activeRelayTask.ConfigureAwait(false);
+                await activeRelayTask.WaitAsync(RelayShutdownTimeout).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (TimeoutException)
+            {
+                WriteLog("Audio relay did not stop after cancellation; disposing the Discord stream to unblock it.");
+                discordStream?.Dispose();
+                try
+                {
+                    await activeRelayTask.WaitAsync(RelayShutdownTimeout).ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    WriteLog("Audio relay remained unavailable during forced shutdown; cleanup will continue.", exception);
+                }
             }
             catch (Exception exception)
             {
@@ -728,6 +744,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             bool hasTimedOutCallbacks;
             bool shouldRotateSilentCandidate;
             bool hasRecentMicrophoneActivity;
+            bool discordFrameWritesStalled;
 
             lock (audioStatsLock)
             {
@@ -740,6 +757,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     now - lastMicrophoneActivityAt >= MicrophoneSilentCandidateDuration;
                 hasRecentMicrophoneActivity =
                     now - lastMicrophoneActivityAt < MicrophoneRecentActivityDuration;
+                discordFrameWritesStalled = ShouldRecoverStalledDiscordFrames(
+                    relayIsMarkedRunning,
+                    now,
+                    lastDiscordFrameWrittenAt);
+            }
+
+            if (discordFrameWritesStalled)
+            {
+                ScheduleDiscordRecovery(
+                    $"Discord audio frame writes stalled for at least {DiscordFrameWriteTimeout.TotalSeconds:0} seconds");
+                return;
             }
 
             if (captureFaulted || hasTimedOutCallbacks)
@@ -1299,6 +1327,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return 0F;
     }
 
+    internal static bool ShouldRecoverStalledDiscordFrames(
+        bool relayIsRunning,
+        DateTimeOffset now,
+        DateTimeOffset lastFrameWrittenAt)
+    {
+        return relayIsRunning && now - lastFrameWrittenAt >= DiscordFrameWriteTimeout;
+    }
+
     private void ResetAudioStats()
     {
         lock (audioStatsLock)
@@ -1317,6 +1353,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             audioDiagnosticMessageSent = false;
             audioStatsStartedAt = DateTimeOffset.Now;
             lastAudioStatsLogTime = DateTimeOffset.Now;
+            lastDiscordFrameWrittenAt = DateTimeOffset.Now;
             ResetMicrophoneAttemptStatsUnsafe();
         }
     }
@@ -1407,6 +1444,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             writtenFrameCount++;
             writtenPeak = Math.Max(writtenPeak, peak);
+            lastDiscordFrameWrittenAt = DateTimeOffset.Now;
 
             if (peak >= AudiblePeakThreshold)
             {
@@ -1836,6 +1874,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         private const float HighPassCutoffHz = 75F;
         private const float LowPassCutoffHz = 12000F;
+        private const float AutomaticGainActivationPeak = 0.0015F;
+        private const float AutomaticGainTargetPeak = 0.18F;
+        private const float MaximumAutomaticGain = 6F;
+        private const float AutomaticGainAttackSmoothing = 0.35F;
+        private const float AutomaticGainReleaseSmoothing = 0.08F;
         private const float GateClosedGain = 0.04F;
         private const float GateAttackSmoothing = 0.25F;
         private const float GateReleaseSmoothing = 0.006F;
@@ -1849,6 +1892,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         private float lastHighPassOutput;
         private float lastLowPassOutput;
         private float gateGain = 1F;
+        private float automaticGain = 1F;
 
         public MicrophoneVoiceSampleProvider(
             ISampleProvider sourceProvider,
@@ -1877,6 +1921,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         public int Read(float[] buffer, int offset, int count)
         {
             int samplesRead = sourceProvider.Read(buffer, offset, count);
+            float filteredPeak = 0F;
 
             for (int sampleIndex = offset; sampleIndex < offset + samplesRead; sampleIndex++)
             {
@@ -1887,14 +1932,29 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
                 lastLowPassOutput += lowPassAlpha * (highPassedSample - lastLowPassOutput);
                 float filteredSample = lastLowPassOutput;
+                buffer[sampleIndex] = filteredSample;
+                filteredPeak = Math.Max(filteredPeak, MathF.Abs(filteredSample));
+            }
 
+            float volumeAdjustedPeak = filteredPeak * volume;
+            float targetAutomaticGain = volumeAdjustedPeak >= AutomaticGainActivationPeak
+                ? Math.Clamp(AutomaticGainTargetPeak / volumeAdjustedPeak, 1F, MaximumAutomaticGain)
+                : 1F;
+            float automaticGainSmoothing = targetAutomaticGain > automaticGain
+                ? AutomaticGainAttackSmoothing
+                : AutomaticGainReleaseSmoothing;
+            automaticGain += (targetAutomaticGain - automaticGain) * automaticGainSmoothing;
+
+            for (int sampleIndex = offset; sampleIndex < offset + samplesRead; sampleIndex++)
+            {
+                float filteredSample = buffer[sampleIndex];
                 float gateTarget = noiseGateThreshold > 0F && MathF.Abs(filteredSample) < noiseGateThreshold
                     ? GateClosedGain
                     : 1F;
                 float gateSmoothing = gateTarget > gateGain ? GateAttackSmoothing : GateReleaseSmoothing;
                 gateGain += (gateTarget - gateGain) * gateSmoothing;
 
-                float processedSample = filteredSample * gateGain * volume;
+                float processedSample = filteredSample * gateGain * volume * automaticGain;
                 buffer[sampleIndex] = ApplySoftLimiter(processedSample);
             }
 

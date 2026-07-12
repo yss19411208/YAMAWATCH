@@ -70,6 +70,7 @@ C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env
 5. VALORANT を起動すると、bot が指定 VC に入ります。
 
 VALORANT 起動中にDiscord接続または音声送信が停止した場合、VALOWATCHは接続を閉じて15秒間隔でVC接続を再試行します。選択中のマイクが無音化した場合も、入力活動を確認して同じマイクの再初期化または別の物理マイクへの切り替えを行います。
+Discord音声フレームの書き込みが5秒間進まない場合も接続を自動再構築します。小さい実マイク入力にはVALOWATCH内だけで自動ゲインを適用し、無音レベルの入力は増幅せず、大入力はリミッターで抑えます。Windows側のマイク音量やPCから聞こえる音は変更しません。
 `DISCORD_TEXT_CHANNEL_ID` を設定すると、VALORANT 終了後のMP3/MP4共有先に加え、`VALORANTを開きました。`、使用マイク機種、実行中バージョン、`updateしました: <version>` の投稿先になります。
 Discord の接続や音声送信で失敗した場合は、`C:\Users\p159yusuke\Documents\VALOWATCH\data\logs\valowatch.log` に理由を記録します。
 

@@ -535,15 +535,102 @@ static class Program
                 0,
                 mixedBytesRead);
 
+            byte[] quietVoiceFrameBuffer = new byte[3840];
+            IWaveProvider quietVoiceProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.008F),
+                0.85F,
+                0F);
+            float quietVoicePeak = 0F;
+            int quietVoiceBytesRead = 0;
+            for (int frameIndex = 0; frameIndex < 12; frameIndex++)
+            {
+                quietVoiceBytesRead = quietVoiceProvider.Read(
+                    quietVoiceFrameBuffer,
+                    0,
+                    quietVoiceFrameBuffer.Length);
+                quietVoicePeak = Math.Max(
+                    quietVoicePeak,
+                    DiscordBotVoiceRelay.CalculateAudioPeak(
+                        quietVoiceProvider.WaveFormat,
+                        quietVoiceFrameBuffer,
+                        0,
+                        quietVoiceBytesRead));
+            }
+
+            byte[] loudVoiceFrameBuffer = new byte[3840];
+            IWaveProvider loudVoiceProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.75F),
+                1F,
+                0F);
+            int loudVoiceBytesRead = loudVoiceProvider.Read(
+                loudVoiceFrameBuffer,
+                0,
+                loudVoiceFrameBuffer.Length);
+            float loudVoicePeak = DiscordBotVoiceRelay.CalculateAudioPeak(
+                loudVoiceProvider.WaveFormat,
+                loudVoiceFrameBuffer,
+                0,
+                loudVoiceBytesRead);
+
+            byte[] lowNoiseFrameBuffer = new byte[3840];
+            IWaveProvider lowNoiseProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.0005F),
+                0.85F,
+                0F);
+            float lowNoisePeak = 0F;
+            int lowNoiseBytesRead = 0;
+            for (int frameIndex = 0; frameIndex < 12; frameIndex++)
+            {
+                lowNoiseBytesRead = lowNoiseProvider.Read(
+                    lowNoiseFrameBuffer,
+                    0,
+                    lowNoiseFrameBuffer.Length);
+                lowNoisePeak = Math.Max(
+                    lowNoisePeak,
+                    DiscordBotVoiceRelay.CalculateAudioPeak(
+                        lowNoiseProvider.WaveFormat,
+                        lowNoiseFrameBuffer,
+                        0,
+                        lowNoiseBytesRead));
+            }
+
+            DateTimeOffset watchdogNow = new(2026, 1, 1, 0, 0, 10, TimeSpan.Zero);
+            bool watchdogAllowsHealthyFrames = !DiscordBotVoiceRelay.ShouldRecoverStalledDiscordFrames(
+                relayIsRunning: true,
+                watchdogNow,
+                watchdogNow.AddMilliseconds(-4999));
+            bool watchdogRecoversStalledFrames = DiscordBotVoiceRelay.ShouldRecoverStalledDiscordFrames(
+                relayIsRunning: true,
+                watchdogNow,
+                watchdogNow.AddSeconds(-5));
+            bool watchdogIgnoresStoppedRelay = !DiscordBotVoiceRelay.ShouldRecoverStalledDiscordFrames(
+                relayIsRunning: false,
+                watchdogNow,
+                watchdogNow.AddSeconds(-30));
+
             bool mixLooksReady = micOnlyBytesRead == micOnlyFrameBuffer.Length &&
                 mixedBytesRead == mixedFrameBuffer.Length &&
-                mixedPeak > micOnlyPeak * 1.10F;
+                mixedPeak > micOnlyPeak * 1.05F &&
+                quietVoiceBytesRead == quietVoiceFrameBuffer.Length &&
+                quietVoicePeak >= 0.03F &&
+                loudVoiceBytesRead == loudVoiceFrameBuffer.Length &&
+                loudVoicePeak <= 0.95F &&
+                lowNoiseBytesRead == lowNoiseFrameBuffer.Length &&
+                lowNoisePeak <= 0.001F &&
+                watchdogAllowsHealthyFrames &&
+                watchdogRecoversStalledFrames &&
+                watchdogIgnoresStoppedRelay;
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
             File.AppendAllText(
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Discord audio mix check: {(mixLooksReady ? "ready" : "failed")}. " +
                 $"MicOnlyBytes: {micOnlyBytesRead}. MixedBytes: {mixedBytesRead}. " +
                 $"MicOnlyPeak: {micOnlyPeak:0.0000}. MixedPeak: {mixedPeak:0.0000}. " +
+                $"QuietVoiceBytes: {quietVoiceBytesRead}. QuietVoicePeak: {quietVoicePeak:0.0000}. " +
+                $"LoudVoiceBytes: {loudVoiceBytesRead}. LoudVoicePeak: {loudVoicePeak:0.0000}. " +
+                $"LowNoiseBytes: {lowNoiseBytesRead}. LowNoisePeak: {lowNoisePeak:0.0000}. " +
+                $"WatchdogHealthy: {watchdogAllowsHealthyFrames}. WatchdogStalled: {watchdogRecoversStalledFrames}. " +
+                $"WatchdogStopped: {watchdogIgnoresStoppedRelay}. " +
                 "Sources: microphone+LINE. OutputPlayback: unchanged; no render device opened by this diagnostic." +
                 $"{Environment.NewLine}");
             Environment.ExitCode = mixLooksReady ? 0 : 1;
