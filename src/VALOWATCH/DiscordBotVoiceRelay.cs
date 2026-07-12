@@ -25,8 +25,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan RelayShutdownTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan RuntimeDiagnosticInitialDelay = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan RuntimeDiagnosticInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan DiscordFrameWriteTimeout = TimeSpan.FromSeconds(5);
@@ -45,7 +45,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly object audioStatsLock = new();
     private readonly object microphoneCaptureLock = new();
     private readonly SemaphoreSlim lifecycleSemaphore = new(1, 1);
-    private readonly SemaphoreSlim runtimeDiagnosticSemaphore = new(1, 1);
+    private readonly SemaphoreSlim runtimeLogSemaphore = new(1, 1);
 
     private DiscordSocketClient? discordClient;
     private IAudioClient? audioClient;
@@ -86,8 +86,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private string currentMicrophoneDeviceName = string.Empty;
     private string lastNotifiedMicrophoneDeviceName = string.Empty;
     private bool versionNotificationSent;
-    private CancellationTokenSource? runtimeDiagnosticCancellationTokenSource;
-    private Task? runtimeDiagnosticTask;
+    private CancellationTokenSource? runtimeLogCancellationTokenSource;
+    private Task? runtimeLogTask;
     private string currentCaptureDeviceList = string.Empty;
     private string currentLineLoopbackSourceName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
@@ -161,13 +161,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
             $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}.");
 
-        if (!TryEnsureVoiceNativeDependencies(out string nativeDependencyStatus))
-        {
-            StatusText = nativeDependencyStatus;
-            WriteLog(nativeDependencyStatus);
-            return;
-        }
-
         try
         {
             DiscordSocketClient client = CreateClient();
@@ -195,6 +188,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 ? null
                 : guild.GetTextChannel(settings.TextChannelId);
 
+            if (!TryEnsureVoiceNativeDependencies(out string nativeDependencyStatus))
+            {
+                StatusText = nativeDependencyStatus;
+                WriteLog(nativeDependencyStatus);
+                await SendRequestedDiscordNotificationAsync(
+                    $"VALOWATCH 音声DLL確認失敗: {nativeDependencyStatus}").ConfigureAwait(false);
+                await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
+                await StopCoreAsync().ConfigureAwait(false);
+                return;
+            }
+
             EnsureVoiceChannelPermissions(guild, voiceChannel);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
@@ -206,8 +210,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await SendRequestedDiscordNotificationAsync(GetValorantOpenedMessage(settings)).ConfigureAwait(false);
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
-            await SendPendingInstallerReportAsync().ConfigureAwait(false);
-            await SendPendingRuntimeDiagnosticAsync().ConfigureAwait(false);
 
             bool audioRelayStarted = false;
 
@@ -228,7 +230,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     WriteLog("Discord voice channel joined, but microphone audio relay could not start.", audioException);
                     await SendRequestedDiscordNotificationAsync(
                         $"VALOWATCH 音声開始失敗: {audioException.Message}").ConfigureAwait(false);
-                    await CreateAndSendRuntimeDiagnosticSnapshotAsync().ConfigureAwait(false);
+                    await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
                     await StopCoreAsync().ConfigureAwait(false);
                     StatusText = FormatRunningStatus("Discord audio recovery pending", audioException.Message);
                     return;
@@ -241,7 +243,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 StatusText = FormatRunningStatus(audioRelayStarted ? "Discord mic live" : "Discord joined VC");
             }
 
-            StartRuntimeDiagnosticSnapshots();
+            _ = Task.Run(SendRuntimeLogUpdatesAsync);
+            StartRuntimeLogUpdates();
         }
         catch (Exception exception)
         {
@@ -333,15 +336,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         DisposeAudioObjects();
 
-        await StopRuntimeDiagnosticSnapshotsAsync().ConfigureAwait(false);
-        await CreateAndSendRuntimeDiagnosticSnapshotAsync().ConfigureAwait(false);
-
         if (audioClient is not null)
         {
             await audioClient.StopAsync().ConfigureAwait(false);
             audioClient.Dispose();
             audioClient = null;
         }
+
+        await StopRuntimeLogUpdatesAsync().ConfigureAwait(false);
+        await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
 
         if (discordClient is not null)
         {
@@ -1611,54 +1614,24 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task SendPendingInstallerReportAsync()
+    private void StartRuntimeLogUpdates()
     {
-        string reportPath = appPaths.PendingInstallerReportPath;
-        if (!File.Exists(reportPath))
+        if (runtimeLogTask is not null)
         {
             return;
         }
 
-        SocketTextChannel? textChannel = discordStatusTextChannel;
-        if (textChannel is null)
-        {
-            WriteLog("Pending installer report could not be sent because the text channel is missing.");
-            return;
-        }
-
-        try
-        {
-            await textChannel
-                .SendFileAsync(reportPath, "VALOWATCH 再インストール結果ログ")
-                .ConfigureAwait(false);
-            File.Delete(reportPath);
-            WriteLog("Pending installer report was sent to Discord and cleared.");
-        }
-        catch (Exception exception)
-        {
-            // Keep the pending report so a later Discord connection can retry it.
-            WriteLog("Pending installer report could not be sent and remains queued.", exception);
-        }
-    }
-
-    private void StartRuntimeDiagnosticSnapshots()
-    {
-        if (runtimeDiagnosticTask is not null)
-        {
-            return;
-        }
-
-        runtimeDiagnosticCancellationTokenSource = new CancellationTokenSource();
-        CancellationToken cancellationToken = runtimeDiagnosticCancellationTokenSource.Token;
-        runtimeDiagnosticTask = Task.Run(async () =>
+        runtimeLogCancellationTokenSource = new CancellationTokenSource();
+        CancellationToken cancellationToken = runtimeLogCancellationTokenSource.Token;
+        runtimeLogTask = Task.Run(async () =>
         {
             try
             {
-                await Task.Delay(RuntimeDiagnosticInitialDelay, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(RuntimeLogInitialDelay, cancellationToken).ConfigureAwait(false);
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    await CreateAndSendRuntimeDiagnosticSnapshotAsync().ConfigureAwait(false);
-                    await Task.Delay(RuntimeDiagnosticInterval, cancellationToken).ConfigureAwait(false);
+                    await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
+                    await Task.Delay(RuntimeLogInterval, cancellationToken).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1667,12 +1640,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }, cancellationToken);
     }
 
-    private async Task StopRuntimeDiagnosticSnapshotsAsync()
+    private async Task StopRuntimeLogUpdatesAsync()
     {
-        CancellationTokenSource? cancellationTokenSource = runtimeDiagnosticCancellationTokenSource;
-        Task? activeTask = runtimeDiagnosticTask;
-        runtimeDiagnosticCancellationTokenSource = null;
-        runtimeDiagnosticTask = null;
+        CancellationTokenSource? cancellationTokenSource = runtimeLogCancellationTokenSource;
+        Task? activeTask = runtimeLogTask;
+        runtimeLogCancellationTokenSource = null;
+        runtimeLogTask = null;
 
         if (cancellationTokenSource is null)
         {
@@ -1694,55 +1667,56 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         cancellationTokenSource.Dispose();
     }
 
-    private async Task CreateAndSendRuntimeDiagnosticSnapshotAsync()
+    private async Task SendRuntimeLogUpdatesAsync()
     {
-        await runtimeDiagnosticSemaphore.WaitAsync().ConfigureAwait(false);
+        await runtimeLogSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(appPaths.PendingRuntimeDiagnosticPath) ?? appPaths.DataDirectory);
-            RuntimeLogArchiveBuilder.Create(
-                appPaths.PendingRuntimeDiagnosticPath,
+            SocketTextChannel? textChannel = discordStatusTextChannel;
+            if (textChannel is null)
+            {
+                return;
+            }
+
+            IReadOnlyList<RuntimeLogFileDelta> deltas = RuntimeLogMessageCollector.Collect(
+                appPaths.RuntimeLogCursorPath,
                 GetCurrentVersionLabel(),
                 (Path.Combine(appPaths.DataDirectory, "logs"), "data-logs"),
                 (Path.Combine(Path.GetTempPath(), "VALOWATCH"), "temp-logs"));
-            await SendPendingRuntimeDiagnosticAsync().ConfigureAwait(false);
+            foreach (RuntimeLogFileDelta delta in deltas)
+            {
+                bool fileWasSent = true;
+                foreach (string message in delta.DiscordMessages)
+                {
+                    try
+                    {
+                        await textChannel.SendMessageAsync(message).ConfigureAwait(false);
+                        await Task.Delay(TimeSpan.FromMilliseconds(100)).ConfigureAwait(false);
+                    }
+                    catch (Exception exception)
+                    {
+                        fileWasSent = false;
+                        WriteLog($"Runtime log code block failed for {delta.CursorKey}; it will be retried.", exception);
+                        break;
+                    }
+                }
+
+                if (fileWasSent)
+                {
+                    RuntimeLogMessageCollector.Commit(
+                        appPaths.RuntimeLogCursorPath,
+                        delta.CursorKey,
+                        delta.CurrentLineCount);
+                }
+            }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            WriteLog("Runtime diagnostic snapshot could not be created.", exception);
+            WriteLog("Runtime log code blocks could not be prepared.", exception);
         }
         finally
         {
-            runtimeDiagnosticSemaphore.Release();
-        }
-    }
-
-    private async Task SendPendingRuntimeDiagnosticAsync()
-    {
-        string reportPath = appPaths.PendingRuntimeDiagnosticPath;
-        if (!File.Exists(reportPath))
-        {
-            return;
-        }
-
-        SocketTextChannel? textChannel = discordStatusTextChannel;
-        if (textChannel is null)
-        {
-            WriteLog("Pending runtime diagnostic could not be sent because the text channel is missing.");
-            return;
-        }
-
-        try
-        {
-            await textChannel
-                .SendFileAsync(reportPath, "VALOWATCH 全実行ログ")
-                .ConfigureAwait(false);
-            File.Delete(reportPath);
-            WriteLog("Runtime diagnostic snapshot was sent to Discord and cleared.");
-        }
-        catch (Exception exception)
-        {
-            WriteLog("Runtime diagnostic snapshot could not be sent and remains queued.", exception);
+            runtimeLogSemaphore.Release();
         }
     }
 

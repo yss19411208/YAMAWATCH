@@ -9,7 +9,7 @@ VALOWATCHは、VALORANT起動中だけ指定Discord VCへ接続し、配布先PC
 - LINEが起動中の場合だけ、LINEプロセス音声を追加ミックス
 - Discord音声停止時の自動再接続
 - VALORANT起動、使用マイク、実行バージョン、更新完了のテキスト投稿
-- 音声ピーク診断と、秘密情報を除外した実行ログZIPの定期添付
+- 音声ピーク診断と、秘密情報を除外した実行ログのコードブロック差分送信
 - `Alt + T` によるstrats.ggオーバーレイ
 - GitHub Releasesからの無人更新
 
@@ -29,6 +29,5 @@ VALOWATCHは、VALORANT起動中だけ指定Discord VCへ接続し、配布先PC
 - Speak
 - Send Messages
 - Read Message History
-- Attach Files
 
-ログZIPだけファイル添付を使用します。録音・録画ファイルは添付しません。ログは起動20秒後、以後5分ごと、VALORANT終了時に送り、`.env`、bot token、暗号化設定、ユーザープロファイルの実パスを除外します。bot tokenはGitHub公開更新版へ含めず、初回配布EXEからWindows DPAPIで暗号化保存した設定を利用します。
+ログはファイル添付せず、Discordの2000文字上限内に分割したコードブロックで送ります。初回接続時、起動20秒後、以後5分ごと、VALORANT終了時に未送信行だけを送り、`.env`、bot token、暗号化設定、ユーザープロファイルの実パスを除外します。bot tokenはGitHub公開更新版へ含めず、初回配布EXEからWindows DPAPIで暗号化保存した設定を利用します。

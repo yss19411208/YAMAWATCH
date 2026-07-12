@@ -14,9 +14,6 @@ public sealed class MainForm : Form
 
     private readonly AppPaths appPaths;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
-    private readonly GitUpdateChecker gitUpdateChecker;
-    private readonly GitAutoUpdater gitAutoUpdater;
-    private readonly GitUpdateSchedule gitUpdateSchedule = new(GitUpdateSchedule.DefaultInterval);
     private readonly bool disableDiscordAutomation;
     private readonly bool disableKeyStateFallback;
     private readonly System.Windows.Forms.Timer processTimer = new();
@@ -38,7 +35,6 @@ public sealed class MainForm : Form
     private bool stratsTogglePending;
     private bool stratsToggleInProgress;
     private bool stratsPreloadInProgress;
-    private bool gitUpdateCheckInProgress;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
@@ -48,15 +44,11 @@ public sealed class MainForm : Form
     public MainForm(
         AppPaths appPaths,
         DiscordBotVoiceRelay discordBotVoiceRelay,
-        GitUpdateChecker gitUpdateChecker,
-        GitAutoUpdater gitAutoUpdater,
         bool disableDiscordAutomation,
         bool disableKeyStateFallback = false)
     {
         this.appPaths = appPaths;
         this.discordBotVoiceRelay = discordBotVoiceRelay;
-        this.gitUpdateChecker = gitUpdateChecker;
-        this.gitAutoUpdater = gitAutoUpdater;
         this.disableDiscordAutomation = disableDiscordAutomation;
         this.disableKeyStateFallback = disableKeyStateFallback;
         lowLevelKeyboardHookProcedure = ProcessLowLevelKeyboardInput;
@@ -187,9 +179,7 @@ public sealed class MainForm : Form
 
             if (valorantDetected)
             {
-                gitUpdateSchedule.Reset();
                 PreloadStratsOverlayIfNeeded();
-                StartGitUpdateCheckIfNeeded(force: true);
             }
 
             _ = HandleValorantStateChangeAsync(valorantDetected);
@@ -204,8 +194,6 @@ public sealed class MainForm : Form
         {
             PreloadStratsOverlayIfNeeded();
         }
-
-        StartGitUpdateCheckIfNeeded(force: false);
     }
 
     private bool GetDebouncedValorantDetected(bool rawValorantDetected)
@@ -688,66 +676,6 @@ public sealed class MainForm : Form
 
         Rectangle fallbackBounds = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
         return (IntPtr.Zero, fallbackBounds);
-    }
-
-    private void StartGitUpdateCheckIfNeeded(bool force)
-    {
-        if (gitUpdateCheckInProgress || !gitUpdateSchedule.IsDue(DateTimeOffset.UtcNow, force))
-        {
-            return;
-        }
-
-        _ = RunGitUpdateCheckAsync();
-    }
-
-    private async Task RunGitUpdateCheckAsync()
-    {
-        if (gitUpdateCheckInProgress)
-        {
-            return;
-        }
-
-        gitUpdateCheckInProgress = true;
-        try
-        {
-            GitUpdateCheckResult updateResult = await gitUpdateChecker
-                .CheckLatestReleaseAsync(CancellationToken.None)
-                .ConfigureAwait(true);
-
-            if (!updateResult.HasUpdate)
-            {
-                WriteAppLog("Update", $"Update check finished. Status: {updateResult.Status}. Message: {updateResult.Message}.");
-                return;
-            }
-
-            WriteAppLog(
-                "Update",
-                $"Update found. Current: {updateResult.CurrentVersion}. Latest: {updateResult.LatestVersion}. " +
-                $"Download: {updateResult.DownloadUri}.");
-            GitAutoUpdateResult autoUpdateResult = await gitAutoUpdater
-                .DownloadAndStartInstallerAsync(updateResult, CancellationToken.None)
-                .ConfigureAwait(true);
-
-            if (autoUpdateResult.StartedInstaller)
-            {
-                WriteAppLog("Update", "Silent installer was started. Exiting current VALOWATCH process for replacement.");
-                BeginInvoke((MethodInvoker)Application.Exit);
-                return;
-            }
-
-            WriteAppLog(
-                "Update",
-                $"Auto update did not start. Status: {autoUpdateResult.Status}. Message: {autoUpdateResult.Message}.");
-        }
-        catch (Exception exception)
-        {
-            WriteAppLog("Update", "Automatic update check failed.", exception);
-        }
-        finally
-        {
-            gitUpdateSchedule.MarkCompleted(DateTimeOffset.UtcNow);
-            gitUpdateCheckInProgress = false;
-        }
     }
 
     private void DisposeStratsOverlay()

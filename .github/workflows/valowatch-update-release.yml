@@ -64,6 +64,7 @@ jobs:
           New-Item -ItemType Directory -Path release -Force | Out-Null
           Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination .\release\VALOWATCH_App.exe -Force
           Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
+          Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\GITHUB.exe -Force
 
       - name: Publish GitHub release
         shell: pwsh
@@ -80,6 +81,7 @@ jobs:
           gh release create $releaseTag `
             .\release\VALOWATCH_App.exe `
             .\release\VALOWATCH_Update.exe `
+            .\release\GITHUB.exe `
             --repo "${{ github.repository }}" `
             --target "${{ github.sha }}" `
             --title "VALOWATCH update ${{ github.sha }}" `

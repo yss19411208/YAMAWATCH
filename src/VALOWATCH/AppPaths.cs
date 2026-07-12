@@ -12,7 +12,7 @@ public sealed class AppPaths
         ConfigDirectory = configDirectory ?? Path.Combine(dataDirectory, "config");
         UpdateCompletedNotificationPath = Path.Combine(dataDirectory, "update-completed.pending");
         PendingInstallerReportPath = Path.Combine(dataDirectory, "logs", "installer-result.pending.log");
-        PendingRuntimeDiagnosticPath = Path.Combine(dataDirectory, "logs", "runtime-diagnostic.pending.zip");
+        RuntimeLogCursorPath = Path.Combine(dataDirectory, "logs", "runtime-log-cursors.json");
         DurableEnvPath = Path.Combine(dataDirectory, "config", "settings.protected");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
         DiscordBotSampleConfigPath = Path.Combine(ConfigDirectory, "discord_bot.sample.json");
@@ -28,7 +28,7 @@ public sealed class AppPaths
 
     public string PendingInstallerReportPath { get; }
 
-    public string PendingRuntimeDiagnosticPath { get; }
+    public string RuntimeLogCursorPath { get; }
 
     public string DurableEnvPath { get; }
 

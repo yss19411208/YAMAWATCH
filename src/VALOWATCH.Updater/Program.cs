@@ -11,8 +11,14 @@ internal static class Program
 {
     private const string Repository = "yss19411208/YAMAWATCH";
     private const string AppAssetName = "VALOWATCH_App.exe";
+    private const string AgentAssetName = "GITHUB.exe";
     private const string InstalledAppName = "VALOWATCH.exe";
+    private const string AgentFileName = "GITHUB.exe";
+    private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
+    private static int appReplacementInProgress;
+    private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan[] RetryDelays =
     [
         TimeSpan.FromSeconds(2),
@@ -24,6 +30,14 @@ internal static class Program
     [STAThread]
     private static async Task<int> Main(string[] args)
     {
+        if (args.Any(argument => string.Equals(
+            argument,
+            "--replace-agent",
+            StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunAgentReplacement(args);
+        }
+
         if (args.Any(argument => string.Equals(
             argument,
             "--check-installed-app-hash",
@@ -44,30 +58,67 @@ internal static class Program
             return 1;
         }
 
+        bool watchMode = args.Any(argument => string.Equals(
+                argument,
+                "--watch",
+                StringComparison.OrdinalIgnoreCase)) ||
+            string.Equals(
+                Path.GetFileNameWithoutExtension(Environment.ProcessPath),
+                "GITHUB",
+                StringComparison.OrdinalIgnoreCase);
+        if (watchMode)
+        {
+            bool disableUpdates = args.Any(argument => string.Equals(
+                argument,
+                "--disable-updates",
+                StringComparison.OrdinalIgnoreCase));
+            return await RunWatchAgentAsync(installDirectory, disableUpdates).ConfigureAwait(false);
+        }
+
+        int updateExitCode;
         try
         {
-            return await RunUpdateAsync(installDirectory).ConfigureAwait(false);
+            updateExitCode = await RunUpdateAsync(
+                installDirectory,
+                restartWhenCurrent: true).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             WriteLog("Dedicated updater failed.", exception);
             RestartInstalledAppIfPresent(installDirectory);
+            updateExitCode = 1;
+        }
+
+        try
+        {
+            string installedAgentPath = InstallOrRefreshAgent(installDirectory);
+            StartWatchAgent(installedAgentPath, installDirectory);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("GITHUB watch agent could not be installed or started.", exception);
             return 1;
         }
+
+        return updateExitCode;
     }
 
-    private static async Task<int> RunUpdateAsync(string installDirectory)
+    private static async Task<int> RunUpdateAsync(string installDirectory, bool restartWhenCurrent)
     {
         using HttpClient httpClient = CreateHttpClient();
         ReleaseAppAsset appAsset = await ExecuteWithRetryAsync(
             "latest release lookup",
-            cancellationToken => GetLatestAppAssetAsync(httpClient, cancellationToken)).ConfigureAwait(false);
+            cancellationToken => GetLatestReleaseAssetAsync(httpClient, AppAssetName, cancellationToken)).ConfigureAwait(false);
 
         if (InstalledAppMatchesRelease(installDirectory, appAsset.ExpectedSha256, out string installedAppStatus))
         {
             WriteLog($"Dedicated update skipped because the installed app is already current. {installedAppStatus}");
-            await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-            RestartInstalledAppIfPresent(installDirectory);
+            if (restartWhenCurrent)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                RestartInstalledAppIfPresent(installDirectory);
+            }
+
             return 0;
         }
 
@@ -86,9 +137,18 @@ internal static class Program
                 downloadedAppPath,
                 cancellationToken)).ConfigureAwait(false);
 
-        int updateExitCode = await LaunchAppSelfUpdateAsync(
-            downloadedAppPath,
-            installDirectory).ConfigureAwait(false);
+        int updateExitCode;
+        Interlocked.Exchange(ref appReplacementInProgress, 1);
+        try
+        {
+            updateExitCode = await LaunchAppSelfUpdateAsync(
+                downloadedAppPath,
+                installDirectory).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref appReplacementInProgress, 0);
+        }
         if (updateExitCode != 0)
         {
             WriteLog($"App self-update returned exit code {updateExitCode}.");
@@ -98,6 +158,290 @@ internal static class Program
 
         WriteLog($"Dedicated update completed. Tag: {appAsset.TagName}. App: {downloadedAppPath}");
         return 0;
+    }
+
+    private static async Task<int> RunWatchAgentAsync(string installDirectory, bool disableUpdates)
+    {
+        using Mutex singleInstanceMutex = new(true, AgentMutexName, out bool ownsSingleInstance);
+        if (!ownsSingleInstance)
+        {
+            return 0;
+        }
+
+        WriteLog(
+            $"GITHUB watch agent started. InstallDirectory: {installDirectory}. " +
+            $"WatchdogSeconds: {WatchdogInterval.TotalSeconds:0}. " +
+            $"UpdateMinutes: {UpdateCheckInterval.TotalMinutes:0}. DisableUpdates: {disableUpdates}.");
+
+        DateTimeOffset nextUpdateCheckAtUtc = DateTimeOffset.MinValue;
+        Task<int>? activeUpdateTask = null;
+        while (true)
+        {
+            try
+            {
+                if (Volatile.Read(ref appReplacementInProgress) == 0)
+                {
+                    EnsureInstalledAppRunning(installDirectory);
+                }
+
+                if (activeUpdateTask is { IsCompleted: true })
+                {
+                    int updateExitCode = await activeUpdateTask.ConfigureAwait(false);
+                    WriteLog($"GITHUB background update check completed. ExitCode: {updateExitCode}.");
+                    if (updateExitCode == 10)
+                    {
+                        WriteLog("GITHUB is exiting so the validated replacement can be installed.");
+                        return 0;
+                    }
+
+                    activeUpdateTask = null;
+                    nextUpdateCheckAtUtc = DateTimeOffset.UtcNow.Add(UpdateCheckInterval);
+                }
+
+                if (!disableUpdates &&
+                    activeUpdateTask is null &&
+                    DateTimeOffset.UtcNow >= nextUpdateCheckAtUtc)
+                {
+                    activeUpdateTask = RunBackgroundUpdateCheckAsync(installDirectory);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                WriteLog("GITHUB watch iteration failed; monitoring will continue.", exception);
+            }
+
+            await Task.Delay(WatchdogInterval).ConfigureAwait(false);
+            GC.KeepAlive(singleInstanceMutex);
+        }
+    }
+
+    private static async Task<int> RunBackgroundUpdateCheckAsync(string installDirectory)
+    {
+        try
+        {
+            if (await TryStartAgentReplacementAsync(installDirectory).ConfigureAwait(false))
+            {
+                return 10;
+            }
+
+            return await RunUpdateAsync(
+                installDirectory,
+                restartWhenCurrent: false).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("GITHUB background update check failed; the current app will remain active.", exception);
+            return 1;
+        }
+    }
+
+    private static async Task<bool> TryStartAgentReplacementAsync(string installDirectory)
+    {
+        string currentAgentPath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Current GITHUB executable path is unavailable.");
+        using HttpClient httpClient = CreateHttpClient();
+        ReleaseAppAsset agentAsset = await ExecuteWithRetryAsync(
+            "GITHUB agent release lookup",
+            cancellationToken => GetLatestReleaseAssetAsync(httpClient, AgentAssetName, cancellationToken)).ConfigureAwait(false);
+        if (FileMatchesRelease(currentAgentPath, agentAsset.ExpectedSha256, out string currentStatus))
+        {
+            WriteLog($"GITHUB agent is already current. {currentStatus}");
+            return false;
+        }
+
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "github-agent");
+        Directory.CreateDirectory(updateDirectory);
+        string downloadedAgentPath = Path.Combine(
+            updateDirectory,
+            $"GITHUB_{SanitizeFileName(agentAsset.TagName)}.exe");
+        await ExecuteWithRetryAsync(
+            "GITHUB agent download",
+            cancellationToken => DownloadAndValidateAppAsync(
+                httpClient,
+                agentAsset,
+                downloadedAgentPath,
+                cancellationToken)).ConfigureAwait(false);
+
+        ProcessStartInfo replacementProcessStartInfo = new()
+        {
+            FileName = downloadedAgentPath,
+            UseShellExecute = false,
+            WorkingDirectory = updateDirectory,
+            CreateNoWindow = true
+        };
+        replacementProcessStartInfo.ArgumentList.Add("--replace-agent");
+        replacementProcessStartInfo.ArgumentList.Add("--target-agent");
+        replacementProcessStartInfo.ArgumentList.Add(currentAgentPath);
+        replacementProcessStartInfo.ArgumentList.Add("--parent-pid");
+        replacementProcessStartInfo.ArgumentList.Add(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        replacementProcessStartInfo.ArgumentList.Add("--install-dir");
+        replacementProcessStartInfo.ArgumentList.Add(installDirectory);
+        _ = Process.Start(replacementProcessStartInfo)
+            ?? throw new InvalidOperationException("Validated GITHUB replacement process could not be started.");
+        WriteLog($"Validated GITHUB replacement was started. Current: {currentStatus}");
+        return true;
+    }
+
+    private static int RunAgentReplacement(IReadOnlyList<string> args)
+    {
+        try
+        {
+            string installDirectory = ResolveInstallDirectory(args);
+            ValidateInstallDirectory(installDirectory);
+            string targetAgentPath = Path.GetFullPath(ReadRequiredOption(args, "--target-agent"));
+            string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+                ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+            string expectedAgentPath = Path.Combine(workspaceRoot, AgentFileName);
+            if (!targetAgentPath.Equals(expectedAgentPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("GITHUB replacement target is outside the VALOWATCH workspace.");
+            }
+
+            string parentProcessIdText = ReadRequiredOption(args, "--parent-pid");
+            if (!int.TryParse(
+                parentProcessIdText,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out int parentProcessId) ||
+                parentProcessId <= 0)
+            {
+                throw new ArgumentException("GITHUB replacement parent process ID is invalid.");
+            }
+
+            try
+            {
+                using Process parentProcess = Process.GetProcessById(parentProcessId);
+                if (!parentProcess.WaitForExit(30000))
+                {
+                    throw new TimeoutException("The old GITHUB process did not exit within 30 seconds.");
+                }
+            }
+            catch (ArgumentException)
+            {
+                // The old process already exited before the replacement inspected it.
+            }
+
+            string replacementSourcePath = Environment.ProcessPath
+                ?? throw new InvalidOperationException("GITHUB replacement source path is unavailable.");
+            string temporaryTargetPath = targetAgentPath + $".{Environment.ProcessId}.new";
+            File.Copy(replacementSourcePath, temporaryTargetPath, overwrite: true);
+            File.Move(temporaryTargetPath, targetAgentPath, overwrite: true);
+            bool disableUpdates = args.Any(argument => string.Equals(
+                argument,
+                "--disable-updates",
+                StringComparison.OrdinalIgnoreCase));
+            StartWatchAgent(targetAgentPath, installDirectory, disableUpdates);
+            WriteLog($"GITHUB agent replacement completed: {targetAgentPath}");
+            return 0;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("GITHUB agent replacement failed.", exception);
+            return 1;
+        }
+    }
+
+    private static void EnsureInstalledAppRunning(string installDirectory)
+    {
+        string installedAppPath = Path.GetFullPath(Path.Combine(installDirectory, InstalledAppName));
+        if (!File.Exists(installedAppPath) || IsProcessRunningFromPath("VALOWATCH", installedAppPath))
+        {
+            return;
+        }
+
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = installedAppPath,
+            UseShellExecute = true,
+            WorkingDirectory = installDirectory,
+            WindowStyle = ProcessWindowStyle.Hidden
+        });
+        WriteLog($"GITHUB restarted VALOWATCH: {installedAppPath}");
+    }
+
+    private static string InstallOrRefreshAgent(string installDirectory)
+    {
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        string installedAgentPath = Path.Combine(workspaceRoot, AgentFileName);
+        string sourceAgentPath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("GITHUB source executable path is unavailable.");
+        if (Path.GetFullPath(sourceAgentPath).Equals(
+            Path.GetFullPath(installedAgentPath),
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return installedAgentPath;
+        }
+
+        if (IsProcessRunningFromPath("GITHUB", installedAgentPath))
+        {
+            WriteLog("The installed GITHUB agent is already running and will update itself from the release asset.");
+            return installedAgentPath;
+        }
+
+        string temporaryAgentPath = installedAgentPath + $".{Environment.ProcessId}.new";
+        File.Copy(sourceAgentPath, temporaryAgentPath, overwrite: true);
+        File.Move(temporaryAgentPath, installedAgentPath, overwrite: true);
+        WriteLog($"GITHUB watch agent installed: {installedAgentPath}");
+        return installedAgentPath;
+    }
+
+    private static void StartWatchAgent(
+        string installedAgentPath,
+        string installDirectory,
+        bool disableUpdates = false)
+    {
+        if (IsProcessRunningFromPath("GITHUB", installedAgentPath))
+        {
+            return;
+        }
+
+        ProcessStartInfo processStartInfo = new()
+        {
+            FileName = installedAgentPath,
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(installedAgentPath),
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        processStartInfo.ArgumentList.Add("--watch");
+        if (disableUpdates)
+        {
+            processStartInfo.ArgumentList.Add("--disable-updates");
+        }
+
+        processStartInfo.ArgumentList.Add("--install-dir");
+        processStartInfo.ArgumentList.Add(installDirectory);
+        Process.Start(processStartInfo);
+        WriteLog($"GITHUB watch agent launch requested: {installedAgentPath}");
+    }
+
+    private static bool IsProcessRunningFromPath(string processName, string expectedPath)
+    {
+        string normalizedExpectedPath = Path.GetFullPath(expectedPath);
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                try
+                {
+                    string? processPath = process.MainModule?.FileName;
+                    if (!string.IsNullOrWhiteSpace(processPath) &&
+                        Path.GetFullPath(processPath).Equals(
+                            normalizedExpectedPath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                {
+                }
+            }
+        }
+
+        return false;
     }
 
     private static HttpClient CreateHttpClient()
@@ -117,8 +461,9 @@ internal static class Program
         return httpClient;
     }
 
-    private static async Task<ReleaseAppAsset> GetLatestAppAssetAsync(
+    private static async Task<ReleaseAppAsset> GetLatestReleaseAssetAsync(
         HttpClient httpClient,
+        string requiredAssetName,
         CancellationToken cancellationToken)
     {
         Uri releaseUri = new($"https://api.github.com/repos/{Repository}/releases/latest");
@@ -144,7 +489,7 @@ internal static class Program
         foreach (JsonElement assetElement in assetsElement.EnumerateArray())
         {
             string assetName = ReadOptionalString(assetElement, "name");
-            if (!string.Equals(assetName, AppAssetName, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(assetName, requiredAssetName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -157,7 +502,7 @@ internal static class Program
                 : 0;
             if (expectedSize <= 0)
             {
-                throw new InvalidOperationException("VALOWATCH_App.exe release size is missing.");
+                throw new InvalidOperationException($"{requiredAssetName} release size is missing.");
             }
 
             return new ReleaseAppAsset(
@@ -167,7 +512,7 @@ internal static class Program
                 expectedSize);
         }
 
-        throw new InvalidOperationException($"Latest release does not contain {AppAssetName}.");
+        throw new InvalidOperationException($"Latest release does not contain {requiredAssetName}.");
     }
 
     private static async Task<bool> DownloadAndValidateAppAsync(
@@ -376,6 +721,35 @@ internal static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             status = $"Installed app SHA-256 could not be read: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static bool FileMatchesRelease(string filePath, string expectedSha256, out string status)
+    {
+        if (!File.Exists(filePath))
+        {
+            status = "File is missing.";
+            return false;
+        }
+
+        try
+        {
+            using FileStream fileStream = new(
+                filePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            string actualSha256 = Convert.ToHexString(SHA256.HashData(fileStream));
+            bool matches = string.Equals(actualSha256, expectedSha256, StringComparison.OrdinalIgnoreCase);
+            status = matches
+                ? $"SHA-256 matches release: {actualSha256}."
+                : $"SHA-256 differs from release. Actual: {actualSha256}. Expected: {expectedSha256}.";
+            return matches;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            status = $"SHA-256 could not be read: {exception.Message}";
             return false;
         }
     }

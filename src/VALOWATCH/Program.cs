@@ -1,7 +1,6 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Runtime.InteropServices;
 
 namespace VALOWATCH;
@@ -85,9 +84,11 @@ static class Program
             return;
         }
 
-        if (args.Any(argument => string.Equals(argument, "--check-runtime-log-archive", StringComparison.OrdinalIgnoreCase)))
+        if (args.Any(argument =>
+            string.Equals(argument, "--check-runtime-log-messages", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(argument, "--check-runtime-log-archive", StringComparison.OrdinalIgnoreCase)))
         {
-            RunRuntimeLogArchiveDiagnostic();
+            RunRuntimeLogMessageDiagnostic();
             return;
         }
 
@@ -115,8 +116,6 @@ static class Program
         Application.Run(new MainForm(
             appPaths,
             new DiscordBotVoiceRelay(discordBotSettingsStore, appPaths),
-            new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
-            new GitAutoUpdater(new GitUpdateSettingsStore(appPaths), appPaths),
             disableDiscordAutomation,
             disableKeyStateFallback));
 
@@ -154,7 +153,7 @@ static class Program
         }
     }
 
-    private static void RunRuntimeLogArchiveDiagnostic()
+    private static void RunRuntimeLogMessageDiagnostic()
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
@@ -179,34 +178,56 @@ static class Program
                     "DISCORD_BOT_TOKEN=must-not-leak",
                     $"path={Path.Combine(userProfile, "Documents", "VALOWATCH")}"
                 ]);
-            File.WriteAllText(Path.Combine(nestedDirectory, "SECOND.LOG"), "nested log line");
+            File.WriteAllText(
+                Path.Combine(nestedDirectory, "SECOND.LOG"),
+                "nested log line " + new string('X', 4200));
             File.WriteAllText(Path.Combine(tempLogsDirectory, ".env"), "SECRET=must-not-be-included");
 
-            string archivePath = Path.Combine(diagnosticRoot, "runtime.zip");
-            RuntimeLogArchiveBuilder.Create(
-                archivePath,
+            string cursorPath = Path.Combine(diagnosticRoot, "runtime-log-cursors.json");
+            IReadOnlyList<RuntimeLogFileDelta> initialDeltas = RuntimeLogMessageCollector.Collect(
+                cursorPath,
                 "diagnostic-version",
                 (dataLogsDirectory, "data-logs"),
                 (tempLogsDirectory, "temp-logs"));
+            string initialText = string.Join(Environment.NewLine, initialDeltas.SelectMany(delta => delta.DiscordMessages));
+            foreach (RuntimeLogFileDelta delta in initialDeltas)
+            {
+                RuntimeLogMessageCollector.Commit(cursorPath, delta.CursorKey, delta.CurrentLineCount);
+            }
 
-            using ZipArchive archive = ZipFile.OpenRead(archivePath);
-            string[] entryNames = archive.Entries.Select(entry => entry.FullName).ToArray();
-            string archiveText = string.Join(
+            File.AppendAllText(
+                Path.Combine(dataLogsDirectory, "primary.log"),
+                $"incremental runtime line{Environment.NewLine}");
+            IReadOnlyList<RuntimeLogFileDelta> incrementalDeltas = RuntimeLogMessageCollector.Collect(
+                cursorPath,
+                "diagnostic-version",
+                (dataLogsDirectory, "data-logs"),
+                (tempLogsDirectory, "temp-logs"));
+            string incrementalText = string.Join(
                 Environment.NewLine,
-                archive.Entries.Select(ReadArchiveEntry));
-            bool ready = entryNames.Contains("runtime-metadata.txt", StringComparer.OrdinalIgnoreCase) &&
-                entryNames.Contains("data-logs/primary.log", StringComparer.OrdinalIgnoreCase) &&
-                entryNames.Contains("temp-logs/nested/SECOND.LOG", StringComparer.OrdinalIgnoreCase) &&
-                !entryNames.Any(entryName => entryName.EndsWith(".env", StringComparison.OrdinalIgnoreCase)) &&
-                !archiveText.Contains("must-not-leak", StringComparison.Ordinal) &&
-                !archiveText.Contains(userProfile, StringComparison.OrdinalIgnoreCase) &&
-                archiveText.Contains("%USERPROFILE%", StringComparison.Ordinal);
+                incrementalDeltas.SelectMany(delta => delta.DiscordMessages));
+            string[] cursorKeys = initialDeltas.Select(delta => delta.CursorKey).ToArray();
+            bool ready = cursorKeys.Contains("data-logs/primary.log", StringComparer.OrdinalIgnoreCase) &&
+                cursorKeys.Contains("temp-logs/nested/SECOND.LOG", StringComparer.OrdinalIgnoreCase) &&
+                !cursorKeys.Any(key => key.EndsWith(".env", StringComparison.OrdinalIgnoreCase)) &&
+                initialDeltas.SelectMany(delta => delta.DiscordMessages).All(message =>
+                    message.Length <= 2000 &&
+                    message.StartsWith("```text", StringComparison.Ordinal) &&
+                    message.EndsWith("```", StringComparison.Ordinal)) &&
+                !initialText.Contains("must-not-leak", StringComparison.Ordinal) &&
+                !initialText.Contains(userProfile, StringComparison.OrdinalIgnoreCase) &&
+                initialText.Contains("%USERPROFILE%", StringComparison.Ordinal) &&
+                initialText.Contains("nested log line", StringComparison.Ordinal) &&
+                incrementalText.Contains("incremental runtime line", StringComparison.Ordinal) &&
+                !incrementalText.Contains("normal runtime line", StringComparison.Ordinal);
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
             File.AppendAllText(
                 logFilePath,
-                $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log archive check: {(ready ? "ready" : "failed")}. " +
-                $"Entries: {string.Join(",", entryNames)}.{Environment.NewLine}");
+                $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log message check: {(ready ? "ready" : "failed")}. " +
+                $"Files: {string.Join(",", cursorKeys)}. InitialMessages: " +
+                $"{initialDeltas.Sum(delta => delta.DiscordMessages.Count)}. " +
+                $"IncrementalMessages: {incrementalDeltas.Sum(delta => delta.DiscordMessages.Count)}.{Environment.NewLine}");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
@@ -216,7 +237,7 @@ static class Program
                 Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
                 File.AppendAllText(
                     logFilePath,
-                    $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log archive check failed: {exception.Message}{Environment.NewLine}");
+                    $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log message check failed: {exception.Message}{Environment.NewLine}");
             }
             catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
             {
@@ -271,12 +292,6 @@ static class Program
             TryWriteDiagnosticFailure(logFilePath, "Update identity check", exception);
             Environment.ExitCode = 1;
         }
-    }
-
-    private static string ReadArchiveEntry(ZipArchiveEntry archiveEntry)
-    {
-        using StreamReader reader = new(archiveEntry.Open());
-        return reader.ReadToEnd();
     }
 
     private static void RunAltTHotKeyInputDiagnostic()

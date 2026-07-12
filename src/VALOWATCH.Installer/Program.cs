@@ -10,6 +10,7 @@ internal static class Program
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RegistryValueName = "VALOWATCH";
     private const string EmbeddedExecutableResourceName = "VALOWATCH.exe";
+    private const string EmbeddedGitHubResourceName = "GITHUB.exe";
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
@@ -473,15 +474,17 @@ internal static class Program
         ValidateInstallDirectorySelection(installDirectory);
 
         string installedExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
+        string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
+        string installedGitHubPath = Path.Combine(workspaceRoot, "GITHUB.exe");
         bool replacesExistingInstallation = File.Exists(installedExecutablePath);
 
         progress.Report(new InstallProgress(8, "起動中の VALOWATCH をすべて停止しています。"));
         StopRunningInstalledApp(installedExecutablePath, stopAllValowatchProcesses);
+        StopRunningUpdateProcesses();
 
         if (cleanReinstall)
         {
             progress.Report(new InstallProgress(10, "旧インストールを安全に削除しています。"));
-            StopRunningUpdateProcesses();
             RemoveStartupRegistration();
             CleanInstalledAppDirectory(installDirectory);
         }
@@ -491,6 +494,7 @@ internal static class Program
 
         progress.Report(new InstallProgress(69, "Discord 音声 DLL を展開しています。"));
         ExtractNativeDependencies(installDirectory);
+        ExtractEmbeddedFile(EmbeddedGitHubResourceName, installedGitHubPath);
         RemoveObsoleteCaptureTools(installDirectory);
 
         progress.Report(new InstallProgress(70, "Discord bot 設定を配置しています。"));
@@ -499,7 +503,7 @@ internal static class Program
         if (registerStartup)
         {
             progress.Report(new InstallProgress(92, "Windows 起動時の自動起動を登録しています。"));
-            RegisterStartup(installedExecutablePath);
+            RegisterStartup(installedGitHubPath, installDirectory);
         }
         else
         {
@@ -525,7 +529,7 @@ internal static class Program
         if (startAfterInstall)
         {
             progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
-            StartInstalledApp(installedExecutablePath);
+            StartGitHubAgent(installedGitHubPath, installDirectory);
         }
         else
         {
@@ -1188,6 +1192,7 @@ internal static class Program
                 }
 
                 bool isUpdateProcess = processName.Equals("VALOWATCH_Update", StringComparison.OrdinalIgnoreCase) ||
+                    processName.Equals("GITHUB", StringComparison.OrdinalIgnoreCase) ||
                     processName.StartsWith("VALOWATCH_Setup_", StringComparison.OrdinalIgnoreCase);
                 if (!isUpdateProcess)
                 {
@@ -1317,17 +1322,18 @@ internal static class Program
         return normalizedInstallDirectory;
     }
 
-    private static void RegisterStartup(string installedExecutablePath)
+    private static void RegisterStartup(string installedGitHubPath, string installDirectory)
     {
         using RegistryKey registryKey = Registry.CurrentUser.CreateSubKey(RegistryRunPath, true)
             ?? throw new InvalidOperationException("Windows startup registry key could not be opened.");
 
-        registryKey.SetValue(RegistryValueName, $"\"{installedExecutablePath}\"");
-        WriteStartupCommand(installedExecutablePath);
-        TryRegisterKeepAliveTask(installedExecutablePath);
+        string agentCommand = BuildGitHubAgentCommand(installedGitHubPath, installDirectory);
+        registryKey.SetValue(RegistryValueName, agentCommand);
+        WriteStartupCommand(installedGitHubPath, installDirectory);
+        TryRegisterKeepAliveTask(installedGitHubPath, installDirectory);
     }
 
-    private static void TryRegisterKeepAliveTask(string installedExecutablePath)
+    private static void TryRegisterKeepAliveTask(string installedGitHubPath, string installDirectory)
     {
         try
         {
@@ -1344,7 +1350,7 @@ internal static class Program
             processStartInfo.ArgumentList.Add("/TN");
             processStartInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
             processStartInfo.ArgumentList.Add("/TR");
-            processStartInfo.ArgumentList.Add($"\"{installedExecutablePath}\" --keepalive-probe");
+            processStartInfo.ArgumentList.Add(BuildGitHubAgentCommand(installedGitHubPath, installDirectory));
             processStartInfo.ArgumentList.Add("/SC");
             processStartInfo.ArgumentList.Add("MINUTE");
             processStartInfo.ArgumentList.Add("/MO");
@@ -1383,7 +1389,7 @@ internal static class Program
         }
     }
 
-    private static void WriteStartupCommand(string installedExecutablePath)
+    private static void WriteStartupCommand(string installedGitHubPath, string installDirectory)
     {
         string startupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
         if (string.IsNullOrWhiteSpace(startupDirectory))
@@ -1396,19 +1402,28 @@ internal static class Program
         string[] commandLines =
         [
             "@echo off",
-            $"start \"\" \"{installedExecutablePath}\""
+            $"start \"\" \"{installedGitHubPath}\" --watch --install-dir \"{installDirectory}\""
         ];
         File.WriteAllLines(commandPath, commandLines);
     }
 
-    private static void StartInstalledApp(string installedExecutablePath)
+    private static string BuildGitHubAgentCommand(string installedGitHubPath, string installDirectory)
+    {
+        return $"\"{installedGitHubPath}\" --watch --install-dir \"{installDirectory}\"";
+    }
+
+    private static void StartGitHubAgent(string installedGitHubPath, string installDirectory)
     {
         ProcessStartInfo processStartInfo = new()
         {
-            FileName = installedExecutablePath,
+            FileName = installedGitHubPath,
             UseShellExecute = true,
-            WorkingDirectory = Path.GetDirectoryName(installedExecutablePath)
+            WorkingDirectory = Path.GetDirectoryName(installedGitHubPath),
+            WindowStyle = ProcessWindowStyle.Hidden
         };
+        processStartInfo.ArgumentList.Add("--watch");
+        processStartInfo.ArgumentList.Add("--install-dir");
+        processStartInfo.ArgumentList.Add(installDirectory);
 
         Process.Start(processStartInfo);
     }
