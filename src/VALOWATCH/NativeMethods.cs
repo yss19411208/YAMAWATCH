@@ -10,6 +10,8 @@ internal static class NativeMethods
     public const int WmKeyUp = 0x0101;
     public const int WmSysKeyDown = 0x0104;
     public const int WmSysKeyUp = 0x0105;
+    public const int WhKeyboardLl = 13;
+    public const uint LlkhfAltDown = 0x20;
     public const uint RidInput = 0x10000003;
     public const uint RimTypeKeyboard = 1;
     public const uint RidevRemove = 0x00000001;
@@ -88,11 +90,34 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int virtualKeyCode);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetWindowsHookEx(
+        int hookType,
+        LowLevelKeyboardProc hookProcedure,
+        IntPtr moduleHandle,
+        uint threadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UnhookWindowsHookEx(IntPtr hookHandle);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr CallNextHookEx(
+        IntPtr hookHandle,
+        int hookCode,
+        IntPtr message,
+        IntPtr keyboardData);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr GetModuleHandle(string? moduleName);
+
     public static bool IsKeyDown(int virtualKeyCode)
     {
         return (GetAsyncKeyState(virtualKeyCode) & 0x8000) != 0;
     }
 }
+
+internal delegate IntPtr LowLevelKeyboardProc(int hookCode, IntPtr message, IntPtr keyboardData);
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct RawInputDevice
@@ -121,6 +146,16 @@ internal struct RawKeyboardInput
     public ushort VirtualKey;
     public uint Message;
     public uint ExtraInformation;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct LowLevelKeyboardInput
+{
+    public uint VirtualKey;
+    public uint ScanCode;
+    public uint Flags;
+    public uint Time;
+    public nuint ExtraInformation;
 }
 
 [StructLayout(LayoutKind.Sequential)]

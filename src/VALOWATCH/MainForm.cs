@@ -21,9 +21,12 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer hotKeyHealthTimer = new();
     private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
     private readonly AltTHotKeyStateMachine rawInputHotKeyState = new();
+    private readonly AltTHotKeyStateMachine lowLevelHookHotKeyState = new();
+    private readonly LowLevelKeyboardProc lowLevelKeyboardHookProcedure;
 
     private StratsOverlayForm? stratsOverlayForm;
     private AsyncKeyStateAltTHotKeyMonitor? asyncKeyStateHotKeyMonitor;
+    private IntPtr lowLevelKeyboardHookHandle;
     private bool rawKeyboardInputRegistered;
     private bool hotKeyRegistered;
     private bool lastValorantDetected;
@@ -52,6 +55,7 @@ public sealed class MainForm : Form
         this.gitAutoUpdater = gitAutoUpdater;
         this.disableDiscordAutomation = disableDiscordAutomation;
         this.disableKeyStateFallback = disableKeyStateFallback;
+        lowLevelKeyboardHookProcedure = ProcessLowLevelKeyboardInput;
 
         BuildHeadlessWindow();
 
@@ -84,12 +88,14 @@ public sealed class MainForm : Form
         base.OnHandleCreated(eventArgs);
         RegisterStratsHotKey();
         RegisterRawKeyboardInput();
+        RegisterLowLevelKeyboardHook();
         StartAsyncKeyStateHotKeyMonitor();
     }
 
     protected override void OnHandleDestroyed(EventArgs eventArgs)
     {
         StopAsyncKeyStateHotKeyMonitor();
+        UnregisterLowLevelKeyboardHook();
         UnregisterRawKeyboardInput();
         UnregisterStratsHotKey();
         base.OnHandleDestroyed(eventArgs);
@@ -102,6 +108,7 @@ public sealed class MainForm : Form
         hotKeyHealthTimer.Stop();
         stratsToggleDelayTimer.Stop();
         StopAsyncKeyStateHotKeyMonitor();
+        UnregisterLowLevelKeyboardHook();
         UnregisterRawKeyboardInput();
         DisposeStratsOverlay();
 
@@ -362,6 +369,71 @@ public sealed class MainForm : Form
         WriteAppLog(
             "Overlay",
             $"Background Raw Input keyboard registration failed. Win32Error: {Marshal.GetLastWin32Error()}.");
+    }
+
+    private void RegisterLowLevelKeyboardHook()
+    {
+        if (lowLevelKeyboardHookHandle != IntPtr.Zero)
+        {
+            return;
+        }
+
+        IntPtr moduleHandle = NativeMethods.GetModuleHandle(null);
+        lowLevelKeyboardHookHandle = NativeMethods.SetWindowsHookEx(
+            NativeMethods.WhKeyboardLl,
+            lowLevelKeyboardHookProcedure,
+            moduleHandle,
+            threadId: 0);
+        if (lowLevelKeyboardHookHandle != IntPtr.Zero)
+        {
+            WriteAppLog("Overlay", "Low-level Alt + T keyboard hook registered.");
+            return;
+        }
+
+        WriteAppLog(
+            "Overlay",
+            $"Low-level Alt + T keyboard hook registration failed. Win32Error: {Marshal.GetLastWin32Error()}.");
+    }
+
+    private void UnregisterLowLevelKeyboardHook()
+    {
+        IntPtr hookHandle = lowLevelKeyboardHookHandle;
+        lowLevelKeyboardHookHandle = IntPtr.Zero;
+        if (hookHandle != IntPtr.Zero && !NativeMethods.UnhookWindowsHookEx(hookHandle))
+        {
+            WriteAppLog(
+                "Overlay",
+                $"Low-level Alt + T keyboard hook removal failed. Win32Error: {Marshal.GetLastWin32Error()}.");
+        }
+    }
+
+    private IntPtr ProcessLowLevelKeyboardInput(int hookCode, IntPtr message, IntPtr keyboardData)
+    {
+        if (hookCode >= 0 && keyboardData != IntPtr.Zero)
+        {
+            int keyboardMessage = unchecked((int)message.ToInt64());
+            bool keyDown = keyboardMessage is NativeMethods.WmKeyDown or NativeMethods.WmSysKeyDown;
+            bool keyUp = keyboardMessage is NativeMethods.WmKeyUp or NativeMethods.WmSysKeyUp;
+            if (keyDown || keyUp)
+            {
+                LowLevelKeyboardInput keyboardInput = Marshal.PtrToStructure<LowLevelKeyboardInput>(keyboardData);
+                bool altIsCurrentlyDown = (keyboardInput.Flags & NativeMethods.LlkhfAltDown) != 0;
+                if (lowLevelHookHotKeyState.Process(
+                    keyboardInput.VirtualKey,
+                    keyDown,
+                    keyUp,
+                    altIsCurrentlyDown))
+                {
+                    RequestStratsToggleFromHotKey("low-level keyboard hook");
+                }
+            }
+        }
+
+        return NativeMethods.CallNextHookEx(
+            lowLevelKeyboardHookHandle,
+            hookCode,
+            message,
+            keyboardData);
     }
 
     private void UnregisterRawKeyboardInput()

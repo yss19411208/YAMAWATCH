@@ -61,6 +61,7 @@
 | Discord送信失敗時のログ保持 | 成功 |
 | 開発PCでの安全な実行先自動切り替え | 成功 |
 | 再インストーラーの無画面・無確認実行 | 成功 |
+| `RegisterHotKey`競合時の低レベルキーボードフック | 成功 |
 
 ## 自動検証できない範囲
 
@@ -75,3 +76,5 @@
 - WM_INPUT: https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-input
 - GetAsyncKeyState: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
 - SetForegroundWindow: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow
+- SetWindowsHookEx: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw
+- KBDLLHOOKSTRUCT: https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-kbdllhookstruct
