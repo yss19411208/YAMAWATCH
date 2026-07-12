@@ -79,6 +79,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool audioDiagnosticMessageSent;
     private string currentMicrophoneDeviceName = string.Empty;
     private string lastNotifiedMicrophoneDeviceName = string.Empty;
+    private bool versionNotificationSent;
     private string currentCaptureDeviceList = string.Empty;
     private string currentLineLoopbackSourceName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
@@ -201,6 +202,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: false. SelfMute: false.");
             await SendRequestedDiscordNotificationAsync(GetValorantOpenedMessage(settings)).ConfigureAwait(false);
+            await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
             bool audioRelayStarted = false;
@@ -1531,7 +1533,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
-        if (!await SendRequestedDiscordNotificationAsync("updateしました").ConfigureAwait(false))
+        if (!await SendRequestedDiscordNotificationAsync($"updateしました: {GetCurrentVersionLabel()}")
+            .ConfigureAwait(false))
         {
             return;
         }
@@ -1545,6 +1548,34 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             WriteLog("Update notification was sent, but its pending marker could not be deleted.", exception);
         }
+    }
+
+    private async Task SendVersionNotificationIfNeededAsync()
+    {
+        if (versionNotificationSent)
+        {
+            return;
+        }
+
+        if (await SendRequestedDiscordNotificationAsync($"VALOWATCH version: {GetCurrentVersionLabel()}")
+            .ConfigureAwait(false))
+        {
+            versionNotificationSent = true;
+        }
+    }
+
+    private static string GetCurrentVersionLabel()
+    {
+        Assembly applicationAssembly = typeof(DiscordBotVoiceRelay).Assembly;
+        string? informationalVersion = applicationAssembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            return informationalVersion.Trim();
+        }
+
+        return applicationAssembly.GetName().Version?.ToString() ?? "unknown";
     }
 
     private async Task<bool> SendRequestedDiscordNotificationAsync(string message)
