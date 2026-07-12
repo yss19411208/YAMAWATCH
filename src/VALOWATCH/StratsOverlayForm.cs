@@ -58,8 +58,7 @@ public sealed class StratsOverlayForm : Form
         IsOverlayVisible = true;
         SetTopMostWithoutActivation(lastOverlayBounds);
         BringToFront();
-        Activate();
-        NativeMethods.SetForegroundWindow(Handle);
+        FocusOverlayForInteraction();
         StartTopMostPulse();
     }
 
@@ -219,6 +218,42 @@ public sealed class StratsOverlayForm : Form
 
         topMostPulseCountRemaining--;
         SetTopMostWithoutActivation(lastOverlayBounds);
+        if (topMostPulseCountRemaining >= 20 &&
+            NativeMethods.GetAncestor(NativeMethods.GetForegroundWindow(), NativeMethods.GaRoot) != Handle)
+        {
+            FocusOverlayForInteraction();
+        }
+    }
+
+    private void FocusOverlayForInteraction()
+    {
+        IntPtr foregroundWindow = NativeMethods.GetForegroundWindow();
+        uint currentThreadId = NativeMethods.GetCurrentThreadId();
+        uint foregroundThreadId = foregroundWindow == IntPtr.Zero
+            ? 0
+            : NativeMethods.GetWindowThreadProcessId(foregroundWindow, out _);
+        bool attached = foregroundThreadId != 0 &&
+            foregroundThreadId != currentThreadId &&
+            NativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, attach: true);
+
+        try
+        {
+            NativeMethods.BringWindowToTop(Handle);
+            Activate();
+            NativeMethods.SetForegroundWindow(Handle);
+            NativeMethods.SetFocus(Handle);
+            if (webView.Visible)
+            {
+                webView.Focus();
+            }
+        }
+        finally
+        {
+            if (attached)
+            {
+                NativeMethods.AttachThreadInput(currentThreadId, foregroundThreadId, attach: false);
+            }
+        }
     }
 
     private void SetTopMostWithoutActivation(Rectangle overlayBounds)

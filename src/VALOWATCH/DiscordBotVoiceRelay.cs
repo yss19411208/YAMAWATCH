@@ -25,6 +25,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan RelayShutdownTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RuntimeDiagnosticInitialDelay = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan RuntimeDiagnosticInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan DiscordFrameWriteTimeout = TimeSpan.FromSeconds(5);
@@ -43,6 +45,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly object audioStatsLock = new();
     private readonly object microphoneCaptureLock = new();
     private readonly SemaphoreSlim lifecycleSemaphore = new(1, 1);
+    private readonly SemaphoreSlim runtimeDiagnosticSemaphore = new(1, 1);
 
     private DiscordSocketClient? discordClient;
     private IAudioClient? audioClient;
@@ -83,6 +86,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private string currentMicrophoneDeviceName = string.Empty;
     private string lastNotifiedMicrophoneDeviceName = string.Empty;
     private bool versionNotificationSent;
+    private CancellationTokenSource? runtimeDiagnosticCancellationTokenSource;
+    private Task? runtimeDiagnosticTask;
     private string currentCaptureDeviceList = string.Empty;
     private string currentLineLoopbackSourceName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
@@ -202,6 +207,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
             await SendPendingInstallerReportAsync().ConfigureAwait(false);
+            await SendPendingRuntimeDiagnosticAsync().ConfigureAwait(false);
 
             bool audioRelayStarted = false;
 
@@ -220,6 +226,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 catch (Exception audioException)
                 {
                     WriteLog("Discord voice channel joined, but microphone audio relay could not start.", audioException);
+                    await SendRequestedDiscordNotificationAsync(
+                        $"VALOWATCH 音声開始失敗: {audioException.Message}").ConfigureAwait(false);
+                    await CreateAndSendRuntimeDiagnosticSnapshotAsync().ConfigureAwait(false);
                     await StopCoreAsync().ConfigureAwait(false);
                     StatusText = FormatRunningStatus("Discord audio recovery pending", audioException.Message);
                     return;
@@ -231,6 +240,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 IsRunning = true;
                 StatusText = FormatRunningStatus(audioRelayStarted ? "Discord mic live" : "Discord joined VC");
             }
+
+            StartRuntimeDiagnosticSnapshots();
         }
         catch (Exception exception)
         {
@@ -321,6 +332,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         DisposeAudioObjects();
+
+        await StopRuntimeDiagnosticSnapshotsAsync().ConfigureAwait(false);
+        await CreateAndSendRuntimeDiagnosticSnapshotAsync().ConfigureAwait(false);
 
         if (audioClient is not null)
         {
@@ -1627,6 +1641,111 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private void StartRuntimeDiagnosticSnapshots()
+    {
+        if (runtimeDiagnosticTask is not null)
+        {
+            return;
+        }
+
+        runtimeDiagnosticCancellationTokenSource = new CancellationTokenSource();
+        CancellationToken cancellationToken = runtimeDiagnosticCancellationTokenSource.Token;
+        runtimeDiagnosticTask = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(RuntimeDiagnosticInitialDelay, cancellationToken).ConfigureAwait(false);
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    await CreateAndSendRuntimeDiagnosticSnapshotAsync().ConfigureAwait(false);
+                    await Task.Delay(RuntimeDiagnosticInterval, cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+            }
+        }, cancellationToken);
+    }
+
+    private async Task StopRuntimeDiagnosticSnapshotsAsync()
+    {
+        CancellationTokenSource? cancellationTokenSource = runtimeDiagnosticCancellationTokenSource;
+        Task? activeTask = runtimeDiagnosticTask;
+        runtimeDiagnosticCancellationTokenSource = null;
+        runtimeDiagnosticTask = null;
+
+        if (cancellationTokenSource is null)
+        {
+            return;
+        }
+
+        await cancellationTokenSource.CancelAsync().ConfigureAwait(false);
+        if (activeTask is not null)
+        {
+            try
+            {
+                await activeTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        cancellationTokenSource.Dispose();
+    }
+
+    private async Task CreateAndSendRuntimeDiagnosticSnapshotAsync()
+    {
+        await runtimeDiagnosticSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(appPaths.PendingRuntimeDiagnosticPath) ?? appPaths.DataDirectory);
+            RuntimeLogArchiveBuilder.Create(
+                appPaths.PendingRuntimeDiagnosticPath,
+                GetCurrentVersionLabel(),
+                (Path.Combine(appPaths.DataDirectory, "logs"), "data-logs"),
+                (Path.Combine(Path.GetTempPath(), "VALOWATCH"), "temp-logs"));
+            await SendPendingRuntimeDiagnosticAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            WriteLog("Runtime diagnostic snapshot could not be created.", exception);
+        }
+        finally
+        {
+            runtimeDiagnosticSemaphore.Release();
+        }
+    }
+
+    private async Task SendPendingRuntimeDiagnosticAsync()
+    {
+        string reportPath = appPaths.PendingRuntimeDiagnosticPath;
+        if (!File.Exists(reportPath))
+        {
+            return;
+        }
+
+        SocketTextChannel? textChannel = discordStatusTextChannel;
+        if (textChannel is null)
+        {
+            WriteLog("Pending runtime diagnostic could not be sent because the text channel is missing.");
+            return;
+        }
+
+        try
+        {
+            await textChannel
+                .SendFileAsync(reportPath, "VALOWATCH 全実行ログ")
+                .ConfigureAwait(false);
+            File.Delete(reportPath);
+            WriteLog("Runtime diagnostic snapshot was sent to Discord and cleared.");
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Runtime diagnostic snapshot could not be sent and remains queued.", exception);
+        }
+    }
+
     private static string GetCurrentVersionLabel()
     {
         Assembly applicationAssembly = typeof(DiscordBotVoiceRelay).Assembly;
@@ -1665,7 +1784,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private void QueueDiscordStatusMessage(string message)
     {
-        WriteLog($"Discord diagnostic notification suppressed; only requested lifecycle notifications are enabled. Message: {message}");
+        WriteLog($"Discord diagnostic notification queued. Message: {message}");
+        _ = SendRequestedDiscordNotificationAsync(message);
     }
 
     private static float CalculateFloat32Peak(byte[] buffer, int offset, int byteCount)

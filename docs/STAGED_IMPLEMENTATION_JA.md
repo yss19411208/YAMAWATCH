@@ -144,6 +144,19 @@ VALOWATCH_GITHUB_TOKEN=
 
 自動更新は `.exe` の release asset のみ実行します。branch zip はソースコードなので、自動実行対象にはしません。
 
+## Phase 5.5: Discord runtime diagnostics
+
+目的: 配布先PCでUI操作やログ回収を依頼せず、VALORANT検出、Discord接続、マイク入力、Alt+T監視の実行状況を指定テキストチャンネルで確認する。
+
+完了:
+
+- 音声開始失敗と12秒後の音声ピーク診断をテキスト送信
+- `data\logs` と `%TEMP%\VALOWATCH` の `.log` / `.txt` を再帰収集
+- 起動20秒後、以後5分ごと、終了時のサニタイズ済みZIP添付
+- 通信失敗時のZIP保留と次回接続時の再送
+- `.env`、token関連行、暗号化設定、ユーザープロファイル実パスの除外
+- `--check-runtime-log-archive` による収集・除外・大文字拡張子の自己診断
+
 ## 削除済み
 
 - WAV / MP3録音

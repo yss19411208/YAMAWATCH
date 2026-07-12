@@ -5,6 +5,7 @@ namespace VALOWATCH;
 internal static class NativeMethods
 {
     public const int WmHotKey = 0x0312;
+    public const int WmApp = 0x8000;
     public const int WmInput = 0x00FF;
     public const int WmKeyDown = 0x0100;
     public const int WmKeyUp = 0x0101;
@@ -30,6 +31,7 @@ internal static class NativeMethods
     public const int VirtualKeyMenu = 0x12;
     public const int VirtualKeyLeftMenu = 0xA4;
     public const int VirtualKeyRightMenu = 0xA5;
+    public const uint GaRoot = 2;
 
     public const int WmNclButtonDown = 0x00A1;
     public const int HtCaption = 0x0002;
@@ -63,6 +65,10 @@ internal static class NativeMethods
     public static extern IntPtr SendMessage(IntPtr windowHandle, int message, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessage(IntPtr windowHandle, int message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowRect(IntPtr windowHandle, out NativeRect rectangle);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -73,6 +79,23 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr windowHandle, out uint processId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BringWindowToTop(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr windowHandle);
 
     [DllImport("user32.dll")]
     public static extern bool IsWindow(IntPtr windowHandle);
@@ -110,6 +133,9 @@ internal static class NativeMethods
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr GetModuleHandle(string? moduleName);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
 
     public static bool IsKeyDown(int virtualKeyCode)
     {

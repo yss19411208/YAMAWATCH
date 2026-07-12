@@ -1,6 +1,7 @@
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 
 namespace VALOWATCH;
@@ -84,6 +85,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-runtime-log-archive", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunRuntimeLogArchiveDiagnostic();
+            return;
+        }
+
         using Mutex singleInstanceMutex = new(true, SingleInstanceMutexName, out bool ownsSingleInstance);
         if (!ownsSingleInstance)
         {
@@ -139,6 +146,97 @@ static class Program
         {
             throw new InvalidOperationException("VALOWATCH keepalive could not restart the application.");
         }
+    }
+
+    private static void RunRuntimeLogArchiveDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string diagnosticRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"VALOWATCH-runtime-log-test-{Guid.NewGuid():N}");
+
+        try
+        {
+            string dataLogsDirectory = Path.Combine(diagnosticRoot, "data-logs");
+            string tempLogsDirectory = Path.Combine(diagnosticRoot, "temp-logs");
+            string nestedDirectory = Path.Combine(tempLogsDirectory, "nested");
+            Directory.CreateDirectory(dataLogsDirectory);
+            Directory.CreateDirectory(nestedDirectory);
+
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            File.WriteAllLines(
+                Path.Combine(dataLogsDirectory, "primary.log"),
+                [
+                    "normal runtime line",
+                    "DISCORD_BOT_TOKEN=must-not-leak",
+                    $"path={Path.Combine(userProfile, "Documents", "VALOWATCH")}"
+                ]);
+            File.WriteAllText(Path.Combine(nestedDirectory, "SECOND.LOG"), "nested log line");
+            File.WriteAllText(Path.Combine(tempLogsDirectory, ".env"), "SECRET=must-not-be-included");
+
+            string archivePath = Path.Combine(diagnosticRoot, "runtime.zip");
+            RuntimeLogArchiveBuilder.Create(
+                archivePath,
+                "diagnostic-version",
+                (dataLogsDirectory, "data-logs"),
+                (tempLogsDirectory, "temp-logs"));
+
+            using ZipArchive archive = ZipFile.OpenRead(archivePath);
+            string[] entryNames = archive.Entries.Select(entry => entry.FullName).ToArray();
+            string archiveText = string.Join(
+                Environment.NewLine,
+                archive.Entries.Select(ReadArchiveEntry));
+            bool ready = entryNames.Contains("runtime-metadata.txt", StringComparer.OrdinalIgnoreCase) &&
+                entryNames.Contains("data-logs/primary.log", StringComparer.OrdinalIgnoreCase) &&
+                entryNames.Contains("temp-logs/nested/SECOND.LOG", StringComparer.OrdinalIgnoreCase) &&
+                !entryNames.Any(entryName => entryName.EndsWith(".env", StringComparison.OrdinalIgnoreCase)) &&
+                !archiveText.Contains("must-not-leak", StringComparison.Ordinal) &&
+                !archiveText.Contains(userProfile, StringComparison.OrdinalIgnoreCase) &&
+                archiveText.Contains("%USERPROFILE%", StringComparison.Ordinal);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log archive check: {(ready ? "ready" : "failed")}. " +
+                $"Entries: {string.Join(",", entryNames)}.{Environment.NewLine}");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
+                File.AppendAllText(
+                    logFilePath,
+                    $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log archive check failed: {exception.Message}{Environment.NewLine}");
+            }
+            catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+            {
+            }
+
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(diagnosticRoot))
+                {
+                    Directory.Delete(diagnosticRoot, recursive: true);
+                }
+            }
+            catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static string ReadArchiveEntry(ZipArchiveEntry archiveEntry)
+    {
+        using StreamReader reader = new(archiveEntry.Open());
+        return reader.ReadToEnd();
     }
 
     private static void RunAltTHotKeyInputDiagnostic()
@@ -217,12 +315,17 @@ static class Program
                 keyDown: true,
                 keyUp: false,
                 altIsCurrentlyDown: true);
+            using AsyncKeyStateAltTHotKeyMonitor keyStateMonitor = new();
+            keyStateMonitor.Start();
+            Thread.Sleep(150);
+            bool keyStateMonitorStarted = keyStateMonitor.IsResponsive && keyStateMonitor.HeartbeatCount > 0;
             bool diagnosticPassed = rawInputRegistered &&
                 tWithoutAltIgnored &&
                 firstChordTriggered &&
                 repeatIgnored &&
                 secondChordTriggered &&
-                alreadyHeldAltTriggered;
+                alreadyHeldAltTriggered &&
+                keyStateMonitorStarted;
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
             File.AppendAllText(
@@ -231,7 +334,8 @@ static class Program
                 $"RawInputRegistered: {rawInputRegistered}. RegistrationError: {registrationError}. " +
                 $"TWithoutAltIgnored: {tWithoutAltIgnored}. FirstChord: {firstChordTriggered}. " +
                 $"RepeatIgnored: {repeatIgnored}. SecondChord: {secondChordTriggered}. " +
-                $"AlreadyHeldAlt: {alreadyHeldAltTriggered}.{Environment.NewLine}");
+                $"AlreadyHeldAlt: {alreadyHeldAltTriggered}. KeyStateMonitorStarted: {keyStateMonitorStarted}. " +
+                $"KeyStateHeartbeat: {keyStateMonitor.HeartbeatCount}.{Environment.NewLine}");
             Environment.ExitCode = diagnosticPassed ? 0 : 1;
         }
         finally

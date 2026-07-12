@@ -5,6 +5,8 @@ namespace VALOWATCH;
 public sealed class MainForm : Form
 {
     private const int StratsHotKeyId = 9101;
+    private const int WmAltTHookPressed = NativeMethods.WmApp + 0x51;
+    private const int WmAltTKeyStatePressed = NativeMethods.WmApp + 0x52;
     private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HotKeyRegistrationRetryInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HotKeyTriggerCooldown = TimeSpan.FromMilliseconds(500);
@@ -21,12 +23,13 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer hotKeyHealthTimer = new();
     private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
     private readonly AltTHotKeyStateMachine rawInputHotKeyState = new();
-    private readonly AltTHotKeyStateMachine lowLevelHookHotKeyState = new();
+    private AltTHotKeyStateMachine lowLevelHookHotKeyState = new();
     private readonly LowLevelKeyboardProc lowLevelKeyboardHookProcedure;
 
     private StratsOverlayForm? stratsOverlayForm;
     private AsyncKeyStateAltTHotKeyMonitor? asyncKeyStateHotKeyMonitor;
     private IntPtr lowLevelKeyboardHookHandle;
+    private IntPtr hotKeyMessageTargetHandle;
     private bool rawKeyboardInputRegistered;
     private bool hotKeyRegistered;
     private bool lastValorantDetected;
@@ -40,6 +43,7 @@ public sealed class MainForm : Form
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset nextKeyStateMonitorHealthLogAtUtc = DateTimeOffset.MinValue;
 
     public MainForm(
         AppPaths appPaths,
@@ -56,7 +60,6 @@ public sealed class MainForm : Form
         this.disableDiscordAutomation = disableDiscordAutomation;
         this.disableKeyStateFallback = disableKeyStateFallback;
         lowLevelKeyboardHookProcedure = ProcessLowLevelKeyboardInput;
-
         BuildHeadlessWindow();
 
         processTimer.Interval = 2000;
@@ -86,6 +89,7 @@ public sealed class MainForm : Form
     protected override void OnHandleCreated(EventArgs eventArgs)
     {
         base.OnHandleCreated(eventArgs);
+        hotKeyMessageTargetHandle = Handle;
         RegisterStratsHotKey();
         RegisterRawKeyboardInput();
         RegisterLowLevelKeyboardHook();
@@ -98,6 +102,7 @@ public sealed class MainForm : Form
         UnregisterLowLevelKeyboardHook();
         UnregisterRawKeyboardInput();
         UnregisterStratsHotKey();
+        hotKeyMessageTargetHandle = IntPtr.Zero;
         base.OnHandleDestroyed(eventArgs);
     }
 
@@ -135,6 +140,18 @@ public sealed class MainForm : Form
         if (message.Msg == NativeMethods.WmInput)
         {
             ProcessRawKeyboardInput(message.LParam);
+        }
+
+        if (message.Msg == WmAltTHookPressed)
+        {
+            RequestStratsToggleFromHotKey("low-level keyboard hook");
+            return;
+        }
+
+        if (message.Msg == WmAltTKeyStatePressed)
+        {
+            RequestStratsToggleFromHotKey("dedicated key-state fallback");
+            return;
         }
 
         base.WndProc(ref message);
@@ -296,6 +313,38 @@ public sealed class MainForm : Form
         {
             RegisterStratsHotKey();
         }
+
+        CheckAsyncKeyStateMonitorHealth();
+    }
+
+    private void CheckAsyncKeyStateMonitorHealth()
+    {
+        if (disableKeyStateFallback || DateTimeOffset.UtcNow < nextKeyStateMonitorHealthLogAtUtc)
+        {
+            return;
+        }
+
+        nextKeyStateMonitorHealthLogAtUtc = DateTimeOffset.UtcNow.AddSeconds(5);
+        AsyncKeyStateAltTHotKeyMonitor? monitor = asyncKeyStateHotKeyMonitor;
+        if (monitor is null)
+        {
+            WriteAppLog("Overlay", "Dedicated key-state monitor was missing and will be restarted.");
+            StartAsyncKeyStateHotKeyMonitor();
+            return;
+        }
+
+        WriteAppLog(
+            "Overlay",
+            $"Dedicated key-state monitor health. Responsive: {monitor.IsResponsive}. " +
+            $"Heartbeat: {monitor.HeartbeatCount}. DetectedChords: {monitor.DetectedChordCount}.");
+        if (monitor.IsResponsive)
+        {
+            return;
+        }
+
+        WriteAppLog("Overlay", "Dedicated key-state monitor stalled and will be restarted.");
+        StopAsyncKeyStateHotKeyMonitor();
+        StartAsyncKeyStateHotKeyMonitor();
     }
 
     private void StartAsyncKeyStateHotKeyMonitor()
@@ -309,6 +358,7 @@ public sealed class MainForm : Form
         monitor.AltTPressed += OnAsyncKeyStateAltTPressed;
         monitor.Start();
         asyncKeyStateHotKeyMonitor = monitor;
+        nextKeyStateMonitorHealthLogAtUtc = DateTimeOffset.UtcNow.AddSeconds(5);
         WriteAppLog("Overlay", "Dedicated Alt + T key-state fallback started.");
     }
 
@@ -327,15 +377,10 @@ public sealed class MainForm : Form
 
     private void OnAsyncKeyStateAltTPressed()
     {
-        try
+        IntPtr targetHandle = hotKeyMessageTargetHandle;
+        if (targetHandle != IntPtr.Zero)
         {
-            if (!IsDisposed && IsHandleCreated)
-            {
-                BeginInvoke((MethodInvoker)(() => RequestStratsToggleFromHotKey("dedicated key-state fallback")));
-            }
-        }
-        catch (InvalidOperationException)
-        {
+            NativeMethods.PostMessage(targetHandle, WmAltTKeyStatePressed, IntPtr.Zero, IntPtr.Zero);
         }
     }
 
@@ -373,12 +418,13 @@ public sealed class MainForm : Form
 
     private void RegisterLowLevelKeyboardHook()
     {
-        if (lowLevelKeyboardHookHandle != IntPtr.Zero)
+        if (lowLevelKeyboardHookHandle != IntPtr.Zero || Handle == IntPtr.Zero)
         {
             return;
         }
 
         IntPtr moduleHandle = NativeMethods.GetModuleHandle(null);
+        lowLevelHookHotKeyState = new AltTHotKeyStateMachine();
         lowLevelKeyboardHookHandle = NativeMethods.SetWindowsHookEx(
             NativeMethods.WhKeyboardLl,
             lowLevelKeyboardHookProcedure,
@@ -387,6 +433,7 @@ public sealed class MainForm : Form
         if (lowLevelKeyboardHookHandle != IntPtr.Zero)
         {
             WriteAppLog("Overlay", "Low-level Alt + T keyboard hook registered.");
+
             return;
         }
 
@@ -409,6 +456,7 @@ public sealed class MainForm : Form
 
     private IntPtr ProcessLowLevelKeyboardInput(int hookCode, IntPtr message, IntPtr keyboardData)
     {
+        IntPtr activeHookHandle = lowLevelKeyboardHookHandle;
         if (hookCode >= 0 && keyboardData != IntPtr.Zero)
         {
             int keyboardMessage = unchecked((int)message.ToInt64());
@@ -424,16 +472,16 @@ public sealed class MainForm : Form
                     keyUp,
                     altIsCurrentlyDown))
                 {
-                    RequestStratsToggleFromHotKey("low-level keyboard hook");
+                    IntPtr targetHandle = hotKeyMessageTargetHandle;
+                    if (targetHandle != IntPtr.Zero)
+                    {
+                        NativeMethods.PostMessage(targetHandle, WmAltTHookPressed, IntPtr.Zero, IntPtr.Zero);
+                    }
                 }
             }
         }
 
-        return NativeMethods.CallNextHookEx(
-            lowLevelKeyboardHookHandle,
-            hookCode,
-            message,
-            keyboardData);
+        return NativeMethods.CallNextHookEx(activeHookHandle, hookCode, message, keyboardData);
     }
 
     private void UnregisterRawKeyboardInput()

@@ -4,6 +4,9 @@ internal sealed class AsyncKeyStateAltTHotKeyMonitor : IDisposable
 {
     private readonly CancellationTokenSource cancellationTokenSource = new();
     private readonly Thread monitoringThread;
+    private long heartbeatCount;
+    private long detectedChordCount;
+    private long lastHeartbeatTick;
     private bool disposed;
 
     public AsyncKeyStateAltTHotKeyMonitor()
@@ -17,10 +20,17 @@ internal sealed class AsyncKeyStateAltTHotKeyMonitor : IDisposable
 
     public event Action? AltTPressed;
 
+    public long HeartbeatCount => Interlocked.Read(ref heartbeatCount);
+
+    public long DetectedChordCount => Interlocked.Read(ref detectedChordCount);
+
+    public bool IsResponsive => monitoringThread.IsAlive &&
+        Environment.TickCount64 - Interlocked.Read(ref lastHeartbeatTick) < 2000;
+
     public void Start()
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        if (monitoringThread.ThreadState == ThreadState.Unstarted)
+        if ((monitoringThread.ThreadState & ThreadState.Unstarted) != 0)
         {
             monitoringThread.Start();
         }
@@ -47,13 +57,23 @@ internal sealed class AsyncKeyStateAltTHotKeyMonitor : IDisposable
     {
         bool chordWasDown = false;
         WaitHandle cancellationHandle = cancellationTokenSource.Token.WaitHandle;
+        Interlocked.Exchange(ref lastHeartbeatTick, Environment.TickCount64);
         while (!cancellationTokenSource.IsCancellationRequested)
         {
+            Interlocked.Increment(ref heartbeatCount);
+            Interlocked.Exchange(ref lastHeartbeatTick, Environment.TickCount64);
             bool chordIsDown = NativeMethods.IsKeyDown(NativeMethods.VirtualKeyMenu) &&
                 NativeMethods.IsKeyDown((int)NativeMethods.VirtualKeyT);
             if (chordIsDown && !chordWasDown)
             {
-                AltTPressed?.Invoke();
+                Interlocked.Increment(ref detectedChordCount);
+                try
+                {
+                    AltTPressed?.Invoke();
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+                {
+                }
             }
 
             chordWasDown = chordIsDown;

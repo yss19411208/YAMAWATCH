@@ -14,15 +14,26 @@ internal static class Program
         string[] appArguments = args.Skip(1).ToArray();
         bool blockHotKeyRegistration = appArguments.Any(argument =>
             string.Equals(argument, "--block-hotkey", StringComparison.OrdinalIgnoreCase));
+        bool longRunningHotKeyTest = appArguments.Any(argument =>
+            string.Equals(argument, "--long-running-hotkey-test", StringComparison.OrdinalIgnoreCase));
+        bool keepHotKeyBlocked = appArguments.Any(argument =>
+            string.Equals(argument, "--keep-hotkey-blocked", StringComparison.OrdinalIgnoreCase));
         appArguments = appArguments.Where(argument =>
-            !string.Equals(argument, "--block-hotkey", StringComparison.OrdinalIgnoreCase)).ToArray();
+            !string.Equals(argument, "--block-hotkey", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(argument, "--long-running-hotkey-test", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(argument, "--keep-hotkey-blocked", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (!appArguments.Any(argument => string.Equals(argument, "--no-discord", StringComparison.OrdinalIgnoreCase)))
         {
             appArguments = [.. appArguments, "--no-discord"];
         }
 
         ApplicationConfiguration.Initialize();
-        using FakeValorantForm fakeValorantForm = new(appPath, appArguments, blockHotKeyRegistration);
+        using FakeValorantForm fakeValorantForm = new(
+            appPath,
+            appArguments,
+            blockHotKeyRegistration,
+            longRunningHotKeyTest,
+            keepHotKeyBlocked);
         Application.Run(fakeValorantForm);
         Environment.ExitCode = fakeValorantForm.TestPassed ? 0 : 1;
     }
@@ -34,6 +45,8 @@ internal sealed class FakeValorantForm : Form
     private readonly string appArguments;
     private readonly string resultPath;
     private readonly bool blockHotKeyRegistration;
+    private readonly bool longRunningHotKeyTest;
+    private readonly bool keepHotKeyBlocked;
     private readonly Label statusLabel = new();
 
     private Process? valowatchProcess;
@@ -41,11 +54,15 @@ internal sealed class FakeValorantForm : Form
     public FakeValorantForm(
         string appPath,
         IEnumerable<string> appArguments,
-        bool blockHotKeyRegistration)
+        bool blockHotKeyRegistration,
+        bool longRunningHotKeyTest,
+        bool keepHotKeyBlocked)
     {
         this.appPath = appPath;
         this.appArguments = string.Join(' ', appArguments.Select(argument => argument.Contains(' ') ? $"\"{argument}\"" : argument));
         this.blockHotKeyRegistration = blockHotKeyRegistration;
+        this.longRunningHotKeyTest = longRunningHotKeyTest;
+        this.keepHotKeyBlocked = keepHotKeyBlocked;
         resultPath = Path.Combine(AppContext.BaseDirectory, "overlay-test-result.txt");
         BuildInterface();
     }
@@ -108,7 +125,7 @@ internal sealed class FakeValorantForm : Form
             await Task.Delay(300);
 
             statusLabel.Text = "Sending Alt + T...";
-            await NativeMethods.SendAltTAsync();
+            NativeMethods.AltTInjectionResult firstInjection = await NativeMethods.SendAltTAsync();
             await Task.Delay(3500);
 
             Point centerPoint = new(Left + Width / 2, Top + Height / 2);
@@ -123,14 +140,15 @@ internal sealed class FakeValorantForm : Form
                 || processName.StartsWith("VALOWATCH_", StringComparison.OrdinalIgnoreCase)
                 || windowTitle.Contains("VALOWATCH", StringComparison.OrdinalIgnoreCase);
             IntPtr foregroundWindow = NativeMethods.GetForegroundWindow();
-            _ = NativeMethods.GetWindowThreadProcessId(foregroundWindow, out int foregroundProcessId);
+            IntPtr foregroundRootWindow = NativeMethods.GetAncestor(foregroundWindow, NativeMethods.GaRoot);
+            _ = NativeMethods.GetWindowThreadProcessId(foregroundRootWindow, out int foregroundProcessId);
             string foregroundProcessName = GetProcessName(foregroundProcessId);
-            bool overlayHasInputFocus = foregroundWindow == rootWindow &&
+            bool overlayHasInputFocus = foregroundRootWindow == rootWindow &&
                 (foregroundProcessName.StartsWith("VALOWATCH", StringComparison.OrdinalIgnoreCase) ||
                     windowTitle.Contains("VALOWATCH", StringComparison.OrdinalIgnoreCase));
 
             bool hotKeyRegistrationRecovered = true;
-            if (blockHotKeyRegistration)
+            if (blockHotKeyRegistration && !keepHotKeyBlocked)
             {
                 NativeMethods.UnregisterTestHotKey(Handle);
                 await Task.Delay(5600);
@@ -141,8 +159,14 @@ internal sealed class FakeValorantForm : Form
                 }
             }
 
+            if (longRunningHotKeyTest)
+            {
+                statusLabel.Text = "Keeping the overlay active for 30 seconds...";
+                await Task.Delay(TimeSpan.FromSeconds(30));
+            }
+
             statusLabel.Text = "Sending Alt + T again...";
-            await NativeMethods.SendAltTAsync();
+            NativeMethods.AltTInjectionResult secondInjection = await NativeMethods.SendAltTAsync();
             await Task.Delay(1200);
 
             IntPtr hiddenWindowAtCenter = NativeMethods.WindowFromPoint(centerPoint);
@@ -156,7 +180,7 @@ internal sealed class FakeValorantForm : Form
             bool valorantFocusRestored = IsValorantProcessName(restoredForegroundProcessName);
 
             statusLabel.Text = "Showing retained overlay again...";
-            await NativeMethods.SendAltTAsync();
+            NativeMethods.AltTInjectionResult thirdInjection = await NativeMethods.SendAltTAsync();
             await Task.Delay(2200);
 
             IntPtr retainedWindowAtCenter = NativeMethods.WindowFromPoint(centerPoint);
@@ -165,10 +189,13 @@ internal sealed class FakeValorantForm : Form
             string retainedProcessName = GetProcessName(retainedProcessId);
             bool retainedOverlayVisible = retainedRootWindow == rootWindow &&
                 retainedProcessName.StartsWith("VALOWATCH", StringComparison.OrdinalIgnoreCase);
-            bool retainedOverlayHasInputFocus = NativeMethods.GetForegroundWindow() == retainedRootWindow;
+            IntPtr retainedForegroundRootWindow = NativeMethods.GetAncestor(
+                NativeMethods.GetForegroundWindow(),
+                NativeMethods.GaRoot);
+            bool retainedOverlayHasInputFocus = retainedForegroundRootWindow == retainedRootWindow;
 
             statusLabel.Text = "Hiding retained overlay...";
-            await NativeMethods.SendAltTAsync();
+            NativeMethods.AltTInjectionResult fourthInjection = await NativeMethods.SendAltTAsync();
             await Task.Delay(1200);
 
             IntPtr finalWindowAtCenter = NativeMethods.WindowFromPoint(centerPoint);
@@ -196,6 +223,8 @@ internal sealed class FakeValorantForm : Form
             resultLines.Add($"OverlayHasInputFocus={overlayHasInputFocus}");
             resultLines.Add($"ForegroundProcess={foregroundProcessName}");
             resultLines.Add($"BlockHotKeyRegistration={blockHotKeyRegistration}");
+            resultLines.Add($"LongRunningHotKeyTest={longRunningHotKeyTest}");
+            resultLines.Add($"KeepHotKeyBlocked={keepHotKeyBlocked}");
             resultLines.Add($"KeyStateFallbackDisabled={appArguments.Contains("--disable-key-state-fallback", StringComparison.OrdinalIgnoreCase)}");
             resultLines.Add($"HotKeyRegistrationRecovered={hotKeyRegistrationRecovered}");
             resultLines.Add($"OverlayHiddenAfterSecondToggle={overlayHidden}");
@@ -203,6 +232,10 @@ internal sealed class FakeValorantForm : Form
             resultLines.Add($"RetainedOverlaySameWindow={retainedOverlayVisible}");
             resultLines.Add($"RetainedOverlayHasInputFocus={retainedOverlayHasInputFocus}");
             resultLines.Add($"OverlayHiddenAfterFinalToggle={finalOverlayHidden}");
+            resultLines.Add($"FirstInjection={firstInjection}");
+            resultLines.Add($"SecondInjection={secondInjection}");
+            resultLines.Add($"ThirdInjection={thirdInjection}");
+            resultLines.Add($"FourthInjection={fourthInjection}");
             resultLines.Add($"TestPassed={TestPassed}");
 
             statusLabel.Text = TestPassed
@@ -283,6 +316,8 @@ internal static class NativeMethods
     private const uint ModNoRepeat = 0x4000;
     private const int TestHotKeyId = 8127;
 
+    public readonly record struct AltTInjectionResult(bool AltWasDown, bool TWasDown);
+
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr windowHandle);
 
@@ -327,7 +362,7 @@ internal static class NativeMethods
         UnregisterHotKey(windowHandle, TestHotKeyId);
     }
 
-    public static async Task SendAltTAsync()
+    public static async Task<AltTInjectionResult> SendAltTAsync()
     {
         Input[] keyDownInputs =
         [
@@ -348,12 +383,21 @@ internal static class NativeMethods
 
         await Task.Delay(180);
 
+        AltTInjectionResult result = new(
+            (GetAsyncKeyState(VirtualKeyMenu) & 0x8000) != 0,
+            (GetAsyncKeyState(VirtualKeyT) & 0x8000) != 0);
+
         uint keyUpCount = SendInput((uint)keyUpInputs.Length, keyUpInputs, Marshal.SizeOf<Input>());
         if (keyUpCount != keyUpInputs.Length)
         {
             throw new InvalidOperationException("SendInput did not send the Alt+T key-up sequence.");
         }
+
+        return result;
     }
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKeyCode);
 
     private static Input CreateKeyboardInput(ushort virtualKeyCode, bool keyUp)
     {
