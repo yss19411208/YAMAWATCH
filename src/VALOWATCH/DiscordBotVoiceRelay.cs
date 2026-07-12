@@ -154,13 +154,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"MicDevice: {settings.MicrophoneDeviceName}. Volume: {settings.MicrophoneVolume:0.00}. " +
             $"NoiseGate: {settings.MicrophoneNoiseGate:0.000}. " +
             $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
-            $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}. " +
-            $"ShareMedia: {settings.ShareMediaFiles}.");
-
-        if (settings.TryScreenShare)
-        {
-            StatusText = "Screen share unsupported";
-        }
+            $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}.");
 
         if (!TryEnsureVoiceNativeDependencies(out string nativeDependencyStatus))
         {

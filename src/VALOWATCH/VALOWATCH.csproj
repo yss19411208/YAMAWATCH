@@ -28,6 +28,9 @@
 
   <ItemGroup>
     <EmbeddedResource Include="$(EmbeddedEnvPath)" LogicalName="VALOWATCH.Embedded.env" Condition="Exists('$(EmbeddedEnvPath)')" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)\libdave\1.1.1.7\shared\win-x64\native\libdave.dll" LogicalName="UpdateNative/libdave.dll" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)\libsodium\1.0.22\runtimes\win-x64\native\libsodium.dll" LogicalName="UpdateNative/libsodium.dll" />
+    <EmbeddedResource Include="$(NuGetPackageRoot)\opusdotnet.opus.win-x64\1.3.1\runtimes\win-x64\native\opus.dll" LogicalName="UpdateNative/opus.dll" />
   </ItemGroup>
 
   <ItemGroup>

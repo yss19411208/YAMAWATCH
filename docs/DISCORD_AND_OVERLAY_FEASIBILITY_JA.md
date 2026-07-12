@@ -7,7 +7,7 @@
 
 現在のMVPは、VALORANT 起動中に `Alt + T` を押した時だけ `https://strats.gg/valorant/lineups` をオーバーレイ表示することです。録音中表示、bot状態、履歴、tracker.gg のURL表示はオーバーレイに出しません。
 
-Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、物理マイク入力を外部音としてリレーします。LINE音声中継が有効な場合は、Windowsのprocess loopbackでLINEプロセス音声だけを追加ミックスできます。このミックスはDiscord bot送信用であり、Windowsの再生デバイスやPCから聞こえる音は変更しません。`DISCORD_TEXT_CHANNEL_ID` は、VALORANT終了後のMP3/MP4添付共有先と、VALORANT起動、使用マイク機種、更新完了の通知先として使います。Discord token などの設定は、配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` から `VALOWATCH.exe` へ埋め込みます。
+Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、物理マイク入力を外部音としてリレーします。LINE音声中継が有効な場合は、Windowsのprocess loopbackでLINEプロセス音声だけを追加ミックスできます。このミックスはDiscord bot送信用であり、Windowsの再生デバイスやPCから聞こえる音は変更しません。録音、録画、ファイル共有、画面共有は行いません。`DISCORD_TEXT_CHANNEL_ID` は、VALORANT起動、使用マイク機種、更新完了の通知先として使います。
 
 ## 根拠
 
@@ -21,7 +21,7 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 
 ## 実装済み
 
-- タスクトレイ常駐
+- UIを出さないバックグラウンド常駐
 - VALORANT 本体のプロセス検知
 - `Alt + T` のグローバルホットキー
 - WebView2 による strats.gg ラインナップ表示
@@ -33,13 +33,11 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 - Discord bot の VC 接続設定ファイル生成
 - 既定マイク入力の Discord bot へのリレー処理
 - 外部音としての既定マイク入力 + LINEプロセス音声だけのDiscord送信用ミックス
-- VALORANT終了後のDiscord MP3/MP4添付共有
 - インストーラーによる `C:\Users\p159yusuke\Documents\VALOWATCH\app` への配置
 - ユーザー単位の Windows スタートアップ登録
 
 ## 未実装・保留
 
-- Discord bot による Go Live 相当の VALORANT 画面共有
 - 試合開始/終了の安定検知
 - tracker.gg からの自動ランク取得
 - オーバーレイ上のランク/名前パネル

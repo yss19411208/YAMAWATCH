@@ -88,14 +88,7 @@ public sealed class DiscordBotSettingsStore
             MicrophoneNoiseGate = 0F,
             StreamLineAudioWhenRunning = true,
             LineAudioProcessNames = ["LINE", "Line", "line"],
-            LineAudioVolume = 0.45F,
-            ShareMediaFiles = true,
-            ShareAudioAsMp3 = true,
-            ShareVideoMp4 = true,
-            MediaShareMaxBytes = 24L * 1024L * 1024L,
-            MediaShareAudioBitrateKbps = 128,
-            MediaShareFfmpegPath = string.Empty,
-            TryScreenShare = false
+            LineAudioVolume = 0.45F
         };
 
         Directory.CreateDirectory(appPaths.ConfigDirectory);
@@ -214,46 +207,6 @@ public sealed class DiscordBotSettingsStore
             settings.LineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
         }
 
-        if (TryGetBoolean(envValues, out bool shareMediaFiles, "DISCORD_SHARE_MEDIA_FILES", "DISCORD_FILE_SHARE_ENABLED"))
-        {
-            settings.ShareMediaFiles = shareMediaFiles;
-        }
-
-        if (TryGetBoolean(envValues, out bool shareAudioAsMp3, "DISCORD_SHARE_AUDIO_MP3", "DISCORD_SHARE_MP3_AUDIO"))
-        {
-            settings.ShareAudioAsMp3 = shareAudioAsMp3;
-        }
-
-        if (TryGetBoolean(envValues, out bool shareVideoMp4, "DISCORD_SHARE_VIDEO_MP4", "DISCORD_SHARE_MP4_VIDEO"))
-        {
-            settings.ShareVideoMp4 = shareVideoMp4;
-        }
-
-        if (TryGetLong(envValues, out long mediaShareMaxBytes, "DISCORD_FILE_SHARE_MAX_BYTES", "DISCORD_MEDIA_SHARE_MAX_BYTES"))
-        {
-            settings.MediaShareMaxBytes = Math.Clamp(mediaShareMaxBytes, 1L * 1024L * 1024L, 24L * 1024L * 1024L);
-        }
-
-        if (TryGetInteger(envValues, out int mediaShareMaxMb, "DISCORD_FILE_SHARE_MAX_MB", "DISCORD_MEDIA_SHARE_MAX_MB"))
-        {
-            long maxBytesFromMegabytes = (long)Math.Clamp(mediaShareMaxMb, 1, 24) * 1024L * 1024L;
-            settings.MediaShareMaxBytes = maxBytesFromMegabytes;
-        }
-
-        if (TryGetInteger(envValues, out int audioBitrateKbps, "DISCORD_SHARE_AUDIO_BITRATE_KBPS", "DISCORD_MP3_BITRATE_KBPS"))
-        {
-            settings.MediaShareAudioBitrateKbps = Math.Clamp(audioBitrateKbps, 64, 192);
-        }
-
-        if (TryGetString(envValues, out string mediaShareFfmpegPath, "VALOWATCH_FFMPEG_PATH", "FFMPEG_PATH"))
-        {
-            settings.MediaShareFfmpegPath = mediaShareFfmpegPath;
-        }
-
-        if (TryGetBoolean(envValues, out bool tryScreenShare, "DISCORD_TRY_SCREEN_SHARE", "TRY_SCREEN_SHARE"))
-        {
-            settings.TryScreenShare = tryScreenShare;
-        }
     }
 
     private void EnsureEnvExample()
@@ -273,12 +226,7 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_STREAM_LINE_AUDIO=true",
             "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
             "DISCORD_LINE_AUDIO_VOLUME=0.45",
-            "DISCORD_SHARE_MEDIA_FILES=true",
-            "DISCORD_SHARE_AUDIO_MP3=true",
-            "DISCORD_SHARE_VIDEO_MP4=true",
-            "DISCORD_FILE_SHARE_MAX_MB=24",
-            "DISCORD_SHARE_AUDIO_BITRATE_KBPS=128",
-            "DISCORD_TRY_SCREEN_SHARE=false"
+            "DISCORD_LINE_AUDIO_VOLUME=0.45"
         ];
 
         if (!File.Exists(appPaths.EnvExamplePath))
@@ -394,31 +342,4 @@ public sealed class DiscordBotSettingsStore
         return float.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
     }
 
-    private static bool TryGetInteger(
-        IReadOnlyDictionary<string, string> envValues,
-        out int value,
-        params string[] keys)
-    {
-        if (!TryGetString(envValues, out string rawValue, keys))
-        {
-            value = 0;
-            return false;
-        }
-
-        return int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
-    }
-
-    private static bool TryGetLong(
-        IReadOnlyDictionary<string, string> envValues,
-        out long value,
-        params string[] keys)
-    {
-        if (!TryGetString(envValues, out string rawValue, keys))
-        {
-            value = 0;
-            return false;
-        }
-
-        return long.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
-    }
 }

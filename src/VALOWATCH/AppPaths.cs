@@ -9,11 +9,7 @@ public sealed class AppPaths
         string? envExamplePath = null)
     {
         DataDirectory = dataDirectory;
-        RecordingsDirectory = Path.Combine(dataDirectory, "recordings");
-        VideoRecordingsDirectory = Path.Combine(dataDirectory, "video-recordings");
-        SharedMediaDirectory = Path.Combine(dataDirectory, "shared-media");
         ConfigDirectory = configDirectory ?? Path.Combine(dataDirectory, "config");
-        HistoryPath = Path.Combine(dataDirectory, "history.json");
         UpdateCompletedNotificationPath = Path.Combine(dataDirectory, "update-completed.pending");
         DurableEnvPath = Path.Combine(dataDirectory, "config", "settings.protected");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
@@ -24,15 +20,7 @@ public sealed class AppPaths
 
     public string DataDirectory { get; }
 
-    public string RecordingsDirectory { get; }
-
-    public string VideoRecordingsDirectory { get; }
-
-    public string SharedMediaDirectory { get; }
-
     public string ConfigDirectory { get; }
-
-    public string HistoryPath { get; }
 
     public string UpdateCompletedNotificationPath { get; }
 
@@ -84,9 +72,6 @@ public sealed class AppPaths
     public void EnsureDirectories()
     {
         Directory.CreateDirectory(DataDirectory);
-        Directory.CreateDirectory(RecordingsDirectory);
-        Directory.CreateDirectory(VideoRecordingsDirectory);
-        Directory.CreateDirectory(SharedMediaDirectory);
         Directory.CreateDirectory(ConfigDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(DurableEnvPath) ?? DataDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(EnvPath) ?? ConfigDirectory);

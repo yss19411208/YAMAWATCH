@@ -12,6 +12,12 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (SelfUpdateInstaller.IsUpdateInvocation(args))
+        {
+            Environment.ExitCode = SelfUpdateInstaller.Run(args);
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--keepalive-probe", StringComparison.OrdinalIgnoreCase)))
         {
             RunKeepAliveProbe();
@@ -87,14 +93,9 @@ static class Program
 
         Application.Run(new MainForm(
             appPaths,
-            new AppStateStore(appPaths),
-            new LoopbackRecorder(discordBotSettingsStore),
-            new DiscordMediaSharer(appPaths, discordBotSettingsStore),
-            new VideoCaptureSession(appPaths, new VideoCaptureSettingsStore(appPaths)),
             new DiscordBotVoiceRelay(discordBotSettingsStore, appPaths),
             new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
             new GitAutoUpdater(new GitUpdateSettingsStore(appPaths), appPaths),
-            new StartupService(),
             disableDiscordAutomation));
 
         GC.KeepAlive(singleInstanceMutex);
