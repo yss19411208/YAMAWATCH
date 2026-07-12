@@ -130,7 +130,45 @@ internal static class SelfUpdateInstaller
             ?? throw new InvalidOperationException("Self update source executable path is unavailable.");
         string temporaryPath = targetExecutablePath + $".{Environment.ProcessId}.new";
         File.Copy(sourceExecutablePath, temporaryPath, overwrite: true);
-        File.Move(temporaryPath, targetExecutablePath, overwrite: true);
+
+        Exception? lastReplacementException = null;
+        try
+        {
+            for (int replacementAttempt = 1; replacementAttempt <= 20; replacementAttempt++)
+            {
+                StopInstalledApp(targetExecutablePath);
+                try
+                {
+                    File.Move(temporaryPath, targetExecutablePath, overwrite: true);
+                    return;
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException &&
+                    replacementAttempt < 20)
+                {
+                    lastReplacementException = exception;
+                    Thread.Sleep(TimeSpan.FromMilliseconds(500));
+                }
+            }
+
+            throw new IOException(
+                "VALOWATCH.exe remained locked after 20 replacement attempts.",
+                lastReplacementException);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    WriteLog($"Temporary update file could not be removed: {temporaryPath}", exception);
+                }
+            }
+        }
     }
 
     private static void ExtractNativeResources(string installDirectory)
