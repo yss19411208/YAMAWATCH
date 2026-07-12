@@ -729,8 +729,9 @@ public sealed class MainForm : Form
         if (valorantDetected)
         {
             PreloadStratsOverlayIfNeeded();
-            StartGitUpdateCheckIfNeeded(force: false);
         }
+
+        StartGitUpdateCheckIfNeeded(force: false);
 
         RefreshDiscordStatusLabel();
     }
