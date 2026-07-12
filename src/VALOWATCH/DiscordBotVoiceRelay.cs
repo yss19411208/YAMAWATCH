@@ -27,6 +27,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan DiscordFrameWriteTimeout = TimeSpan.FromSeconds(5);
@@ -44,6 +45,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly object stateLock = new();
     private readonly object audioStatsLock = new();
     private readonly object microphoneCaptureLock = new();
+    private readonly object discordNetworkWarningLock = new();
     private readonly SemaphoreSlim lifecycleSemaphore = new(1, 1);
     private readonly SemaphoreSlim runtimeLogSemaphore = new(1, 1);
 
@@ -92,6 +94,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private string currentLineLoopbackSourceName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioStatsLogTime = DateTimeOffset.MinValue;
+    private DateTimeOffset lastDiscordNetworkWarningLoggedAt = DateTimeOffset.MinValue;
+    private int suppressedDiscordNetworkWarningCount;
 
     public DiscordBotVoiceRelay(DiscordBotSettingsStore settingsStore, AppPaths appPaths)
     {
@@ -468,6 +472,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private Task OnDiscordLogAsync(LogMessage logMessage)
     {
+        if (IsTransientDiscordNetworkWarning(logMessage))
+        {
+            WriteDiscordNetworkWarningSummary(logMessage);
+            return Task.CompletedTask;
+        }
+
         if (logMessage.Exception is null)
         {
             WriteLog($"Discord.Net {logMessage.Severity}: {logMessage.Source}: {logMessage.Message}");
@@ -486,6 +496,100 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    private static bool IsTransientDiscordNetworkWarning(LogMessage logMessage)
+    {
+        if (logMessage.Exception is null)
+        {
+            return false;
+        }
+
+        string source = logMessage.Source ?? string.Empty;
+        string message = logMessage.Message ?? string.Empty;
+        return source.Contains("Gateway", StringComparison.OrdinalIgnoreCase) ||
+            source.Contains("Audio", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("WebSocket connection was closed", StringComparison.OrdinalIgnoreCase) ||
+            ContainsExceptionName(logMessage.Exception, "WebSocketException") ||
+            ContainsExceptionName(logMessage.Exception, "SocketException") ||
+            ContainsExceptionMessage(logMessage.Exception, "Unable to read data from the transport connection");
+    }
+
+    private void WriteDiscordNetworkWarningSummary(LogMessage logMessage)
+    {
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        int suppressedCount;
+        lock (discordNetworkWarningLock)
+        {
+            if (now - lastDiscordNetworkWarningLoggedAt < DiscordNetworkWarningLogInterval)
+            {
+                suppressedDiscordNetworkWarningCount++;
+                return;
+            }
+
+            suppressedCount = suppressedDiscordNetworkWarningCount;
+            suppressedDiscordNetworkWarningCount = 0;
+            lastDiscordNetworkWarningLoggedAt = now;
+        }
+
+        string message = string.IsNullOrWhiteSpace(logMessage.Message)
+            ? "(no message)"
+            : logMessage.Message.Trim();
+        WriteLog(
+            $"Discord.Net {logMessage.Severity}: {logMessage.Source}: transient network reconnect warning. " +
+            $"SuppressedSinceLast: {suppressedCount}. Message: {message}. " +
+            $"Exception: {FormatExceptionSummary(logMessage.Exception)}");
+    }
+
+    private static bool ContainsExceptionName(Exception exception, string exceptionName)
+    {
+        for (Exception? currentException = exception;
+             currentException is not null;
+             currentException = currentException.InnerException)
+        {
+            if (currentException.GetType().Name.Contains(exceptionName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsExceptionMessage(Exception exception, string text)
+    {
+        for (Exception? currentException = exception;
+             currentException is not null;
+             currentException = currentException.InnerException)
+        {
+            if (currentException.Message.Contains(text, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string FormatExceptionSummary(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return "(none)";
+        }
+
+        List<string> parts = [];
+        for (Exception? currentException = exception;
+             currentException is not null && parts.Count < 3;
+             currentException = currentException.InnerException)
+        {
+            string message = currentException.Message
+                .Replace(Environment.NewLine, " ", StringComparison.Ordinal)
+                .Trim();
+            parts.Add($"{currentException.GetType().Name}: {message}");
+        }
+
+        return string.Join(" -> ", parts);
     }
 
     private void WriteRuntimeDiagnostic(DiscordSocketClient client)

@@ -171,13 +171,24 @@ static class Program
             Directory.CreateDirectory(nestedDirectory);
 
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            File.WriteAllLines(
-                Path.Combine(dataLogsDirectory, "primary.log"),
+            List<string> primaryLogLines = [];
+            for (int lineIndex = 1; lineIndex <= 130; lineIndex++)
+            {
+                primaryLogLines.Add($"old local line {lineIndex}");
+            }
+
+            primaryLogLines.AddRange(
                 [
                     "normal runtime line",
                     "DISCORD_BOT_TOKEN=must-not-leak",
-                    $"path={Path.Combine(userProfile, "Documents", "VALOWATCH")}"
+                    $"path={Path.Combine(userProfile, "Documents", "VALOWATCH")}",
+                    "2026-07-12T00:00:00+09:00 [Discord] Requested Discord notification sent. Message: already mirrored",
+                    "2026-07-12T00:00:01+09:00 [Discord] Audio stats. CapturedCallbacks: 1. WrittenFrames: 1.",
+                    "2026-07-12T00:00:02+09:00 [Overlay] Dedicated key-state monitor health. Responsive: True.",
+                    "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Gateway: WebSocket connection was closed",
+                    "   at Discord.ConnectionManager.ConnectAsync()"
                 ]);
+            File.WriteAllLines(Path.Combine(dataLogsDirectory, "primary.log"), primaryLogLines);
             File.WriteAllText(
                 Path.Combine(nestedDirectory, "SECOND.LOG"),
                 "nested log line " + new string('X', 4200));
@@ -207,19 +218,86 @@ static class Program
                 Environment.NewLine,
                 incrementalDeltas.SelectMany(delta => delta.DiscordMessages));
             string[] cursorKeys = initialDeltas.Select(delta => delta.CursorKey).ToArray();
-            bool ready = cursorKeys.Contains("data-logs/primary.log", StringComparer.OrdinalIgnoreCase) &&
-                cursorKeys.Contains("temp-logs/nested/SECOND.LOG", StringComparer.OrdinalIgnoreCase) &&
-                !cursorKeys.Any(key => key.EndsWith(".env", StringComparison.OrdinalIgnoreCase)) &&
+            string[] initialMessageLines = initialText.Split(
+                [Environment.NewLine],
+                StringSplitOptions.None);
+            List<string> failedChecks = [];
+            AddDiagnosticCheck(
+                cursorKeys.Contains("data-logs/primary.log", StringComparer.OrdinalIgnoreCase),
+                "primary cursor missing",
+                failedChecks);
+            AddDiagnosticCheck(
+                cursorKeys.Contains("temp-logs/nested/SECOND.LOG", StringComparer.OrdinalIgnoreCase),
+                "nested cursor missing",
+                failedChecks);
+            AddDiagnosticCheck(
+                !cursorKeys.Any(key => key.EndsWith(".env", StringComparison.OrdinalIgnoreCase)),
+                "env file was included",
+                failedChecks);
+            AddDiagnosticCheck(
                 initialDeltas.SelectMany(delta => delta.DiscordMessages).All(message =>
                     message.Length <= 2000 &&
                     message.StartsWith("```text", StringComparison.Ordinal) &&
-                    message.EndsWith("```", StringComparison.Ordinal)) &&
-                !initialText.Contains("must-not-leak", StringComparison.Ordinal) &&
-                !initialText.Contains(userProfile, StringComparison.OrdinalIgnoreCase) &&
-                initialText.Contains("%USERPROFILE%", StringComparison.Ordinal) &&
-                initialText.Contains("nested log line", StringComparison.Ordinal) &&
-                incrementalText.Contains("incremental runtime line", StringComparison.Ordinal) &&
-                !incrementalText.Contains("normal runtime line", StringComparison.Ordinal);
+                    message.EndsWith("```", StringComparison.Ordinal)),
+                "discord message framing failed",
+                failedChecks);
+            AddDiagnosticCheck(
+                initialText.Contains("first Discord log sync skipped older", StringComparison.Ordinal),
+                "initial backlog skip notice missing",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialMessageLines.Any(line => string.Equals(
+                    line,
+                    "1: old local line 1",
+                    StringComparison.Ordinal)),
+                "old first line was mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                initialText.Contains("normal runtime line", StringComparison.Ordinal),
+                "normal line missing",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("must-not-leak", StringComparison.Ordinal),
+                "secret leaked",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains(userProfile, StringComparison.OrdinalIgnoreCase),
+                "profile path leaked",
+                failedChecks);
+            AddDiagnosticCheck(
+                initialText.Contains("%USERPROFILE%", StringComparison.Ordinal),
+                "profile path was not redacted",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("Requested Discord notification sent", StringComparison.Ordinal),
+                "self notification log mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("Audio stats", StringComparison.Ordinal),
+                "audio stats mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("Dedicated key-state monitor health", StringComparison.Ordinal),
+                "overlay heartbeat mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("WebSocket connection was closed", StringComparison.Ordinal),
+                "websocket reconnect stack mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                initialText.Contains("nested log line", StringComparison.Ordinal),
+                "nested line missing",
+                failedChecks);
+            AddDiagnosticCheck(
+                incrementalText.Contains("incremental runtime line", StringComparison.Ordinal),
+                "incremental line missing",
+                failedChecks);
+            AddDiagnosticCheck(
+                !incrementalText.Contains("normal runtime line", StringComparison.Ordinal),
+                "incremental repeated old line",
+                failedChecks);
+
+            bool ready = failedChecks.Count == 0;
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
             File.AppendAllText(
@@ -227,7 +305,8 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log message check: {(ready ? "ready" : "failed")}. " +
                 $"Files: {string.Join(",", cursorKeys)}. InitialMessages: " +
                 $"{initialDeltas.Sum(delta => delta.DiscordMessages.Count)}. " +
-                $"IncrementalMessages: {incrementalDeltas.Sum(delta => delta.DiscordMessages.Count)}.{Environment.NewLine}");
+                $"IncrementalMessages: {incrementalDeltas.Sum(delta => delta.DiscordMessages.Count)}. " +
+                $"Failures: {(ready ? "none" : string.Join("; ", failedChecks))}.{Environment.NewLine}");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
@@ -291,6 +370,14 @@ static class Program
         {
             TryWriteDiagnosticFailure(logFilePath, "Update identity check", exception);
             Environment.ExitCode = 1;
+        }
+    }
+
+    private static void AddDiagnosticCheck(bool condition, string failureMessage, List<string> failedChecks)
+    {
+        if (!condition)
+        {
+            failedChecks.Add(failureMessage);
         }
     }
 

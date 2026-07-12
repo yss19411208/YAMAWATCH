@@ -13,6 +13,7 @@ internal static class RuntimeLogMessageCollector
 {
     private const int DiscordMessageLimit = 2000;
     private const int MaximumPayloadLength = 1850;
+    private const int MaximumInitialSyncLines = 120;
 
     public static IReadOnlyList<RuntimeLogFileDelta> Collect(
         string cursorPath,
@@ -154,10 +155,23 @@ internal static class RuntimeLogMessageCollector
 
         List<string> messages = [];
         StringBuilder payload = new();
+        if (startLineIndex == 0 && lines.Count > MaximumInitialSyncLines)
+        {
+            int skippedLineCount = lines.Count - MaximumInitialSyncLines;
+            startLineIndex = skippedLineCount;
+            payload.Append(
+                $"[first Discord log sync skipped older {skippedLineCount} local lines]{Environment.NewLine}");
+        }
+
         int chunkStartLine = startLineIndex + 1;
 
         for (int lineIndex = startLineIndex; lineIndex < lines.Count; lineIndex++)
         {
+            if (!ShouldMirrorLineToDiscord(lines[lineIndex]))
+            {
+                continue;
+            }
+
             string numberedLine = $"{lineIndex + 1}: {lines[lineIndex]}{Environment.NewLine}";
             int consumedCharacters = 0;
             while (consumedCharacters < numberedLine.Length)
@@ -193,6 +207,49 @@ internal static class RuntimeLogMessageCollector
         }
 
         return messages;
+    }
+
+    private static bool ShouldMirrorLineToDiscord(string line)
+    {
+        string trimmedLine = line.TrimStart();
+        if (trimmedLine.Length == 0)
+        {
+            return false;
+        }
+
+        string[] highVolumeMarkers =
+        [
+            "[Discord] Requested Discord notification sent.",
+            "[Discord] Requested Discord notification failed.",
+            "[Discord] Requested Discord notification could not be sent",
+            "[Discord] Discord diagnostic notification queued.",
+            "[Discord] Runtime log code block",
+            "[Discord] Runtime log code blocks",
+            "[Discord] Audio stats.",
+            "[Overlay] Dedicated key-state monitor health.",
+            "Discord.Net Warning: Gateway:",
+            "Discord.Net Warning: Audio #",
+            "WebSocket connection was closed",
+            "Unable to read data from the transport connection",
+            "SocketException (10054)",
+            "--- End of stack trace from previous location ---",
+            "--- End of inner exception stack trace ---"
+        ];
+
+        if (highVolumeMarkers.Any(marker =>
+                line.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (trimmedLine.StartsWith("at Discord.", StringComparison.Ordinal) ||
+            trimmedLine.StartsWith("at System.Net.", StringComparison.Ordinal) ||
+            trimmedLine.StartsWith("at System.Threading.Tasks.", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static string CreateDiscordMessage(
