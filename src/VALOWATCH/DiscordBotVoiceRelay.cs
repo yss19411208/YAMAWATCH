@@ -24,6 +24,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan LineLoopbackBufferDuration = TimeSpan.FromMilliseconds(1600);
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan MicrophoneSilentCandidateDuration = TimeSpan.FromSeconds(15);
+    private const float MicrophoneActivityPeakThreshold = 0.0002F;
     private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(20);
     private const bool DiscordVoiceDaveEncryptionEnabled = true;
@@ -34,9 +38,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly object logLock = new();
     private readonly object stateLock = new();
     private readonly object audioStatsLock = new();
+    private readonly object microphoneCaptureLock = new();
 
     private DiscordSocketClient? discordClient;
     private IAudioClient? audioClient;
+    private SocketTextChannel? discordStatusTextChannel;
     private WasapiCapture? microphoneCapture;
     private BufferedWaveProvider? bufferedWaveProvider;
     private LineProcessLoopbackWaveProvider? lineProcessLoopbackProvider;
@@ -44,6 +50,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private AudioOutStream? discordStream;
     private CancellationTokenSource? relayCancellationTokenSource;
     private Task? relayTask;
+    private Task? microphoneHealthTask;
+    private SwitchingSampleProvider? microphoneSourceSwitcher;
+    private IReadOnlyList<MicrophoneDeviceCandidate> microphoneCandidates = [];
+    private int currentMicrophoneCandidateIndex = -1;
+    private bool microphoneCaptureFaulted;
+    private long microphoneAttemptCallbackCount;
+    private float microphoneAttemptPeak;
+    private DateTimeOffset microphoneAttemptStartedAt = DateTimeOffset.MinValue;
+    private DateTimeOffset lastMicrophoneCallbackAt = DateTimeOffset.MinValue;
+    private bool microphoneSignalLocked;
     private bool stopRequested;
     private long capturedCallbackCount;
     private long capturedByteCount;
@@ -58,6 +74,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool loggedFirstAudibleWrite;
     private bool audioDiagnosticMessageSent;
     private string currentMicrophoneDeviceName = string.Empty;
+    private string lastNotifiedMicrophoneDeviceName = string.Empty;
     private string currentCaptureDeviceList = string.Empty;
     private string currentLineLoopbackSourceName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
@@ -154,6 +171,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 ?? throw new InvalidOperationException("指定されたDiscordサーバーが見つかりません。Botがサーバーに参加しているか確認してください。");
             SocketVoiceChannel voiceChannel = guild.GetVoiceChannel(settings.VoiceChannelId)
                 ?? throw new InvalidOperationException("指定されたDiscord VCが見つかりません。VoiceChannelIdを確認してください。");
+            discordStatusTextChannel = settings.TextChannelId == 0
+                ? null
+                : guild.GetTextChannel(settings.TextChannelId);
 
             EnsureVoiceChannelPermissions(guild, voiceChannel);
 
@@ -163,7 +183,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .WaitAsync(DiscordVoiceConnectTimeout)
                 .ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: false. SelfMute: false.");
-            WriteLog("Discord text notifications are disabled.");
+            await SendRequestedDiscordNotificationAsync(GetValorantOpenedMessage(settings)).ConfigureAwait(false);
+            await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
             bool audioRelayStarted = false;
 
@@ -173,6 +194,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 {
                     StartMicrophoneAudioRelay(settings);
                     audioRelayStarted = true;
+                    if (await SendRequestedDiscordNotificationAsync($"使用マイク: {currentMicrophoneDeviceName}")
+                        .ConfigureAwait(false))
+                    {
+                        lastNotifiedMicrophoneDeviceName = currentMicrophoneDeviceName;
+                    }
                 }
                 catch (Exception audioException)
                 {
@@ -208,13 +234,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         CancellationTokenSource? cancellationTokenSource;
         Task? activeRelayTask;
+        Task? activeMicrophoneHealthTask;
 
         lock (stateLock)
         {
             cancellationTokenSource = relayCancellationTokenSource;
             activeRelayTask = relayTask;
+            activeMicrophoneHealthTask = microphoneHealthTask;
             relayCancellationTokenSource = null;
             relayTask = null;
+            microphoneHealthTask = null;
             IsRunning = false;
             stopRequested = true;
             StatusText = settingsStore.HasConfig ? "Discord idle" : "Discord config missing";
@@ -240,6 +269,21 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
         }
 
+        if (activeMicrophoneHealthTask is not null)
+        {
+            try
+            {
+                await activeMicrophoneHealthTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Microphone health monitor ended while stopping.", exception);
+            }
+        }
+
         DisposeAudioObjects();
 
         if (audioClient is not null)
@@ -256,6 +300,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await discordClient.StopAsync().ConfigureAwait(false);
             await discordClient.DisposeAsync().ConfigureAwait(false);
             discordClient = null;
+            discordStatusTextChannel = null;
         }
     }
 
@@ -532,24 +577,22 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             throw new InvalidOperationException("Discord VCへ接続していません。");
         }
 
-        currentCaptureDeviceList = string.Join(" | ", ListActiveMicrophoneDevices());
-        WriteLog($"Active capture devices: {currentCaptureDeviceList}.");
-        MMDevice defaultMicrophoneDevice = GetDefaultMicrophoneDevice(settings.MicrophoneDeviceName);
-        currentMicrophoneDeviceName = defaultMicrophoneDevice.FriendlyName;
-        microphoneCapture = new WasapiCapture(
-            defaultMicrophoneDevice,
-            useEventSync: false,
-            audioBufferMillisecondsLength: (int)MicrophoneCaptureBufferDuration.TotalMilliseconds);
-        bufferedWaveProvider = new BufferedWaveProvider(microphoneCapture.WaveFormat)
+        microphoneCandidates = ListMicrophoneDeviceCandidates(settings.MicrophoneDeviceName);
+        currentCaptureDeviceList = string.Join(" | ", microphoneCandidates.Select(candidate => candidate.Name));
+        WriteLog($"Ordered physical microphone candidates: {currentCaptureDeviceList}.");
+
+        microphoneSourceSwitcher = new SwitchingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
+        currentMicrophoneCandidateIndex = -1;
+        ResetAudioStats();
+        if (!TrySwitchMicrophoneCapture(settings, "initial selection", includeCurrentCandidate: true))
         {
-            BufferDuration = MicrophoneBufferDuration,
-            DiscardOnBufferOverflow = true,
-            ReadFully = true
-        };
+            throw new InvalidOperationException(
+                "利用可能な物理マイクを開始できませんでした。Windowsのマイク権限と入力デバイスを確認してください。");
+        }
 
         IWaveProvider? lineAudioProvider = TryStartLineLoopbackAudio(settings);
         discordPcmProvider = CreateDiscordPcmProvider(
-            bufferedWaveProvider,
+            new SampleToWaveProvider(microphoneSourceSwitcher),
             settings.MicrophoneVolume,
             settings.MicrophoneNoiseGate,
             lineAudioProvider,
@@ -557,14 +600,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         discordStream = audioClient.CreatePCMStream(AudioApplication.Voice);
         relayCancellationTokenSource = new CancellationTokenSource();
-        ResetAudioStats();
-
-        microphoneCapture.DataAvailable += OnMicrophoneDataAvailable;
-        microphoneCapture.RecordingStopped += OnMicrophoneRecordingStopped;
-        microphoneCapture.StartRecording();
+        WasapiCapture activeMicrophoneCapture = microphoneCapture
+            ?? throw new InvalidOperationException("Microphone capture was not initialized.");
         WriteLog(
-            $"Microphone capture started. Device: {defaultMicrophoneDevice.FriendlyName}. " +
-            $"Source format: {microphoneCapture.WaveFormat}. Discord format: {discordPcmProvider.WaveFormat}. " +
+            $"Microphone audio relay started. Device: {currentMicrophoneDeviceName}. " +
+            $"Source format: {activeMicrophoneCapture.WaveFormat}. Discord format: {discordPcmProvider.WaveFormat}. " +
             $"Capture buffer: {MicrophoneCaptureBufferDuration.TotalMilliseconds:0}ms. " +
             $"Relay buffer: {MicrophoneBufferDuration.TotalMilliseconds:0}ms. " +
             $"Startup buffer: {MicrophoneStartupBufferDuration.TotalMilliseconds:0}ms. " +
@@ -582,6 +622,197 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             CancellationToken.None,
             TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+
+        microphoneHealthTask = Task.Run(
+            () => MonitorMicrophoneHealthAsync(settings, relayCancellationTokenSource.Token),
+            relayCancellationTokenSource.Token);
+    }
+
+    private async Task MonitorMicrophoneHealthAsync(
+        DiscordBotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            await Task.Delay(MicrophoneHealthCheckInterval, cancellationToken).ConfigureAwait(false);
+
+            DateTimeOffset now = DateTimeOffset.Now;
+            bool captureFaulted;
+            bool hasTimedOutCallbacks;
+            bool shouldRotateSilentCandidate;
+            bool signalLocked;
+
+            lock (audioStatsLock)
+            {
+                captureFaulted = microphoneCaptureFaulted;
+                hasTimedOutCallbacks =
+                    now - microphoneAttemptStartedAt >= MicrophoneCallbackTimeout &&
+                    (microphoneAttemptCallbackCount == 0 ||
+                        now - lastMicrophoneCallbackAt >= MicrophoneCallbackTimeout);
+                shouldRotateSilentCandidate =
+                    !microphoneSignalLocked &&
+                    microphoneCandidates.Count > 1 &&
+                    now - microphoneAttemptStartedAt >= MicrophoneSilentCandidateDuration;
+                signalLocked = microphoneSignalLocked;
+            }
+
+            if (captureFaulted || hasTimedOutCallbacks)
+            {
+                string reason = captureFaulted
+                    ? "capture device stopped"
+                    : "capture callbacks timed out";
+                TrySwitchMicrophoneCapture(
+                    settings,
+                    reason,
+                    includeCurrentCandidate: microphoneCandidates.Count == 1);
+                continue;
+            }
+
+            if (!signalLocked && TryFindActiveMicrophoneCandidate(out int activeCandidateIndex) &&
+                activeCandidateIndex != currentMicrophoneCandidateIndex)
+            {
+                TrySwitchMicrophoneCapture(
+                    settings,
+                    $"another physical microphone reported input activity (candidate {activeCandidateIndex + 1})",
+                    includeCurrentCandidate: false,
+                    requestedCandidateIndex: activeCandidateIndex);
+                continue;
+            }
+
+            if (shouldRotateSilentCandidate)
+            {
+                TrySwitchMicrophoneCapture(
+                    settings,
+                    "no microphone activity detected during candidate probe",
+                    includeCurrentCandidate: false);
+            }
+        }
+    }
+
+    private bool TrySwitchMicrophoneCapture(
+        DiscordBotSettings settings,
+        string reason,
+        bool includeCurrentCandidate,
+        int? requestedCandidateIndex = null)
+    {
+        lock (microphoneCaptureLock)
+        {
+            if (microphoneCandidates.Count == 0 || microphoneSourceSwitcher is null)
+            {
+                return false;
+            }
+
+            int firstCandidateIndex = requestedCandidateIndex ?? GetNextMicrophoneCandidateIndex(includeCurrentCandidate);
+            for (int attemptOffset = 0; attemptOffset < microphoneCandidates.Count; attemptOffset++)
+            {
+                int candidateIndex = (firstCandidateIndex + attemptOffset) % microphoneCandidates.Count;
+                if (!includeCurrentCandidate && candidateIndex == currentMicrophoneCandidateIndex)
+                {
+                    continue;
+                }
+
+                MicrophoneDeviceCandidate candidate = microphoneCandidates[candidateIndex];
+                try
+                {
+                    StartMicrophoneCaptureCandidate(candidate, candidateIndex, reason);
+                    return true;
+                }
+                catch (Exception exception) when (exception is COMException or InvalidOperationException or ArgumentException)
+                {
+                    WriteLog($"Microphone candidate could not start. Device: {candidate.Name}.", exception);
+                }
+            }
+
+            WriteLog($"No microphone candidate could be started after: {reason}.");
+            return false;
+        }
+    }
+
+    private int GetNextMicrophoneCandidateIndex(bool includeCurrentCandidate)
+    {
+        if (currentMicrophoneCandidateIndex < 0)
+        {
+            return 0;
+        }
+
+        return includeCurrentCandidate
+            ? currentMicrophoneCandidateIndex
+            : (currentMicrophoneCandidateIndex + 1) % microphoneCandidates.Count;
+    }
+
+    private void StartMicrophoneCaptureCandidate(
+        MicrophoneDeviceCandidate candidate,
+        int candidateIndex,
+        string reason)
+    {
+        using MMDeviceEnumerator deviceEnumerator = new();
+        MMDevice microphoneDevice = deviceEnumerator.GetDevice(candidate.Id);
+        WasapiCapture nextCapture = new(
+            microphoneDevice,
+            useEventSync: false,
+            audioBufferMillisecondsLength: (int)MicrophoneCaptureBufferDuration.TotalMilliseconds);
+        BufferedWaveProvider nextBuffer = new(nextCapture.WaveFormat)
+        {
+            BufferDuration = MicrophoneBufferDuration,
+            DiscardOnBufferOverflow = true,
+            ReadFully = true
+        };
+        ISampleProvider nextNormalizedSource = CreateMono48KhzSampleProvider(nextBuffer, "microphone");
+
+        nextCapture.DataAvailable += OnMicrophoneDataAvailable;
+        nextCapture.RecordingStopped += OnMicrophoneRecordingStopped;
+        try
+        {
+            nextCapture.StartRecording();
+        }
+        catch
+        {
+            nextCapture.DataAvailable -= OnMicrophoneDataAvailable;
+            nextCapture.RecordingStopped -= OnMicrophoneRecordingStopped;
+            nextCapture.Dispose();
+            throw;
+        }
+
+        WasapiCapture? previousCapture = microphoneCapture;
+        microphoneCapture = nextCapture;
+        bufferedWaveProvider = nextBuffer;
+        currentMicrophoneCandidateIndex = candidateIndex;
+        currentMicrophoneDeviceName = candidate.Name;
+        microphoneSourceSwitcher?.SetSource(nextNormalizedSource);
+        ResetMicrophoneAttemptStats();
+
+        StopAndDisposeMicrophoneCapture(previousCapture);
+        WriteLog(
+            $"Microphone capture selected. Device: {candidate.Name}. Candidate: {candidateIndex + 1}/{microphoneCandidates.Count}. " +
+            $"Reason: {reason}. Format: {nextCapture.WaveFormat}.");
+    }
+
+    private bool TryFindActiveMicrophoneCandidate(out int activeCandidateIndex)
+    {
+        activeCandidateIndex = -1;
+        float highestPeak = MicrophoneActivityPeakThreshold;
+
+        try
+        {
+            using MMDeviceEnumerator deviceEnumerator = new();
+            for (int candidateIndex = 0; candidateIndex < microphoneCandidates.Count; candidateIndex++)
+            {
+                MMDevice device = deviceEnumerator.GetDevice(microphoneCandidates[candidateIndex].Id);
+                float endpointPeak = device.AudioMeterInformation.MasterPeakValue;
+                if (float.IsFinite(endpointPeak) && endpointPeak > highestPeak)
+                {
+                    highestPeak = endpointPeak;
+                    activeCandidateIndex = candidateIndex;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is COMException or InvalidOperationException)
+        {
+            WriteLog("Microphone endpoint activity probe was unavailable; timed candidate rotation remains active.", exception);
+            return false;
+        }
+
+        return activeCandidateIndex >= 0;
     }
 
     private async Task RelayAudioLoopAsync(CancellationToken cancellationToken)
@@ -669,6 +900,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             "VALOWATCH 音声リレー停止\n" +
             relayException.Message +
             "\nVCには残りますが、音声送信は停止しました。");
+        relayCancellationTokenSource?.Cancel();
         DisposeAudioObjects();
 
         lock (stateLock)
@@ -701,13 +933,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private void OnMicrophoneDataAvailable(object? sender, WaveInEventArgs eventArgs)
     {
-        if (bufferedWaveProvider is null || eventArgs.BytesRecorded <= 0)
+        if (sender is not WasapiCapture sourceCapture ||
+            !ReferenceEquals(sourceCapture, microphoneCapture) ||
+            bufferedWaveProvider is null ||
+            eventArgs.BytesRecorded <= 0)
         {
             return;
         }
 
         bufferedWaveProvider.AddSamples(eventArgs.Buffer, 0, eventArgs.BytesRecorded);
-        ObserveCapturedAudio(eventArgs.Buffer, eventArgs.BytesRecorded);
+        ObserveCapturedAudio(sourceCapture.WaveFormat, eventArgs.Buffer, eventArgs.BytesRecorded);
     }
 
     private IWaveProvider? TryStartLineLoopbackAudio(DiscordBotSettings settings)
@@ -745,6 +980,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private void OnMicrophoneRecordingStopped(object? sender, StoppedEventArgs eventArgs)
     {
+        if (!ReferenceEquals(sender, microphoneCapture) || stopRequested)
+        {
+            return;
+        }
+
+        lock (audioStatsLock)
+        {
+            microphoneCaptureFaulted = true;
+        }
+
         if (eventArgs.Exception is not null)
         {
             WriteLog("Microphone capture stopped because of an audio device error.", eventArgs.Exception);
@@ -752,43 +997,49 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 "VALOWATCH マイク入力停止\n" +
                 eventArgs.Exception.Message +
                 "\nマイクの抜き差し、Windowsのマイク権限、既定の入力デバイスを確認してください。");
-            lock (stateLock)
-            {
-                if (IsRunning && !stopRequested)
-                {
-                    StatusText = $"Discord joined VC, capture stopped: {eventArgs.Exception.Message}";
-                }
-            }
-
             return;
         }
 
-        WriteLog("Microphone capture stopped.");
+        WriteLog("Microphone capture stopped unexpectedly; automatic recovery was scheduled.");
     }
 
     private void DisposeAudioObjects()
     {
-        if (microphoneCapture is not null)
+        lock (microphoneCaptureLock)
         {
-            microphoneCapture.DataAvailable -= OnMicrophoneDataAvailable;
-            microphoneCapture.RecordingStopped -= OnMicrophoneRecordingStopped;
-            try
-            {
-                microphoneCapture.StopRecording();
-            }
-            catch (InvalidOperationException)
-            {
-            }
+            StopAndDisposeMicrophoneCapture(microphoneCapture);
+            bufferedWaveProvider = null;
+            microphoneCapture = null;
+            microphoneSourceSwitcher = null;
+            microphoneCandidates = [];
+            currentMicrophoneCandidateIndex = -1;
         }
 
         DisposeLineLoopbackObjects();
         discordStream?.Dispose();
-        microphoneCapture?.Dispose();
 
         discordStream = null;
         discordPcmProvider = null;
-        bufferedWaveProvider = null;
-        microphoneCapture = null;
+    }
+
+    private void StopAndDisposeMicrophoneCapture(WasapiCapture? capture)
+    {
+        if (capture is null)
+        {
+            return;
+        }
+
+        capture.DataAvailable -= OnMicrophoneDataAvailable;
+        capture.RecordingStopped -= OnMicrophoneRecordingStopped;
+        try
+        {
+            capture.StopRecording();
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        capture.Dispose();
     }
 
     private void DisposeLineLoopbackObjects()
@@ -800,43 +1051,67 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     internal static MMDevice GetDefaultMicrophoneDevice(string? preferredDeviceName = null)
     {
+        IReadOnlyList<MicrophoneDeviceCandidate> candidates = ListMicrophoneDeviceCandidates(preferredDeviceName);
+        using MMDeviceEnumerator deviceEnumerator = new();
+        return deviceEnumerator.GetDevice(candidates[0].Id);
+    }
+
+    internal static IReadOnlyList<MicrophoneDeviceCandidate> ListMicrophoneDeviceCandidates(
+        string? preferredDeviceName = null)
+    {
         using MMDeviceEnumerator deviceEnumerator = new();
         List<MMDevice> activeCaptureDevices = deviceEnumerator
             .EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
             .ToList();
+        List<MicrophoneDeviceCandidate> orderedCandidates = [];
+        HashSet<string> addedDeviceIds = new(StringComparer.OrdinalIgnoreCase);
+
+        void AddCandidate(MMDevice? device, bool allowExplicitVirtualDevice = false)
+        {
+            if (device is null || addedDeviceIds.Contains(device.ID))
+            {
+                return;
+            }
+
+            if (!allowExplicitVirtualDevice && !IsAutomaticMicrophoneCandidate(device.FriendlyName))
+            {
+                return;
+            }
+
+            orderedCandidates.Add(new MicrophoneDeviceCandidate(device.ID, device.FriendlyName));
+            addedDeviceIds.Add(device.ID);
+        }
 
         if (!string.IsNullOrWhiteSpace(preferredDeviceName))
         {
             string trimmedPreferredDeviceName = preferredDeviceName.Trim();
             MMDevice? preferredDevice = activeCaptureDevices.FirstOrDefault(device =>
                 device.FriendlyName.Contains(trimmedPreferredDeviceName, StringComparison.OrdinalIgnoreCase));
-            if (preferredDevice is not null)
+            AddCandidate(preferredDevice, allowExplicitVirtualDevice: true);
+        }
+
+        foreach (Role role in new[] { Role.Communications, Role.Console, Role.Multimedia })
+        {
+            if (deviceEnumerator.HasDefaultAudioEndpoint(DataFlow.Capture, role))
             {
-                return preferredDevice;
+                AddCandidate(deviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Capture, role));
             }
         }
 
-        if (deviceEnumerator.HasDefaultAudioEndpoint(DataFlow.Capture, Role.Communications))
+        foreach (MMDevice likelyMicrophoneDevice in activeCaptureDevices.Where(device =>
+            LooksLikeMicrophone(device.FriendlyName)))
         {
-            MMDevice communicationsDevice = deviceEnumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
-            if (IsAutomaticMicrophoneCandidate(communicationsDevice.FriendlyName))
-            {
-                return communicationsDevice;
-            }
+            AddCandidate(likelyMicrophoneDevice);
         }
 
-        MMDevice? likelyMicrophoneDevice = activeCaptureDevices.FirstOrDefault(device =>
-            LooksLikeMicrophone(device.FriendlyName) && IsAutomaticMicrophoneCandidate(device.FriendlyName));
-        if (likelyMicrophoneDevice is not null)
+        foreach (MMDevice activeCaptureDevice in activeCaptureDevices)
         {
-            return likelyMicrophoneDevice;
+            AddCandidate(activeCaptureDevice);
         }
 
-        MMDevice? usableCaptureDevice = activeCaptureDevices.FirstOrDefault(device =>
-            IsAutomaticMicrophoneCandidate(device.FriendlyName));
-        if (usableCaptureDevice is not null)
+        if (orderedCandidates.Count > 0)
         {
-            return usableCaptureDevice;
+            return orderedCandidates;
         }
 
         string activeDeviceNames = activeCaptureDevices.Count == 0
@@ -954,24 +1229,62 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             audioDiagnosticMessageSent = false;
             audioStatsStartedAt = DateTimeOffset.Now;
             lastAudioStatsLogTime = DateTimeOffset.Now;
+            ResetMicrophoneAttemptStatsUnsafe();
         }
     }
 
-    private void ObserveCapturedAudio(byte[] buffer, int bytesRecorded)
+    private void ResetMicrophoneAttemptStats()
     {
-        if (microphoneCapture is null)
+        lock (audioStatsLock)
         {
-            return;
+            capturedCallbackCount = 0;
+            capturedByteCount = 0;
+            capturedAudibleCallbackCount = 0;
+            capturedPeak = 0F;
+            loggedFirstAudibleCapture = false;
+            ResetMicrophoneAttemptStatsUnsafe();
         }
+    }
 
-        float peak = CalculateAudioPeak(microphoneCapture.WaveFormat, buffer, 0, bytesRecorded);
+    private void ResetMicrophoneAttemptStatsUnsafe()
+    {
+        microphoneCaptureFaulted = false;
+        microphoneAttemptCallbackCount = 0;
+        microphoneAttemptPeak = 0F;
+        microphoneAttemptStartedAt = DateTimeOffset.Now;
+        lastMicrophoneCallbackAt = DateTimeOffset.MinValue;
+        microphoneSignalLocked = false;
+    }
+
+    private void ObserveCapturedAudio(WaveFormat waveFormat, byte[] buffer, int bytesRecorded)
+    {
+        float peak = CalculateAudioPeak(waveFormat, buffer, 0, bytesRecorded);
         bool shouldLogFirstAudibleCapture = false;
+        string microphoneChangeNotification = string.Empty;
 
         lock (audioStatsLock)
         {
             capturedCallbackCount++;
             capturedByteCount += bytesRecorded;
             capturedPeak = Math.Max(capturedPeak, peak);
+            microphoneAttemptCallbackCount++;
+            microphoneAttemptPeak = Math.Max(microphoneAttemptPeak, peak);
+            lastMicrophoneCallbackAt = DateTimeOffset.Now;
+            if (peak >= MicrophoneActivityPeakThreshold)
+            {
+                if (!microphoneSignalLocked &&
+                    IsRunning &&
+                    !string.Equals(
+                        currentMicrophoneDeviceName,
+                        lastNotifiedMicrophoneDeviceName,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    lastNotifiedMicrophoneDeviceName = currentMicrophoneDeviceName;
+                    microphoneChangeNotification = $"使用マイク: {currentMicrophoneDeviceName}";
+                }
+
+                microphoneSignalLocked = true;
+            }
 
             if (peak >= AudiblePeakThreshold)
             {
@@ -987,6 +1300,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (shouldLogFirstAudibleCapture)
         {
             WriteLog($"Microphone input became audible. Peak: {peak:0.0000}.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(microphoneChangeNotification))
+        {
+            _ = SendRequestedDiscordNotificationAsync(microphoneChangeNotification);
         }
     }
 
@@ -1050,6 +1368,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 "Audio stats. " +
                 $"CapturedCallbacks: {capturedCallbackCount}. CapturedBytes: {capturedByteCount}. " +
                 $"CapturedAudibleCallbacks: {capturedAudibleCallbackCount}. CapturedPeak: {capturedPeak:0.0000}. " +
+                $"CandidateAttemptCallbacks: {microphoneAttemptCallbackCount}. " +
+                $"CandidateAttemptPeak: {microphoneAttemptPeak:0.0000}. CandidateLocked: {microphoneSignalLocked}. " +
                 $"WrittenFrames: {writtenFrameCount}. WrittenAudibleFrames: {writtenAudibleFrameCount}. " +
                 $"WrittenSilenceFrames: {writtenSilenceFrameCount}. WrittenShortFrames: {writtenShortFrameCount}. " +
                 $"WrittenPeak: {writtenPeak:0.0000}.";
@@ -1108,9 +1428,62 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         QueueDiscordStatusMessage(diagnosticMessage);
     }
 
+    private static string GetValorantOpenedMessage(DiscordBotSettings settings)
+    {
+        string message = string.IsNullOrWhiteSpace(settings.ValorantOpenedMessage)
+            ? "VALORANTを開きました。"
+            : settings.ValorantOpenedMessage.Trim();
+        return message.EndsWith('。') ? message : $"{message}。";
+    }
+
+    private async Task SendPendingUpdateNotificationAsync()
+    {
+        if (!File.Exists(appPaths.UpdateCompletedNotificationPath))
+        {
+            return;
+        }
+
+        if (!await SendRequestedDiscordNotificationAsync("updateしました").ConfigureAwait(false))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(appPaths.UpdateCompletedNotificationPath);
+            WriteLog("Pending update notification was sent and cleared.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            WriteLog("Update notification was sent, but its pending marker could not be deleted.", exception);
+        }
+    }
+
+    private async Task<bool> SendRequestedDiscordNotificationAsync(string message)
+    {
+        SocketTextChannel? textChannel = discordStatusTextChannel;
+        if (textChannel is null)
+        {
+            WriteLog($"Requested Discord notification could not be sent because the text channel is missing. Message: {message}");
+            return false;
+        }
+
+        try
+        {
+            await textChannel.SendMessageAsync(message).ConfigureAwait(false);
+            WriteLog($"Requested Discord notification sent. Message: {message}");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            WriteLog($"Requested Discord notification failed. Message: {message}", exception);
+            return false;
+        }
+    }
+
     private void QueueDiscordStatusMessage(string message)
     {
-        WriteLog($"Discord status message suppressed because notifications are disabled. Message: {message}");
+        WriteLog($"Discord diagnostic notification suppressed; only requested lifecycle notifications are enabled. Message: {message}");
     }
 
     private static float CalculateFloat32Peak(byte[] buffer, int offset, int byteCount)
@@ -1226,10 +1599,54 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             normalizedName.Contains("voicemeeter", StringComparison.Ordinal) ||
             normalizedName.Contains("steam streaming", StringComparison.Ordinal) ||
             normalizedName.Contains("obs", StringComparison.Ordinal) ||
-            normalizedName.Contains("elgato", StringComparison.Ordinal) ||
             normalizedName.Contains("wave link", StringComparison.Ordinal) ||
             normalizedName.Contains("仮想", StringComparison.Ordinal) ||
             normalizedName.Contains("バーチャル", StringComparison.Ordinal);
+    }
+
+    internal sealed record MicrophoneDeviceCandidate(string Id, string Name);
+
+    private sealed class SwitchingSampleProvider : ISampleProvider
+    {
+        private ISampleProvider? sourceProvider;
+
+        public SwitchingSampleProvider(WaveFormat waveFormat)
+        {
+            WaveFormat = waveFormat;
+        }
+
+        public WaveFormat WaveFormat { get; }
+
+        public void SetSource(ISampleProvider nextSourceProvider)
+        {
+            if (nextSourceProvider.WaveFormat.SampleRate != WaveFormat.SampleRate ||
+                nextSourceProvider.WaveFormat.Channels != WaveFormat.Channels)
+            {
+                throw new InvalidOperationException(
+                    $"Microphone switch format mismatch. Expected: {WaveFormat}. Actual: {nextSourceProvider.WaveFormat}.");
+            }
+
+            Volatile.Write(ref sourceProvider, nextSourceProvider);
+        }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            ISampleProvider? currentSourceProvider = Volatile.Read(ref sourceProvider);
+            if (currentSourceProvider is null)
+            {
+                Array.Clear(buffer, offset, count);
+                return count;
+            }
+
+            int samplesRead = currentSourceProvider.Read(buffer, offset, count);
+            if (samplesRead < count)
+            {
+                Array.Clear(buffer, offset + samplesRead, count - samplesRead);
+                return count;
+            }
+
+            return samplesRead;
+        }
     }
 
     private sealed class SimpleVolumeSampleProvider : ISampleProvider

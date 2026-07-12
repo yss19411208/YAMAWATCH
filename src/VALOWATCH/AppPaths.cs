@@ -14,6 +14,7 @@ public sealed class AppPaths
         SharedMediaDirectory = Path.Combine(dataDirectory, "shared-media");
         ConfigDirectory = configDirectory ?? Path.Combine(dataDirectory, "config");
         HistoryPath = Path.Combine(dataDirectory, "history.json");
+        UpdateCompletedNotificationPath = Path.Combine(dataDirectory, "update-completed.pending");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
         DiscordBotSampleConfigPath = Path.Combine(ConfigDirectory, "discord_bot.sample.json");
         EnvPath = envPath ?? Path.Combine(ConfigDirectory, ".env");
@@ -31,6 +32,8 @@ public sealed class AppPaths
     public string ConfigDirectory { get; }
 
     public string HistoryPath { get; }
+
+    public string UpdateCompletedNotificationPath { get; }
 
     public string DiscordBotConfigPath { get; }
 

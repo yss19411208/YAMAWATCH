@@ -339,11 +339,15 @@ static class Program
             DiscordBotSettings? settings = new DiscordBotSettingsStore(appPaths).Load();
             string preferredMicrophoneDeviceName = settings?.MicrophoneDeviceName ?? string.Empty;
             IReadOnlyList<string> deviceNames = DiscordBotVoiceRelay.ListActiveMicrophoneDevices();
-            string selectedDeviceName = DiscordBotVoiceRelay.GetDefaultMicrophoneDevice(preferredMicrophoneDeviceName).FriendlyName;
+            IReadOnlyList<DiscordBotVoiceRelay.MicrophoneDeviceCandidate> orderedCandidates =
+                DiscordBotVoiceRelay.ListMicrophoneDeviceCandidates(preferredMicrophoneDeviceName);
+            string selectedDeviceName = orderedCandidates[0].Name;
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
             File.AppendAllText(
                 logFilePath,
-                $"{DateTimeOffset.Now:O} [Diagnostics] Microphone devices: preferred=\"{preferredMicrophoneDeviceName}\"; selected=\"{selectedDeviceName}\"; active=[{string.Join(" | ", deviceNames)}]{Environment.NewLine}");
+                $"{DateTimeOffset.Now:O} [Diagnostics] Microphone devices: preferred=\"{preferredMicrophoneDeviceName}\"; " +
+                $"selected=\"{selectedDeviceName}\"; candidates=[{string.Join(" | ", orderedCandidates.Select(candidate => candidate.Name))}]; " +
+                $"active=[{string.Join(" | ", deviceNames)}]{Environment.NewLine}");
             Environment.ExitCode = deviceNames.Count > 0 ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or COMException)

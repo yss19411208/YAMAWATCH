@@ -14,7 +14,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - オーバーレイ全体を少し透過させています。
 - VALORANT ウィンドウの位置が取れる場合は、その上に寄せてオーバーレイを出します。
 - インストーラーを実行すると `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に本体を配置し、ユーザー単位の Windows スタートアップに登録します。
-- Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、既定マイク入力のリレーを開始します。
+- Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、物理マイク入力のリレーを開始します。指定テキストチャンネルには起動、使用マイク機種、更新完了を投稿します。
 - VALORANT 終了検知後、録音WAVをMP3へ変換し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセスの音だけをDiscord音声へミックスします。
@@ -66,7 +66,7 @@ C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env
 5. VALORANT を起動すると、bot が指定 VC に入ります。
 
 VALORANT 起動中に通信状態が悪く Discord 接続に失敗した場合、VALOWATCH は一定間隔で VC 接続を再試行します。
-`DISCORD_TEXT_CHANNEL_ID` を設定すると、VALORANT 終了後のMP3/MP4共有先になります。通常の起動通知テキストは送信しません。
+`DISCORD_TEXT_CHANNEL_ID` を設定すると、VALORANT 終了後のMP3/MP4共有先に加え、`VALORANTを開きました。`、使用マイク機種、`updateしました` の投稿先になります。
 Discord の接続や音声送信で失敗した場合は、`C:\Users\p159yusuke\Documents\VALOWATCH\data\logs\valowatch.log` に理由を記録します。
 
 `.env` は `C:\Users\p159yusuke\Documents\VALOWATCH\installer` に置きます。bot token は秘密情報なので Git に入れないでください。exe へ埋め込んでも完全な秘匿にはならず、配布先が解析すれば token を取り出せる可能性があります。

@@ -7,7 +7,7 @@
 
 現在のMVPは、VALORANT 起動中に `Alt + T` を押した時だけ `https://strats.gg/valorant/lineups` をオーバーレイ表示することです。録音中表示、bot状態、履歴、tracker.gg のURL表示はオーバーレイに出しません。
 
-Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、既定マイク入力を外部音としてリレーします。LINE音声中継が有効な場合は、Windowsのprocess loopbackでLINEプロセス音声だけを追加ミックスできます。このミックスはDiscord bot送信用であり、Windowsの再生デバイスやPCから聞こえる音は変更しません。`DISCORD_TEXT_CHANNEL_ID` は、VALORANT終了後のMP3/MP4添付共有先として使います。起動通知テキストは送信しません。Discord token などの設定は、配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` から `VALOWATCH.exe` へ埋め込みます。
+Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、物理マイク入力を外部音としてリレーします。LINE音声中継が有効な場合は、Windowsのprocess loopbackでLINEプロセス音声だけを追加ミックスできます。このミックスはDiscord bot送信用であり、Windowsの再生デバイスやPCから聞こえる音は変更しません。`DISCORD_TEXT_CHANNEL_ID` は、VALORANT終了後のMP3/MP4添付共有先と、VALORANT起動、使用マイク機種、更新完了の通知先として使います。Discord token などの設定は、配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` から `VALOWATCH.exe` へ埋め込みます。
 
 ## 根拠
 

@@ -25,7 +25,8 @@ internal static class Program
         string? InstallDirectory,
         bool StartAfterInstall,
         bool RegisterStartup,
-        bool StopAllValowatchProcesses);
+        bool StopAllValowatchProcesses,
+        bool MarkUpdateCompleted);
 
     [STAThread]
     private static void Main(string[] args)
@@ -47,6 +48,7 @@ internal static class Program
         bool startAfterInstall = true;
         bool registerStartup = true;
         bool stopAllValowatchProcesses = true;
+        bool markUpdateCompleted = false;
         string? installDirectory = null;
 
         for (int argumentIndex = 0; argumentIndex < args.Count; argumentIndex++)
@@ -76,6 +78,12 @@ internal static class Program
                 continue;
             }
 
+            if (IsOption(argument, "--update", "/update"))
+            {
+                markUpdateCompleted = true;
+                continue;
+            }
+
             const string installDirectoryPrefix = "--install-dir=";
             if (argument.StartsWith(installDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
             {
@@ -94,7 +102,8 @@ internal static class Program
             installDirectory,
             startAfterInstall,
             registerStartup,
-            stopAllValowatchProcesses);
+            stopAllValowatchProcesses,
+            markUpdateCompleted);
     }
 
     private static bool IsOption(string argument, params string[] optionNames)
@@ -333,7 +342,8 @@ internal static class Program
                     progress,
                     startAfterInstall: true,
                     registerStartup: true,
-                    stopAllValowatchProcesses: true));
+                    stopAllValowatchProcesses: true,
+                    markUpdateCompleted: false));
                 ReportProgress(new InstallProgress(100, "インストールが完了しました。VALOWATCH を起動しています。"));
                 MessageBox.Show(
                     this,
@@ -394,7 +404,8 @@ internal static class Program
                 progress,
                 options.StartAfterInstall,
                 options.RegisterStartup,
-                options.StopAllValowatchProcesses);
+                options.StopAllValowatchProcesses,
+                options.MarkUpdateCompleted);
             WriteInstallerLog("Silent installation completed.");
             return 0;
         }
@@ -410,7 +421,8 @@ internal static class Program
         IProgress<InstallProgress> progress,
         bool startAfterInstall,
         bool registerStartup,
-        bool stopAllValowatchProcesses)
+        bool stopAllValowatchProcesses,
+        bool markUpdateCompleted)
     {
         progress.Report(new InstallProgress(2, "インストール先を準備しています。"));
         installDirectory = NormalizeInstallDirectoryPath(installDirectory);
@@ -441,6 +453,11 @@ internal static class Program
             progress.Report(new InstallProgress(92, "Windows 起動時の自動起動登録をスキップしています。"));
         }
 
+        if (markUpdateCompleted)
+        {
+            WriteUpdateCompletedMarker();
+        }
+
         if (startAfterInstall)
         {
             progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
@@ -450,6 +467,15 @@ internal static class Program
         {
             progress.Report(new InstallProgress(98, "VALOWATCH の起動をスキップしています。"));
         }
+    }
+
+    private static void WriteUpdateCompletedMarker()
+    {
+        string dataDirectory = Path.Combine(GetValowatchWorkspaceRoot(), "data");
+        Directory.CreateDirectory(dataDirectory);
+        string markerPath = Path.Combine(dataDirectory, "update-completed.pending");
+        File.WriteAllText(markerPath, DateTimeOffset.UtcNow.ToString("O"), Encoding.UTF8);
+        WriteInstallerLog($"Update completion marker written: {markerPath}");
     }
 
     private static string GetDefaultInstallDirectory()

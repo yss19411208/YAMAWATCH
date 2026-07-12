@@ -293,7 +293,7 @@ public sealed class GitAutoUpdater
         ProcessStartInfo processStartInfo = new()
         {
             FileName = installerPath,
-            Arguments = $"--silent --install-dir \"{installDirectory}\"",
+            Arguments = $"--silent --update --install-dir \"{installDirectory}\"",
             UseShellExecute = true,
             WorkingDirectory = Path.GetDirectoryName(installerPath),
             WindowStyle = ProcessWindowStyle.Hidden
