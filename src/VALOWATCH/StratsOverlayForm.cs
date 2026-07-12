@@ -13,7 +13,9 @@ public sealed class StratsOverlayForm : Form
 
     private Task? webViewInitializationTask;
     private Rectangle lastOverlayBounds;
+    private IntPtr returnFocusWindowHandle;
     private int topMostPulseCountRemaining;
+    private bool navigationFailed;
 
     public StratsOverlayForm()
     {
@@ -31,19 +33,33 @@ public sealed class StratsOverlayForm : Form
         await EnsureWebViewReadyAsync().ConfigureAwait(true);
     }
 
-    public async Task BringOverlayToFrontAsync(Rectangle targetBounds)
+    public async Task BringOverlayToFrontAsync(Rectangle targetBounds, IntPtr valorantWindowHandle)
     {
         ApplyTargetBounds(targetBounds);
         lastOverlayBounds = Bounds;
+        returnFocusWindowHandle = valorantWindowHandle;
 
         await EnsureWebViewReadyAsync().ConfigureAwait(true);
-        errorLabel.Visible = false;
-        webView.Visible = true;
-        webView.BringToFront();
+        if (webView.CoreWebView2 is not null)
+        {
+            if (navigationFailed)
+            {
+                webView.CoreWebView2.Reload();
+            }
+            else
+            {
+                errorLabel.Visible = false;
+                webView.Visible = true;
+                webView.BringToFront();
+            }
+        }
 
-        NativeMethods.ShowWindow(Handle, NativeMethods.SwShownoactivate);
+        Show();
         IsOverlayVisible = true;
         SetTopMostWithoutActivation(lastOverlayBounds);
+        BringToFront();
+        Activate();
+        NativeMethods.SetForegroundWindow(Handle);
         StartTopMostPulse();
     }
 
@@ -52,18 +68,19 @@ public sealed class StratsOverlayForm : Form
         topMostPulseTimer.Stop();
         Hide();
         IsOverlayVisible = false;
+        if (returnFocusWindowHandle != IntPtr.Zero && NativeMethods.IsWindow(returnFocusWindowHandle))
+        {
+            NativeMethods.ShowWindow(returnFocusWindowHandle, NativeMethods.SwShow);
+            NativeMethods.SetForegroundWindow(returnFocusWindowHandle);
+        }
     }
-
-    protected override bool ShowWithoutActivation => true;
 
     protected override CreateParams CreateParams
     {
         get
         {
             CreateParams createParams = base.CreateParams;
-            createParams.ExStyle |= NativeMethods.WsExToolWindow
-                | NativeMethods.WsExTopMost
-                | NativeMethods.WsExNoActivate;
+            createParams.ExStyle |= NativeMethods.WsExToolWindow | NativeMethods.WsExTopMost;
             return createParams;
         }
     }
@@ -146,8 +163,15 @@ public sealed class StratsOverlayForm : Form
     {
         if (!eventArgs.IsSuccess)
         {
+            navigationFailed = true;
             ShowError("Failed to load strats.gg");
+            return;
         }
+
+        navigationFailed = false;
+        errorLabel.Visible = false;
+        webView.Visible = true;
+        webView.BringToFront();
     }
 
     private void ShowError(string message)

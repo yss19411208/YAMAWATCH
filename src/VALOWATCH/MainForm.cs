@@ -16,13 +16,16 @@ public sealed class MainForm : Form
     private readonly GitAutoUpdater gitAutoUpdater;
     private readonly GitUpdateSchedule gitUpdateSchedule = new(GitUpdateSchedule.DefaultInterval);
     private readonly bool disableDiscordAutomation;
+    private readonly bool disableKeyStateFallback;
     private readonly System.Windows.Forms.Timer processTimer = new();
     private readonly System.Windows.Forms.Timer hotKeyHealthTimer = new();
     private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
+    private readonly AltTHotKeyStateMachine rawInputHotKeyState = new();
 
     private StratsOverlayForm? stratsOverlayForm;
+    private AsyncKeyStateAltTHotKeyMonitor? asyncKeyStateHotKeyMonitor;
+    private bool rawKeyboardInputRegistered;
     private bool hotKeyRegistered;
-    private bool hotKeyChordWasDown;
     private bool lastValorantDetected;
     private bool discordTransitionInProgress;
     private bool hidOnInitialShow;
@@ -40,13 +43,15 @@ public sealed class MainForm : Form
         DiscordBotVoiceRelay discordBotVoiceRelay,
         GitUpdateChecker gitUpdateChecker,
         GitAutoUpdater gitAutoUpdater,
-        bool disableDiscordAutomation)
+        bool disableDiscordAutomation,
+        bool disableKeyStateFallback = false)
     {
         this.appPaths = appPaths;
         this.discordBotVoiceRelay = discordBotVoiceRelay;
         this.gitUpdateChecker = gitUpdateChecker;
         this.gitAutoUpdater = gitAutoUpdater;
         this.disableDiscordAutomation = disableDiscordAutomation;
+        this.disableKeyStateFallback = disableKeyStateFallback;
 
         BuildHeadlessWindow();
 
@@ -78,10 +83,14 @@ public sealed class MainForm : Form
     {
         base.OnHandleCreated(eventArgs);
         RegisterStratsHotKey();
+        RegisterRawKeyboardInput();
+        StartAsyncKeyStateHotKeyMonitor();
     }
 
     protected override void OnHandleDestroyed(EventArgs eventArgs)
     {
+        StopAsyncKeyStateHotKeyMonitor();
+        UnregisterRawKeyboardInput();
         UnregisterStratsHotKey();
         base.OnHandleDestroyed(eventArgs);
     }
@@ -92,6 +101,8 @@ public sealed class MainForm : Form
         processTimer.Stop();
         hotKeyHealthTimer.Stop();
         stratsToggleDelayTimer.Stop();
+        StopAsyncKeyStateHotKeyMonitor();
+        UnregisterRawKeyboardInput();
         DisposeStratsOverlay();
 
         try
@@ -112,6 +123,11 @@ public sealed class MainForm : Form
         {
             RequestStratsToggleFromHotKey("WM_HOTKEY");
             return;
+        }
+
+        if (message.Msg == NativeMethods.WmInput)
+        {
+            ProcessRawKeyboardInput(message.LParam);
         }
 
         base.WndProc(ref message);
@@ -269,17 +285,160 @@ public sealed class MainForm : Form
 
     private void PollStratsHotKeyAndRepairRegistration()
     {
-        bool chordIsDown = NativeMethods.IsKeyDown(NativeMethods.VirtualKeyMenu) &&
-            NativeMethods.IsKeyDown((int)NativeMethods.VirtualKeyT);
-        if (chordIsDown && !hotKeyChordWasDown)
-        {
-            RequestStratsToggleFromHotKey("key-state fallback");
-        }
-
-        hotKeyChordWasDown = chordIsDown;
         if (!hotKeyRegistered && DateTimeOffset.UtcNow >= nextHotKeyRegistrationRetryAtUtc)
         {
             RegisterStratsHotKey();
+        }
+    }
+
+    private void StartAsyncKeyStateHotKeyMonitor()
+    {
+        if (disableKeyStateFallback || asyncKeyStateHotKeyMonitor is not null)
+        {
+            return;
+        }
+
+        AsyncKeyStateAltTHotKeyMonitor monitor = new();
+        monitor.AltTPressed += OnAsyncKeyStateAltTPressed;
+        monitor.Start();
+        asyncKeyStateHotKeyMonitor = monitor;
+        WriteAppLog("Overlay", "Dedicated Alt + T key-state fallback started.");
+    }
+
+    private void StopAsyncKeyStateHotKeyMonitor()
+    {
+        AsyncKeyStateAltTHotKeyMonitor? monitor = asyncKeyStateHotKeyMonitor;
+        asyncKeyStateHotKeyMonitor = null;
+        if (monitor is null)
+        {
+            return;
+        }
+
+        monitor.AltTPressed -= OnAsyncKeyStateAltTPressed;
+        monitor.Dispose();
+    }
+
+    private void OnAsyncKeyStateAltTPressed()
+    {
+        try
+        {
+            if (!IsDisposed && IsHandleCreated)
+            {
+                BeginInvoke((MethodInvoker)(() => RequestStratsToggleFromHotKey("dedicated key-state fallback")));
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
+    private void RegisterRawKeyboardInput()
+    {
+        if (rawKeyboardInputRegistered || Handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        RawInputDevice[] devices =
+        [
+            new RawInputDevice
+            {
+                UsagePage = NativeMethods.HidUsagePageGeneric,
+                Usage = NativeMethods.HidUsageGenericKeyboard,
+                Flags = NativeMethods.RidevInputSink,
+                TargetWindow = Handle
+            }
+        ];
+        rawKeyboardInputRegistered = NativeMethods.RegisterRawInputDevices(
+            devices,
+            (uint)devices.Length,
+            (uint)Marshal.SizeOf<RawInputDevice>());
+        if (rawKeyboardInputRegistered)
+        {
+            WriteAppLog("Overlay", "Background Raw Input keyboard registered.");
+            return;
+        }
+
+        WriteAppLog(
+            "Overlay",
+            $"Background Raw Input keyboard registration failed. Win32Error: {Marshal.GetLastWin32Error()}.");
+    }
+
+    private void UnregisterRawKeyboardInput()
+    {
+        if (!rawKeyboardInputRegistered)
+        {
+            return;
+        }
+
+        RawInputDevice[] devices =
+        [
+            new RawInputDevice
+            {
+                UsagePage = NativeMethods.HidUsagePageGeneric,
+                Usage = NativeMethods.HidUsageGenericKeyboard,
+                Flags = NativeMethods.RidevRemove,
+                TargetWindow = IntPtr.Zero
+            }
+        ];
+        NativeMethods.RegisterRawInputDevices(
+            devices,
+            (uint)devices.Length,
+            (uint)Marshal.SizeOf<RawInputDevice>());
+        rawKeyboardInputRegistered = false;
+    }
+
+    private void ProcessRawKeyboardInput(IntPtr rawInputHandle)
+    {
+        uint headerSize = (uint)Marshal.SizeOf<RawInputHeader>();
+        uint dataSize = 0;
+        uint queryResult = NativeMethods.GetRawInputData(
+            rawInputHandle,
+            NativeMethods.RidInput,
+            IntPtr.Zero,
+            ref dataSize,
+            headerSize);
+        if (queryResult != 0 || dataSize < headerSize + Marshal.SizeOf<RawKeyboardInput>())
+        {
+            return;
+        }
+
+        IntPtr inputBuffer = Marshal.AllocHGlobal(checked((int)dataSize));
+        try
+        {
+            uint readSize = dataSize;
+            uint bytesRead = NativeMethods.GetRawInputData(
+                rawInputHandle,
+                NativeMethods.RidInput,
+                inputBuffer,
+                ref readSize,
+                headerSize);
+            if (bytesRead != dataSize)
+            {
+                return;
+            }
+
+            RawInputHeader inputHeader = Marshal.PtrToStructure<RawInputHeader>(inputBuffer);
+            if (inputHeader.Type != NativeMethods.RimTypeKeyboard)
+            {
+                return;
+            }
+
+            IntPtr keyboardPointer = IntPtr.Add(inputBuffer, Marshal.SizeOf<RawInputHeader>());
+            RawKeyboardInput keyboardInput = Marshal.PtrToStructure<RawKeyboardInput>(keyboardPointer);
+            bool keyUp = (keyboardInput.Flags & NativeMethods.RawKeyboardBreak) != 0 ||
+                keyboardInput.Message is NativeMethods.WmKeyUp or NativeMethods.WmSysKeyUp;
+            bool keyDown = !keyUp &&
+                keyboardInput.Message is NativeMethods.WmKeyDown or NativeMethods.WmSysKeyDown;
+            bool altIsCurrentlyDown = NativeMethods.IsKeyDown(NativeMethods.VirtualKeyMenu);
+            if (rawInputHotKeyState.Process(keyboardInput.VirtualKey, keyDown, keyUp, altIsCurrentlyDown))
+            {
+                RequestStratsToggleFromHotKey("background Raw Input");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(inputBuffer);
         }
     }
 
@@ -352,8 +511,14 @@ public sealed class MainForm : Form
 
     private async Task ToggleStratsOverlayWhenValorantRunningAsync()
     {
-        if (stratsToggleInProgress || !ValorantProcessMonitor.IsValorantRunning())
+        bool valorantRunning = lastValorantDetected || ValorantProcessMonitor.IsValorantRunning();
+        if (stratsToggleInProgress || !valorantRunning)
         {
+            if (!valorantRunning)
+            {
+                WriteAppLog("Overlay", "Alt + T toggle ignored because no VALORANT process was detected.");
+            }
+
             return;
         }
 
@@ -372,7 +537,10 @@ public sealed class MainForm : Form
                 return;
             }
 
-            await stratsOverlayForm.BringOverlayToFrontAsync(GetValorantTargetBounds()).ConfigureAwait(true);
+            (IntPtr valorantWindowHandle, Rectangle targetBounds) = GetValorantTargetWindow();
+            await stratsOverlayForm
+                .BringOverlayToFrontAsync(targetBounds, valorantWindowHandle)
+                .ConfigureAwait(true);
         }
         catch (Exception exception) when (exception is InvalidOperationException or COMException)
         {
@@ -389,6 +557,17 @@ public sealed class MainForm : Form
         return ValorantProcessMonitor.TryGetValorantWindowBounds(out Rectangle valorantBounds)
             ? valorantBounds
             : Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+    }
+
+    private static (IntPtr WindowHandle, Rectangle WindowBounds) GetValorantTargetWindow()
+    {
+        if (ValorantProcessMonitor.TryGetValorantWindow(out IntPtr windowHandle, out Rectangle windowBounds))
+        {
+            return (windowHandle, windowBounds);
+        }
+
+        Rectangle fallbackBounds = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+        return (IntPtr.Zero, fallbackBounds);
     }
 
     private void StartGitUpdateCheckIfNeeded(bool force)

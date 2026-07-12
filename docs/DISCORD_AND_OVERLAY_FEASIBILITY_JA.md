@@ -13,8 +13,9 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 
 - Microsoft は WinForms で WebView2 を使う手順として `Microsoft.Web.WebView2` SDK パッケージを追加すると説明しています。出典: https://learn.microsoft.com/en-us/microsoft-edge/webview2/get-started/winforms
 - Microsoft は WebView2 アプリ配布時に WebView2 Runtime がクライアント端末に必要だと説明しています。出典: https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/distribution
-- Microsoft は `SW_SHOWNOACTIVATE` を「ウィンドウを表示するがアクティブ化しない」値として説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow
-- Microsoft は `SWP_NOACTIVATE` を「ウィンドウをアクティブ化しない」フラグとして説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos
+- Microsoft は `RegisterHotKey` が、同じ組み合わせを別のホットキーが登録済みの場合に失敗し得ると説明しています。出典: https://learn.microsoft.com/ja-jp/windows/win32/api/winuser/nf-winuser-registerhotkey
+- Microsoft は `RIDEV_INPUTSINK` を指定すると、対象ウィンドウがフォアグラウンドでなくてもRaw Inputを受信できると説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawinputdevice
+- Microsoft は最前面ウィンドウを実際に操作対象へする場合、`SetForegroundWindow` にWindows側の制限があると説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow
 - Microsoft は `Run` レジストリキーのプログラムがユーザーのログオン時に実行されると説明しています。出典: https://learn.microsoft.com/en-us/windows/win32/setupapi/run-and-runonce-registry-keys
 - Discord.Net の音声送信ガイドは、音声に `libsodium` と `opus` のネイティブライブラリが必要だと説明しています。Discord.Net 3.20.1 の `EnableVoiceDaveEncryption` は、音声暗号化に `libdave` を使う場合、実行ディレクトリに `libdave` のビルドが必要だと説明しています。出典: https://docs.discordnet.dev/guides/voice/sending-voice.html / `.nuget\packages\discord.net.websocket\3.20.1\lib\net8.0\Discord.Net.WebSocket.xml`
 - strats.gg の対象ページは `Valorant Lineups, Stats Tracker & More!` のページとして確認しました。出典: https://strats.gg/valorant/lineups
@@ -24,9 +25,11 @@ Discord bot は VALORANT 起動検知をトリガーに指定 VC へ接続し、
 - UIを出さないバックグラウンド常駐
 - VALORANT 本体のプロセス検知
 - `Alt + T` のグローバルホットキー
+- 専用10msキー状態監視とバックグラウンドRaw Inputによる代替検知
 - WebView2 による strats.gg ラインナップ表示
 - オーバーレイの表示/非表示切替
-- `SW_SHOWNOACTIVATE` / `SWP_NOACTIVATE` による非アクティブ表示
+- 表示時の操作フォーカス取得と、非表示時のVALORANTフォーカス復帰
+- 非表示中のWebView2ページ保持
 - 少し透過したオーバーレイ表示
 - VALORANT ウィンドウ位置に合わせたオーバーレイ配置
 - exe 埋め込み `.env` と外部 `.env` による Discord bot 設定読み込み

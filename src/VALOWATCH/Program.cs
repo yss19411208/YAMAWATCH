@@ -24,6 +24,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-alt-t-input", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunAltTHotKeyInputDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-schedule", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateScheduleDiagnostic();
@@ -90,13 +96,16 @@ static class Program
         DiscordBotSettingsStore discordBotSettingsStore = new(appPaths);
         bool disableDiscordAutomation = args.Any(argument =>
             string.Equals(argument, "--no-discord", StringComparison.OrdinalIgnoreCase));
+        bool disableKeyStateFallback = args.Any(argument =>
+            string.Equals(argument, "--disable-key-state-fallback", StringComparison.OrdinalIgnoreCase));
 
         Application.Run(new MainForm(
             appPaths,
             new DiscordBotVoiceRelay(discordBotSettingsStore, appPaths),
             new GitUpdateChecker(new GitUpdateSettingsStore(appPaths)),
             new GitAutoUpdater(new GitUpdateSettingsStore(appPaths), appPaths),
-            disableDiscordAutomation));
+            disableDiscordAutomation,
+            disableKeyStateFallback));
 
         GC.KeepAlive(singleInstanceMutex);
     }
@@ -129,6 +138,121 @@ static class Program
         if (Process.Start(processStartInfo) is null)
         {
             throw new InvalidOperationException("VALOWATCH keepalive could not restart the application.");
+        }
+    }
+
+    private static void RunAltTHotKeyInputDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        ApplicationConfiguration.Initialize();
+        using Form rawInputTarget = new()
+        {
+            ShowInTaskbar = false,
+            FormBorderStyle = FormBorderStyle.None,
+            Size = new Size(1, 1),
+            Location = new Point(-32000, -32000)
+        };
+        IntPtr targetHandle = rawInputTarget.Handle;
+        RawInputDevice[] registerDevices =
+        [
+            new RawInputDevice
+            {
+                UsagePage = NativeMethods.HidUsagePageGeneric,
+                Usage = NativeMethods.HidUsageGenericKeyboard,
+                Flags = NativeMethods.RidevInputSink,
+                TargetWindow = targetHandle
+            }
+        ];
+        bool rawInputRegistered = NativeMethods.RegisterRawInputDevices(
+            registerDevices,
+            (uint)registerDevices.Length,
+            (uint)Marshal.SizeOf<RawInputDevice>());
+        int registrationError = rawInputRegistered ? 0 : Marshal.GetLastWin32Error();
+
+        try
+        {
+            AltTHotKeyStateMachine stateMachine = new();
+            bool tWithoutAltIgnored = !stateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: true,
+                keyUp: false,
+                altIsCurrentlyDown: false);
+            stateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: false,
+                keyUp: true,
+                altIsCurrentlyDown: false);
+            stateMachine.Process(
+                NativeMethods.VirtualKeyMenu,
+                keyDown: true,
+                keyUp: false,
+                altIsCurrentlyDown: true);
+            bool firstChordTriggered = stateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: true,
+                keyUp: false,
+                altIsCurrentlyDown: true);
+            bool repeatIgnored = !stateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: true,
+                keyUp: false,
+                altIsCurrentlyDown: true);
+            stateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: false,
+                keyUp: true,
+                altIsCurrentlyDown: true);
+            bool secondChordTriggered = stateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: true,
+                keyUp: false,
+                altIsCurrentlyDown: true);
+
+            AltTHotKeyStateMachine startupStateMachine = new();
+            bool alreadyHeldAltTriggered = startupStateMachine.Process(
+                NativeMethods.VirtualKeyT,
+                keyDown: true,
+                keyUp: false,
+                altIsCurrentlyDown: true);
+            bool diagnosticPassed = rawInputRegistered &&
+                tWithoutAltIgnored &&
+                firstChordTriggered &&
+                repeatIgnored &&
+                secondChordTriggered &&
+                alreadyHeldAltTriggered;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Alt+T input check: {(diagnosticPassed ? "ready" : "failed")}. " +
+                $"RawInputRegistered: {rawInputRegistered}. RegistrationError: {registrationError}. " +
+                $"TWithoutAltIgnored: {tWithoutAltIgnored}. FirstChord: {firstChordTriggered}. " +
+                $"RepeatIgnored: {repeatIgnored}. SecondChord: {secondChordTriggered}. " +
+                $"AlreadyHeldAlt: {alreadyHeldAltTriggered}.{Environment.NewLine}");
+            Environment.ExitCode = diagnosticPassed ? 0 : 1;
+        }
+        finally
+        {
+            if (rawInputRegistered)
+            {
+                RawInputDevice[] removeDevices =
+                [
+                    new RawInputDevice
+                    {
+                        UsagePage = NativeMethods.HidUsagePageGeneric,
+                        Usage = NativeMethods.HidUsageGenericKeyboard,
+                        Flags = NativeMethods.RidevRemove,
+                        TargetWindow = IntPtr.Zero
+                    }
+                ];
+                NativeMethods.RegisterRawInputDevices(
+                    removeDevices,
+                    (uint)removeDevices.Length,
+                    (uint)Marshal.SizeOf<RawInputDevice>());
+            }
         }
     }
 

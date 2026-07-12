@@ -52,8 +52,18 @@ jobs:
       - name: Prepare release asset
         shell: pwsh
         run: |
+          dotnet publish .\src\VALOWATCH.Updater\VALOWATCH.Updater.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
+            -o .\updater
+
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination .\release\VALOWATCH_Update.exe -Force
+          Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination .\release\VALOWATCH_App.exe -Force
+          Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
 
       - name: Publish GitHub release
         shell: pwsh
@@ -68,6 +78,7 @@ jobs:
           }
 
           gh release create $releaseTag `
+            .\release\VALOWATCH_App.exe `
             .\release\VALOWATCH_Update.exe `
             --repo "${{ github.repository }}" `
             --target "${{ github.sha }}" `

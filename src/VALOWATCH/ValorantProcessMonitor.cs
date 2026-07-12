@@ -4,7 +4,7 @@ namespace VALOWATCH;
 
 public static class ValorantProcessMonitor
 {
-    private static readonly string[] ValorantProcessNames =
+    private static readonly string[] ExactValorantProcessNames =
     [
         "VALORANT-Win64-Shipping",
         "VALORANT"
@@ -12,80 +12,91 @@ public static class ValorantProcessMonitor
 
     public static bool IsValorantRunning()
     {
-        foreach (string processName in ValorantProcessNames)
+        Process[] processes = Process.GetProcesses();
+        try
         {
-            try
+            return processes.Any(IsValorantProcess);
+        }
+        finally
+        {
+            foreach (Process process in processes)
             {
-                Process[] matchingProcesses = Process.GetProcessesByName(processName);
-                if (matchingProcesses.Length > 0)
-                {
-                    foreach (Process matchingProcess in matchingProcesses)
-                    {
-                        matchingProcess.Dispose();
-                    }
-
-                    return true;
-                }
-
-                foreach (Process matchingProcess in matchingProcesses)
-                {
-                    matchingProcess.Dispose();
-                }
-            }
-            catch (InvalidOperationException)
-            {
-            }
-            catch (System.ComponentModel.Win32Exception)
-            {
+                process.Dispose();
             }
         }
-
-        return false;
     }
 
-    public static bool TryGetValorantWindowBounds(out Rectangle windowBounds)
+    public static bool TryGetValorantWindow(out IntPtr windowHandle, out Rectangle windowBounds)
     {
-        foreach (string processName in ValorantProcessNames)
+        Process[] processes = Process.GetProcesses();
+        try
         {
-            Process[] matchingProcesses = [];
+            IntPtr largestWindowHandle = IntPtr.Zero;
+            Rectangle largestWindowBounds = Rectangle.Empty;
+            long largestWindowArea = 0;
 
-            try
+            foreach (Process process in processes)
             {
-                matchingProcesses = Process.GetProcessesByName(processName);
-                foreach (Process matchingProcess in matchingProcesses)
+                if (!IsValorantProcess(process))
                 {
-                    if (matchingProcess.MainWindowHandle == IntPtr.Zero)
+                    continue;
+                }
+
+                try
+                {
+                    IntPtr candidateHandle = process.MainWindowHandle;
+                    if (candidateHandle == IntPtr.Zero ||
+                        !NativeMethods.GetWindowRect(candidateHandle, out NativeRect nativeRect))
                     {
                         continue;
                     }
 
-                    if (NativeMethods.GetWindowRect(matchingProcess.MainWindowHandle, out NativeRect nativeRect))
+                    Rectangle candidateBounds = nativeRect.ToRectangle();
+                    long candidateArea = (long)candidateBounds.Width * candidateBounds.Height;
+                    if (candidateBounds.Width <= 0 || candidateBounds.Height <= 0 || candidateArea <= largestWindowArea)
                     {
-                        Rectangle rectangle = nativeRect.ToRectangle();
-                        if (rectangle.Width > 0 && rectangle.Height > 0)
-                        {
-                            windowBounds = rectangle;
-                            return true;
-                        }
+                        continue;
                     }
+
+                    largestWindowHandle = candidateHandle;
+                    largestWindowBounds = candidateBounds;
+                    largestWindowArea = candidateArea;
                 }
-            }
-            catch (InvalidOperationException)
-            {
-            }
-            catch (System.ComponentModel.Win32Exception)
-            {
-            }
-            finally
-            {
-                foreach (Process matchingProcess in matchingProcesses)
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
                 {
-                    matchingProcess.Dispose();
                 }
+            }
+
+            windowHandle = largestWindowHandle;
+            windowBounds = largestWindowBounds;
+            return windowHandle != IntPtr.Zero;
+        }
+        finally
+        {
+            foreach (Process process in processes)
+            {
+                process.Dispose();
             }
         }
+    }
 
-        windowBounds = Rectangle.Empty;
-        return false;
+    public static bool TryGetValorantWindowBounds(out Rectangle windowBounds)
+    {
+        return TryGetValorantWindow(out _, out windowBounds);
+    }
+
+    private static bool IsValorantProcess(Process process)
+    {
+        try
+        {
+            string processName = process.ProcessName;
+            return ExactValorantProcessNames.Any(name =>
+                    string.Equals(processName, name, StringComparison.OrdinalIgnoreCase)) ||
+                processName.StartsWith("VALORANT-", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 }

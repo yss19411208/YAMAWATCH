@@ -120,7 +120,14 @@ internal sealed class FakeValorantForm : Form
             string windowTitle = NativeMethods.GetWindowText(rootWindow);
             bool fakeStillVisible = Visible && WindowState != FormWindowState.Minimized;
             bool overlayOnTop = string.Equals(processName, "VALOWATCH", StringComparison.OrdinalIgnoreCase)
+                || processName.StartsWith("VALOWATCH_", StringComparison.OrdinalIgnoreCase)
                 || windowTitle.Contains("VALOWATCH", StringComparison.OrdinalIgnoreCase);
+            IntPtr foregroundWindow = NativeMethods.GetForegroundWindow();
+            _ = NativeMethods.GetWindowThreadProcessId(foregroundWindow, out int foregroundProcessId);
+            string foregroundProcessName = GetProcessName(foregroundProcessId);
+            bool overlayHasInputFocus = foregroundWindow == rootWindow &&
+                (foregroundProcessName.StartsWith("VALOWATCH", StringComparison.OrdinalIgnoreCase) ||
+                    windowTitle.Contains("VALOWATCH", StringComparison.OrdinalIgnoreCase));
 
             bool hotKeyRegistrationRecovered = true;
             if (blockHotKeyRegistration)
@@ -142,9 +149,43 @@ internal sealed class FakeValorantForm : Form
             IntPtr hiddenRootWindow = NativeMethods.GetAncestor(hiddenWindowAtCenter, NativeMethods.GaRoot);
             _ = NativeMethods.GetWindowThreadProcessId(hiddenRootWindow, out int hiddenProcessId);
             string hiddenTopProcessName = GetProcessName(hiddenProcessId);
-            bool overlayHidden = string.Equals(hiddenTopProcessName, "VALORANT", StringComparison.OrdinalIgnoreCase);
+            bool overlayHidden = IsValorantProcessName(hiddenTopProcessName);
+            IntPtr restoredForegroundWindow = NativeMethods.GetForegroundWindow();
+            _ = NativeMethods.GetWindowThreadProcessId(restoredForegroundWindow, out int restoredForegroundProcessId);
+            string restoredForegroundProcessName = GetProcessName(restoredForegroundProcessId);
+            bool valorantFocusRestored = IsValorantProcessName(restoredForegroundProcessName);
 
-            TestPassed = fakeStillVisible && overlayOnTop && overlayHidden && hotKeyRegistrationRecovered;
+            statusLabel.Text = "Showing retained overlay again...";
+            await NativeMethods.SendAltTAsync();
+            await Task.Delay(2200);
+
+            IntPtr retainedWindowAtCenter = NativeMethods.WindowFromPoint(centerPoint);
+            IntPtr retainedRootWindow = NativeMethods.GetAncestor(retainedWindowAtCenter, NativeMethods.GaRoot);
+            _ = NativeMethods.GetWindowThreadProcessId(retainedRootWindow, out int retainedProcessId);
+            string retainedProcessName = GetProcessName(retainedProcessId);
+            bool retainedOverlayVisible = retainedRootWindow == rootWindow &&
+                retainedProcessName.StartsWith("VALOWATCH", StringComparison.OrdinalIgnoreCase);
+            bool retainedOverlayHasInputFocus = NativeMethods.GetForegroundWindow() == retainedRootWindow;
+
+            statusLabel.Text = "Hiding retained overlay...";
+            await NativeMethods.SendAltTAsync();
+            await Task.Delay(1200);
+
+            IntPtr finalWindowAtCenter = NativeMethods.WindowFromPoint(centerPoint);
+            IntPtr finalRootWindow = NativeMethods.GetAncestor(finalWindowAtCenter, NativeMethods.GaRoot);
+            _ = NativeMethods.GetWindowThreadProcessId(finalRootWindow, out int finalProcessId);
+            string finalProcessName = GetProcessName(finalProcessId);
+            bool finalOverlayHidden = IsValorantProcessName(finalProcessName);
+
+            TestPassed = fakeStillVisible &&
+                overlayOnTop &&
+                overlayHasInputFocus &&
+                overlayHidden &&
+                valorantFocusRestored &&
+                retainedOverlayVisible &&
+                retainedOverlayHasInputFocus &&
+                finalOverlayHidden &&
+                hotKeyRegistrationRecovered;
 
             resultLines.Add($"AppPath={appPath}");
             resultLines.Add($"AppArguments={appArguments}");
@@ -152,9 +193,16 @@ internal sealed class FakeValorantForm : Form
             resultLines.Add($"TopWindowTitle={windowTitle}");
             resultLines.Add($"FakeStillVisible={fakeStillVisible}");
             resultLines.Add($"OverlayOnTop={overlayOnTop}");
+            resultLines.Add($"OverlayHasInputFocus={overlayHasInputFocus}");
+            resultLines.Add($"ForegroundProcess={foregroundProcessName}");
             resultLines.Add($"BlockHotKeyRegistration={blockHotKeyRegistration}");
+            resultLines.Add($"KeyStateFallbackDisabled={appArguments.Contains("--disable-key-state-fallback", StringComparison.OrdinalIgnoreCase)}");
             resultLines.Add($"HotKeyRegistrationRecovered={hotKeyRegistrationRecovered}");
             resultLines.Add($"OverlayHiddenAfterSecondToggle={overlayHidden}");
+            resultLines.Add($"ValorantFocusRestored={valorantFocusRestored}");
+            resultLines.Add($"RetainedOverlaySameWindow={retainedOverlayVisible}");
+            resultLines.Add($"RetainedOverlayHasInputFocus={retainedOverlayHasInputFocus}");
+            resultLines.Add($"OverlayHiddenAfterFinalToggle={finalOverlayHidden}");
             resultLines.Add($"TestPassed={TestPassed}");
 
             statusLabel.Text = TestPassed
@@ -216,6 +264,12 @@ internal sealed class FakeValorantForm : Form
         using Process process = Process.GetProcessById(processId);
         return process.ProcessName;
     }
+
+    private static bool IsValorantProcessName(string processName)
+    {
+        return processName.Equals("VALORANT", StringComparison.OrdinalIgnoreCase) ||
+            processName.StartsWith("VALORANT-", StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 internal static class NativeMethods
@@ -237,6 +291,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr windowHandle, out int processId);

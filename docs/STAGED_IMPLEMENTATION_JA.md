@@ -40,11 +40,13 @@
 完了:
 
 - `RegisterHotKey` による `Alt + T`
+- UIスレッドから独立した10msキー状態監視
+- `RIDEV_INPUTSINK` Raw Inputによる物理キーボードのバックグラウンド監視
 - WebView2 の strats.gg 表示
 - オーバーレイの `Show` / `Hide`
-- 非表示直後だけ短時間ページを保持
-- 高メモリ時、または非表示が続いた時に WebView2 を完全解放
-- `SW_SHOWNOACTIVATE` / `SWP_NOACTIVATE` による非アクティブ表示
+- 非表示中も同じWebView2とページ状態を保持
+- 表示時にオーバーレイをアクティブ化してマウス・キーボード操作を可能にする
+- 非表示時にVALORANTへ入力フォーカスを戻す
 - 透過度を少し下げたオーバーレイ表示
 - VALORANT ウィンドウ矩形に合わせた表示位置調整
 
