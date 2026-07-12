@@ -15,6 +15,7 @@ public sealed class AppPaths
         ConfigDirectory = configDirectory ?? Path.Combine(dataDirectory, "config");
         HistoryPath = Path.Combine(dataDirectory, "history.json");
         UpdateCompletedNotificationPath = Path.Combine(dataDirectory, "update-completed.pending");
+        DurableEnvPath = Path.Combine(dataDirectory, "config", "settings.protected");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
         DiscordBotSampleConfigPath = Path.Combine(ConfigDirectory, "discord_bot.sample.json");
         EnvPath = envPath ?? Path.Combine(ConfigDirectory, ".env");
@@ -34,6 +35,8 @@ public sealed class AppPaths
     public string HistoryPath { get; }
 
     public string UpdateCompletedNotificationPath { get; }
+
+    public string DurableEnvPath { get; }
 
     public string DiscordBotConfigPath { get; }
 
@@ -68,6 +71,16 @@ public sealed class AppPaths
         return new AppPaths(dataDirectory);
     }
 
+    internal static AppPaths CreateForDataDirectory(string dataDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(dataDirectory))
+        {
+            throw new ArgumentException("Diagnostic data directory is required.", nameof(dataDirectory));
+        }
+
+        return new AppPaths(Path.GetFullPath(dataDirectory));
+    }
+
     public void EnsureDirectories()
     {
         Directory.CreateDirectory(DataDirectory);
@@ -75,6 +88,7 @@ public sealed class AppPaths
         Directory.CreateDirectory(VideoRecordingsDirectory);
         Directory.CreateDirectory(SharedMediaDirectory);
         Directory.CreateDirectory(ConfigDirectory);
+        Directory.CreateDirectory(Path.GetDirectoryName(DurableEnvPath) ?? DataDirectory);
         Directory.CreateDirectory(Path.GetDirectoryName(EnvPath) ?? ConfigDirectory);
     }
 

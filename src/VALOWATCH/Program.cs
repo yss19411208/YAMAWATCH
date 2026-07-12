@@ -24,6 +24,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-durable-config", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDurableConfigDiagnostic(args);
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-git-update", StringComparison.OrdinalIgnoreCase)))
         {
             RunGitUpdateDiagnostic(downloadInstaller: false);
@@ -163,6 +169,43 @@ static class Program
             TryWriteDiagnosticFailure(logFilePath, "Update schedule check", exception);
             Environment.ExitCode = 1;
         }
+    }
+
+    private static void RunDurableConfigDiagnostic(string[] args)
+    {
+        AppPaths appPaths = CreateDiagnosticAppPaths(args);
+        appPaths.EnsureDirectories();
+        DiscordBotSettings? settings = new DiscordBotSettingsStore(appPaths).Load(out string statusText);
+        bool durableConfigIsReady = File.Exists(appPaths.DurableEnvPath) && settings is not null;
+        Environment.ExitCode = durableConfigIsReady ? 0 : 1;
+
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Durable config check: " +
+                $"{(durableConfigIsReady ? "ready" : "failed")}. Status: {statusText}. " +
+                $"ProtectedFilePresent: {File.Exists(appPaths.DurableEnvPath)}.{Environment.NewLine}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    private static AppPaths CreateDiagnosticAppPaths(IEnumerable<string> args)
+    {
+        const string dataDirectoryPrefix = "--diagnostic-data-directory=";
+        string? dataDirectoryArgument = args.FirstOrDefault(argument =>
+            argument.StartsWith(dataDirectoryPrefix, StringComparison.OrdinalIgnoreCase));
+        if (dataDirectoryArgument is null)
+        {
+            return AppPaths.CreateDefault();
+        }
+
+        string dataDirectory = dataDirectoryArgument[dataDirectoryPrefix.Length..].Trim().Trim('"');
+        return AppPaths.CreateForDataDirectory(dataDirectory);
     }
 
     private static void RunGitUpdateDiagnostic(bool downloadInstaller)

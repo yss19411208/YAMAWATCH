@@ -6,6 +6,7 @@ internal static class NativeMethods
 {
     public const int WmHotKey = 0x0312;
     public const uint ModAlt = 0x0001;
+    public const uint ModNoRepeat = 0x4000;
     public const uint VirtualKeyT = 0x54;
     public const int SwShownoactivate = 4;
     public const uint SwpNoActivate = 0x0010;

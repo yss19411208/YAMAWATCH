@@ -12,13 +12,17 @@ internal static class Program
             ? Path.GetFullPath(args[0])
             : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "exe", "VALOWATCH.exe"));
         string[] appArguments = args.Skip(1).ToArray();
+        bool blockHotKeyRegistration = appArguments.Any(argument =>
+            string.Equals(argument, "--block-hotkey", StringComparison.OrdinalIgnoreCase));
+        appArguments = appArguments.Where(argument =>
+            !string.Equals(argument, "--block-hotkey", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (!appArguments.Any(argument => string.Equals(argument, "--no-discord", StringComparison.OrdinalIgnoreCase)))
         {
             appArguments = [.. appArguments, "--no-discord"];
         }
 
         ApplicationConfiguration.Initialize();
-        using FakeValorantForm fakeValorantForm = new(appPath, appArguments);
+        using FakeValorantForm fakeValorantForm = new(appPath, appArguments, blockHotKeyRegistration);
         Application.Run(fakeValorantForm);
         Environment.ExitCode = fakeValorantForm.TestPassed ? 0 : 1;
     }
@@ -29,14 +33,19 @@ internal sealed class FakeValorantForm : Form
     private readonly string appPath;
     private readonly string appArguments;
     private readonly string resultPath;
+    private readonly bool blockHotKeyRegistration;
     private readonly Label statusLabel = new();
 
     private Process? valowatchProcess;
 
-    public FakeValorantForm(string appPath, IEnumerable<string> appArguments)
+    public FakeValorantForm(
+        string appPath,
+        IEnumerable<string> appArguments,
+        bool blockHotKeyRegistration)
     {
         this.appPath = appPath;
         this.appArguments = string.Join(' ', appArguments.Select(argument => argument.Contains(' ') ? $"\"{argument}\"" : argument));
+        this.blockHotKeyRegistration = blockHotKeyRegistration;
         resultPath = Path.Combine(AppContext.BaseDirectory, "overlay-test-result.txt");
         BuildInterface();
     }
@@ -78,6 +87,12 @@ internal sealed class FakeValorantForm : Form
                 throw new FileNotFoundException("VALOWATCH.exe was not found.", appPath);
             }
 
+            bool blockerRegistered = !blockHotKeyRegistration || NativeMethods.RegisterTestHotKey(Handle);
+            if (!blockerRegistered)
+            {
+                throw new InvalidOperationException("The Alt+T conflict test hotkey could not be registered.");
+            }
+
             statusLabel.Text = "Launching VALOWATCH...";
             valowatchProcess = Process.Start(new ProcessStartInfo
             {
@@ -93,7 +108,7 @@ internal sealed class FakeValorantForm : Form
             await Task.Delay(300);
 
             statusLabel.Text = "Sending Alt + T...";
-            NativeMethods.SendAltT();
+            await NativeMethods.SendAltTAsync();
             await Task.Delay(3500);
 
             Point centerPoint = new(Left + Width / 2, Top + Height / 2);
@@ -101,15 +116,35 @@ internal sealed class FakeValorantForm : Form
             IntPtr rootWindow = NativeMethods.GetAncestor(windowAtCenter, NativeMethods.GaRoot);
             _ = NativeMethods.GetWindowThreadProcessId(rootWindow, out int processId);
 
-            string processName = processId > 0
-                ? Process.GetProcessById(processId).ProcessName
-                : "(unknown)";
+            string processName = GetProcessName(processId);
             string windowTitle = NativeMethods.GetWindowText(rootWindow);
             bool fakeStillVisible = Visible && WindowState != FormWindowState.Minimized;
             bool overlayOnTop = string.Equals(processName, "VALOWATCH", StringComparison.OrdinalIgnoreCase)
                 || windowTitle.Contains("VALOWATCH", StringComparison.OrdinalIgnoreCase);
 
-            TestPassed = fakeStillVisible && overlayOnTop;
+            bool hotKeyRegistrationRecovered = true;
+            if (blockHotKeyRegistration)
+            {
+                NativeMethods.UnregisterTestHotKey(Handle);
+                await Task.Delay(5600);
+                hotKeyRegistrationRecovered = !NativeMethods.RegisterTestHotKey(Handle);
+                if (!hotKeyRegistrationRecovered)
+                {
+                    NativeMethods.UnregisterTestHotKey(Handle);
+                }
+            }
+
+            statusLabel.Text = "Sending Alt + T again...";
+            await NativeMethods.SendAltTAsync();
+            await Task.Delay(1200);
+
+            IntPtr hiddenWindowAtCenter = NativeMethods.WindowFromPoint(centerPoint);
+            IntPtr hiddenRootWindow = NativeMethods.GetAncestor(hiddenWindowAtCenter, NativeMethods.GaRoot);
+            _ = NativeMethods.GetWindowThreadProcessId(hiddenRootWindow, out int hiddenProcessId);
+            string hiddenTopProcessName = GetProcessName(hiddenProcessId);
+            bool overlayHidden = string.Equals(hiddenTopProcessName, "VALORANT", StringComparison.OrdinalIgnoreCase);
+
+            TestPassed = fakeStillVisible && overlayOnTop && overlayHidden && hotKeyRegistrationRecovered;
 
             resultLines.Add($"AppPath={appPath}");
             resultLines.Add($"AppArguments={appArguments}");
@@ -117,6 +152,9 @@ internal sealed class FakeValorantForm : Form
             resultLines.Add($"TopWindowTitle={windowTitle}");
             resultLines.Add($"FakeStillVisible={fakeStillVisible}");
             resultLines.Add($"OverlayOnTop={overlayOnTop}");
+            resultLines.Add($"BlockHotKeyRegistration={blockHotKeyRegistration}");
+            resultLines.Add($"HotKeyRegistrationRecovered={hotKeyRegistrationRecovered}");
+            resultLines.Add($"OverlayHiddenAfterSecondToggle={overlayHidden}");
             resultLines.Add($"TestPassed={TestPassed}");
 
             statusLabel.Text = TestPassed
@@ -135,6 +173,7 @@ internal sealed class FakeValorantForm : Form
         }
         finally
         {
+            NativeMethods.UnregisterTestHotKey(Handle);
             File.WriteAllLines(resultPath, resultLines);
             StopValowatchProcess();
             Close();
@@ -166,6 +205,17 @@ internal sealed class FakeValorantForm : Form
         {
         }
     }
+
+    private static string GetProcessName(int processId)
+    {
+        if (processId <= 0)
+        {
+            return "(unknown)";
+        }
+
+        using Process process = Process.GetProcessById(processId);
+        return process.ProcessName;
+    }
 }
 
 internal static class NativeMethods
@@ -175,6 +225,9 @@ internal static class NativeMethods
     private const ushort VirtualKeyMenu = 0x12;
     private const ushort VirtualKeyT = 0x54;
     private const uint KeyEventKeyUp = 0x0002;
+    private const uint ModAlt = 0x0001;
+    private const uint ModNoRepeat = 0x4000;
+    private const int TestHotKeyId = 8127;
 
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr windowHandle);
@@ -191,6 +244,12 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint inputCount, Input[] inputs, int inputSize);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool RegisterHotKey(IntPtr windowHandle, int id, uint modifiers, uint virtualKey);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnregisterHotKey(IntPtr windowHandle, int id);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(IntPtr windowHandle, char[] textBuffer, int maxCount);
 
@@ -201,20 +260,41 @@ internal static class NativeMethods
         return length <= 0 ? string.Empty : new string(textBuffer, 0, length);
     }
 
-    public static void SendAltT()
+    public static bool RegisterTestHotKey(IntPtr windowHandle)
     {
-        Input[] inputs =
+        return RegisterHotKey(windowHandle, TestHotKeyId, ModAlt | ModNoRepeat, VirtualKeyT);
+    }
+
+    public static void UnregisterTestHotKey(IntPtr windowHandle)
+    {
+        UnregisterHotKey(windowHandle, TestHotKeyId);
+    }
+
+    public static async Task SendAltTAsync()
+    {
+        Input[] keyDownInputs =
         [
             CreateKeyboardInput(VirtualKeyMenu, keyUp: false),
-            CreateKeyboardInput(VirtualKeyT, keyUp: false),
+            CreateKeyboardInput(VirtualKeyT, keyUp: false)
+        ];
+        Input[] keyUpInputs =
+        [
             CreateKeyboardInput(VirtualKeyT, keyUp: true),
             CreateKeyboardInput(VirtualKeyMenu, keyUp: true)
         ];
 
-        uint sentInputCount = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
-        if (sentInputCount != inputs.Length)
+        uint keyDownCount = SendInput((uint)keyDownInputs.Length, keyDownInputs, Marshal.SizeOf<Input>());
+        if (keyDownCount != keyDownInputs.Length)
         {
-            throw new InvalidOperationException("SendInput did not send the complete Alt+T sequence.");
+            throw new InvalidOperationException("SendInput did not send the Alt+T key-down sequence.");
+        }
+
+        await Task.Delay(180);
+
+        uint keyUpCount = SendInput((uint)keyUpInputs.Length, keyUpInputs, Marshal.SizeOf<Input>());
+        if (keyUpCount != keyUpInputs.Length)
+        {
+            throw new InvalidOperationException("SendInput did not send the Alt+T key-up sequence.");
         }
     }
 

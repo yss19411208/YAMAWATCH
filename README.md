@@ -6,6 +6,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 
 - 起動すると通常画面を出さず、タスクトレイでバックグラウンド常駐します。
 - `Alt + T` は VALORANT が起動している時だけ反応します。
+- `Alt + T` のグローバル登録が他アプリとの競合で失敗した場合もキー状態監視で動作し、5秒ごとに通常登録への復旧を試みます。
 - オーバーレイには `https://strats.gg/valorant/lineups` だけを表示します。
 - 通常の設定画面や履歴画面は表示しません。表に出るUIは `Alt + T` の strats.gg オーバーレイだけです。
 - 初回表示後は同じ WebView2 ウィンドウを保持し、`Alt + T` は表示/非表示だけを切り替えます。
@@ -20,6 +21,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - `DISCORD_STREAM_LINE_AUDIO=true` の場合、LINEプロセスの音だけをDiscord音声へミックスします。
 - `VALOWATCH_UPDATE_REPOSITORY` が設定されている場合、常駐中は5分ごとに GitHub Releases の更新確認を行い、VALORANT 起動時にも即時確認します。`VALOWATCH_Setup.exe` の release asset が現在のcommit/versionと違えば自動でダウンロードしてサイレント更新します。
 - 配布用ビルド時に `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env` を `VALOWATCH.exe` へ埋め込みます。
+- 初回起動時、Discord設定をWindows DPAPIで現在のWindowsユーザー専用に暗号化し、`data\config\settings.protected` へ退避します。以後は外部 `.env` が無くても、秘密情報を含まないGitHub更新版がこの退避設定を復元します。
 
 ## 使い方
 
@@ -56,6 +58,8 @@ C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env
 ```
 
 `installer\VALOWATCH_Setup.exe` を作るとき、この `.env` は `VALOWATCH.exe` に埋め込まれます。配布先の相手は `.env` を配置しなくても、埋め込まれた設定で動きます。
+
+最終配布用インストーラーは起動直後に、埋め込み設定を `C:\Users\<Windowsユーザー名>\Documents\VALOWATCH\data\config\settings.protected` へ暗号化して保存します。GitHubから取得する自動更新版にはDiscord tokenを含めませんが、同じWindowsユーザーであればこの暗号化ファイルから復元するため、外部 `.env` が削除されていても動作します。Windowsユーザーを変更した場合や `settings.protected` まで削除した場合は復号できないため、最終配布用インストーラーを再実行する必要があります。
 
 インストーラー実行後は `C:\Users\p159yusuke\Documents\VALOWATCH\installer\.env.example` も作成されます。配布先に実体の `.env` がある場合だけ、その外部 `.env` が埋め込み設定を上書きします。
 

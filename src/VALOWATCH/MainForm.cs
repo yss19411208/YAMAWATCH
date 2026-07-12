@@ -11,6 +11,8 @@ public sealed class MainForm : Form
     private const string DetectedText = "VALORANT detected";
     private const string NotDetectedText = "VALORANT not detected";
     private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan HotKeyRegistrationRetryInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan HotKeyTriggerCooldown = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
 
     private readonly AppPaths appPaths;
@@ -26,6 +28,7 @@ public sealed class MainForm : Form
     private readonly bool disableDiscordAutomation;
     private readonly System.Windows.Forms.Timer processTimer = new();
     private readonly System.Windows.Forms.Timer recordingTimer = new();
+    private readonly System.Windows.Forms.Timer hotKeyHealthTimer = new();
     private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
     private readonly List<TeammateControls> teammateControls = [];
 
@@ -49,6 +52,7 @@ public sealed class MainForm : Form
     private StratsOverlayForm? stratsOverlayForm;
     private bool suppressStartupToggle;
     private bool hotKeyRegistered;
+    private bool hotKeyChordWasDown;
     private bool lastValorantDetected;
     private bool discordTransitionInProgress;
     private bool hidOnInitialShow;
@@ -60,6 +64,8 @@ public sealed class MainForm : Form
     private bool automaticVideoCaptureStarted;
     private bool automaticUploadInProgress;
     private DateTimeOffset? valorantMissingSinceUtc;
+    private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
 
     public MainForm(
@@ -99,6 +105,10 @@ public sealed class MainForm : Form
         recordingTimer.Tick += (_, _) => RefreshRecordingTimer();
         recordingTimer.Start();
 
+        hotKeyHealthTimer.Interval = 50;
+        hotKeyHealthTimer.Tick += (_, _) => PollStratsHotKeyAndRepairRegistration();
+        hotKeyHealthTimer.Start();
+
         stratsToggleDelayTimer.Interval = 30;
         stratsToggleDelayTimer.Tick += (_, _) => RunPendingStratsToggleAfterHotKeyRelease();
     }
@@ -108,6 +118,7 @@ public sealed class MainForm : Form
         UnregisterStratsHotKey();
         processTimer.Stop();
         recordingTimer.Stop();
+        hotKeyHealthTimer.Stop();
         stratsToggleDelayTimer.Stop();
         trayIcon.Visible = false;
         DisposeStratsOverlay();
@@ -165,7 +176,7 @@ public sealed class MainForm : Form
     {
         if (message.Msg == NativeMethods.WmHotKey && message.WParam.ToInt32() == StratsHotKeyId)
         {
-            ScheduleStratsOverlayToggleAfterHotKeyRelease();
+            RequestStratsToggleFromHotKey("WM_HOTKEY");
             return;
         }
 
@@ -1075,15 +1086,17 @@ public sealed class MainForm : Form
         hotKeyRegistered = NativeMethods.RegisterHotKey(
             Handle,
             StratsHotKeyId,
-            NativeMethods.ModAlt,
+            NativeMethods.ModAlt | NativeMethods.ModNoRepeat,
             NativeMethods.VirtualKeyT);
 
         if (hotKeyRegistered)
         {
+            nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MaxValue;
             WriteAppLog("Overlay", "Alt + T hotkey registered.");
         }
         else
         {
+            nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.UtcNow.Add(HotKeyRegistrationRetryInterval);
             WriteAppLog("Overlay", $"Alt + T hotkey registration failed. Win32Error: {Marshal.GetLastWin32Error()}.");
         }
 
@@ -1107,6 +1120,37 @@ public sealed class MainForm : Form
 
         NativeMethods.UnregisterHotKey(Handle, StratsHotKeyId);
         hotKeyRegistered = false;
+        nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
+    }
+
+    private void PollStratsHotKeyAndRepairRegistration()
+    {
+        bool chordIsDown = NativeMethods.IsKeyDown(NativeMethods.VirtualKeyMenu) &&
+            NativeMethods.IsKeyDown((int)NativeMethods.VirtualKeyT);
+        if (chordIsDown && !hotKeyChordWasDown)
+        {
+            RequestStratsToggleFromHotKey("key-state fallback");
+        }
+
+        hotKeyChordWasDown = chordIsDown;
+
+        if (!hotKeyRegistered && DateTimeOffset.UtcNow >= nextHotKeyRegistrationRetryAtUtc)
+        {
+            RegisterStratsHotKey();
+        }
+    }
+
+    private void RequestStratsToggleFromHotKey(string triggerSource)
+    {
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc - lastHotKeyTriggerAtUtc < HotKeyTriggerCooldown)
+        {
+            return;
+        }
+
+        lastHotKeyTriggerAtUtc = nowUtc;
+        WriteAppLog("Overlay", $"Alt + T received from {triggerSource}.");
+        ScheduleStratsOverlayToggleAfterHotKeyRelease();
     }
 
     private void ToggleStratsOverlayWhenValorantRunning()

@@ -19,10 +19,15 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4078.44" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="OpusDotNet.opus.win-x64" Version="1.3.1" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
+  <PropertyGroup>
+    <EmbeddedEnvPath Condition="'$(EmbeddedEnvPath)' == ''">..\..\installer\.env</EmbeddedEnvPath>
+  </PropertyGroup>
+
   <ItemGroup>
-    <EmbeddedResource Include="..\..\installer\.env" LogicalName="VALOWATCH.Embedded.env" Condition="Exists('..\..\installer\.env')" />
+    <EmbeddedResource Include="$(EmbeddedEnvPath)" LogicalName="VALOWATCH.Embedded.env" Condition="Exists('$(EmbeddedEnvPath)')" />
   </ItemGroup>
 
   <ItemGroup>
