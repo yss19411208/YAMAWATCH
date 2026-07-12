@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using Microsoft.Win32;
 
@@ -12,7 +13,11 @@ internal static class Program
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const string PendingInstallerReportFileName = "installer-result.pending.log";
     private const int KeepAliveIntervalMinutes = 5;
+    private const int InstallerReportMaximumLogLines = 200;
+    private static readonly object InstallerSessionLogLock = new();
+    private static readonly List<string> InstallerSessionLogLines = [];
     private static readonly (string ResourceName, string FileName)[] NativeDependencyResources =
     [
         ("Native/libdave.dll", "libdave.dll"),
@@ -128,13 +133,19 @@ internal static class Program
 
     private static void WriteInstallerLog(string message, Exception? exception = null)
     {
+        string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
+        string logLine = $"{DateTimeOffset.Now:O} [Setup] {message}{exceptionText}";
+        lock (InstallerSessionLogLock)
+        {
+            InstallerSessionLogLines.Add(logLine);
+        }
+
         try
         {
             string logDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
             Directory.CreateDirectory(logDirectory);
             string logFilePath = Path.Combine(logDirectory, "VALOWATCH_Setup.log");
-            string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
-            File.AppendAllText(logFilePath, $"{DateTimeOffset.Now:O} [Setup] {message}{exceptionText}{Environment.NewLine}");
+            File.AppendAllText(logFilePath, logLine + Environment.NewLine);
         }
         catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
         {
@@ -429,6 +440,16 @@ internal static class Program
         catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException or UnauthorizedAccessException or InvalidOperationException)
         {
             WriteInstallerLog("Silent installation failed.", exception);
+            if (options.CleanReinstall)
+            {
+                TryWritePendingInstallerReport(
+                    installDirectory,
+                    succeeded: false,
+                    options.StartAfterInstall,
+                    options.RegisterStartup,
+                    exception);
+            }
+
             return 1;
         }
     }
@@ -490,6 +511,17 @@ internal static class Program
             WriteUpdateCompletedMarker(installDirectory);
         }
 
+        if (cleanReinstall)
+        {
+            WriteInstallerLog("Clean reinstallation completed and is ready to start VALOWATCH.");
+            TryWritePendingInstallerReport(
+                installDirectory,
+                succeeded: true,
+                startAfterInstall,
+                registerStartup,
+                exception: null);
+        }
+
         if (startAfterInstall)
         {
             progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
@@ -508,6 +540,86 @@ internal static class Program
         string markerPath = Path.Combine(dataDirectory, "update-completed.pending");
         File.WriteAllText(markerPath, DateTimeOffset.UtcNow.ToString("O"), Encoding.UTF8);
         WriteInstallerLog($"Update completion marker written: {markerPath}");
+    }
+
+    private static void TryWritePendingInstallerReport(
+        string installDirectory,
+        bool succeeded,
+        bool startAfterInstall,
+        bool registerStartup,
+        Exception? exception)
+    {
+        try
+        {
+            string normalizedInstallDirectory = ValidateCleanReinstallDirectory(installDirectory);
+            string workspaceRoot = GetWorkspaceRootForInstallDirectory(normalizedInstallDirectory);
+            string logDirectory = Path.Combine(workspaceRoot, "data", "logs");
+            Directory.CreateDirectory(logDirectory);
+
+            string reportPath = Path.Combine(logDirectory, PendingInstallerReportFileName);
+            string temporaryReportPath = reportPath + ".writing";
+            string version = typeof(Program).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+                .InformationalVersion ?? "unknown";
+            string[] sessionLogLines;
+            lock (InstallerSessionLogLock)
+            {
+                sessionLogLines = InstallerSessionLogLines
+                    .TakeLast(InstallerReportMaximumLogLines)
+                    .Select(SanitizeInstallerReportText)
+                    .ToArray();
+            }
+
+            List<string> reportLines =
+            [
+                "VALOWATCH installer result",
+                $"TimestampUtc={DateTimeOffset.UtcNow:O}",
+                $"Result={(succeeded ? "success" : "failure")}",
+                $"Version={version}",
+                $"OperatingSystem={Environment.OSVersion.VersionString}",
+                $"ProcessArchitecture={System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}",
+                $"InstallDirectory={SanitizeInstallerReportText(normalizedInstallDirectory)}",
+                $"StartAfterInstall={startAfterInstall}",
+                $"StartupRegistered={registerStartup}",
+                $"FailureType={exception?.GetType().Name ?? string.Empty}",
+                string.Empty,
+                "Session log:"
+            ];
+            reportLines.AddRange(sessionLogLines);
+
+            File.WriteAllLines(temporaryReportPath, reportLines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(temporaryReportPath, reportPath, overwrite: true);
+            WriteInstallerLog($"Pending Discord installer report written: {reportPath}");
+        }
+        catch (Exception reportException) when (reportException is ArgumentException or IOException or NotSupportedException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            WriteInstallerLog("Pending Discord installer report could not be written.", reportException);
+        }
+    }
+
+    private static string SanitizeInstallerReportText(string value)
+    {
+        string sanitizedValue = value;
+        string? userProfileEnvironmentValue = Environment.GetEnvironmentVariable("USERPROFILE");
+        string[] userProfileDirectories =
+        [
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            userProfileEnvironmentValue ?? string.Empty
+        ];
+        foreach (string userProfileDirectory in userProfileDirectories
+            .Where(profileDirectory => !string.IsNullOrWhiteSpace(profileDirectory))
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            sanitizedValue = sanitizedValue.Replace(userProfileDirectory, "%USERPROFILE%", StringComparison.OrdinalIgnoreCase);
+        }
+
+        string temporaryDirectory = Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!string.IsNullOrWhiteSpace(temporaryDirectory))
+        {
+            sanitizedValue = sanitizedValue.Replace(temporaryDirectory, "%TEMP%", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return sanitizedValue;
     }
 
     private static string GetDefaultInstallDirectory()

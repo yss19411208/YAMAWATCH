@@ -201,6 +201,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await SendRequestedDiscordNotificationAsync(GetValorantOpenedMessage(settings)).ConfigureAwait(false);
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
+            await SendPendingInstallerReportAsync().ConfigureAwait(false);
 
             bool audioRelayStarted = false;
 
@@ -1593,6 +1594,36 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             .ConfigureAwait(false))
         {
             versionNotificationSent = true;
+        }
+    }
+
+    private async Task SendPendingInstallerReportAsync()
+    {
+        string reportPath = appPaths.PendingInstallerReportPath;
+        if (!File.Exists(reportPath))
+        {
+            return;
+        }
+
+        SocketTextChannel? textChannel = discordStatusTextChannel;
+        if (textChannel is null)
+        {
+            WriteLog("Pending installer report could not be sent because the text channel is missing.");
+            return;
+        }
+
+        try
+        {
+            await textChannel
+                .SendFileAsync(reportPath, "VALOWATCH 再インストール結果ログ")
+                .ConfigureAwait(false);
+            File.Delete(reportPath);
+            WriteLog("Pending installer report was sent to Discord and cleared.");
+        }
+        catch (Exception exception)
+        {
+            // Keep the pending report so a later Discord connection can retry it.
+            WriteLog("Pending installer report could not be sent and remains queued.", exception);
         }
     }
 
