@@ -128,6 +128,7 @@ Microsoft は `Run` レジストリキーのプログラムがユーザーログ
 - silent installer による無人更新
 - Assembly informational versionのcommitを優先した現在版判定
 - 設置済み本体とReleaseのSHA-256一致時の再インストール抑止
+- Assembly commit優先と設置済みSHA一致をネット不要で確認する診断コマンド
 
 `.env` のキー:
 

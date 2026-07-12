@@ -24,6 +24,14 @@ internal static class Program
     [STAThread]
     private static async Task<int> Main(string[] args)
     {
+        if (args.Any(argument => string.Equals(
+            argument,
+            "--check-installed-app-hash",
+            StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunInstalledAppHashDiagnostic(args);
+        }
+
         string installDirectory;
         try
         {
@@ -370,6 +378,49 @@ internal static class Program
             status = $"Installed app SHA-256 could not be read: {exception.Message}";
             return false;
         }
+    }
+
+    private static int RunInstalledAppHashDiagnostic(IReadOnlyList<string> args)
+    {
+        try
+        {
+            string installDirectory = ResolveInstallDirectory(args);
+            string expectedSha256 = ReadRequiredOption(args, "--expected-sha256");
+            if (expectedSha256.Length != 64 || !expectedSha256.All(Uri.IsHexDigit))
+            {
+                throw new ArgumentException("Expected SHA-256 must contain exactly 64 hexadecimal characters.");
+            }
+
+            bool matches = InstalledAppMatchesRelease(installDirectory, expectedSha256, out string status);
+            WriteLog($"Installed app hash diagnostic: {(matches ? "ready" : "failed")}. {status}");
+            return matches ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidOperationException)
+        {
+            WriteLog("Installed app hash diagnostic failed.", exception);
+            return 1;
+        }
+    }
+
+    private static string ReadRequiredOption(IReadOnlyList<string> args, string optionName)
+    {
+        string optionPrefix = optionName + "=";
+        for (int argumentIndex = 0; argumentIndex < args.Count; argumentIndex++)
+        {
+            string argument = args[argumentIndex];
+            if (argument.StartsWith(optionPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return argument[optionPrefix.Length..].Trim().Trim('"');
+            }
+
+            if (string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase) &&
+                argumentIndex + 1 < args.Count)
+            {
+                return args[argumentIndex + 1].Trim().Trim('"');
+            }
+        }
+
+        throw new ArgumentException($"Required option is missing: {optionName}.");
     }
 
     private static bool IsRetryable(Exception exception)

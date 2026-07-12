@@ -91,6 +91,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-update-identity", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunUpdateIdentityDiagnostic(args);
+            return;
+        }
+
         using Mutex singleInstanceMutex = new(true, SingleInstanceMutexName, out bool ownsSingleInstance);
         if (!ownsSingleInstance)
         {
@@ -230,6 +236,40 @@ static class Program
             catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
             {
             }
+        }
+    }
+
+    private static void RunUpdateIdentityDiagnostic(IReadOnlyList<string> args)
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            const string expectedCommitPrefix = "--expected-current-commit=";
+            string expectedCommit = args.FirstOrDefault(argument =>
+                    argument.StartsWith(expectedCommitPrefix, StringComparison.OrdinalIgnoreCase))?
+                [expectedCommitPrefix.Length..]
+                .Trim()
+                .Trim('"') ?? string.Empty;
+            GitUpdateSettings settings = new GitUpdateSettingsStore(appPaths).Load();
+            bool identityIsReady = !string.IsNullOrWhiteSpace(expectedCommit) &&
+                settings.CurrentCommit.Equals(expectedCommit, StringComparison.OrdinalIgnoreCase) &&
+                settings.CurrentVersion.Contains(expectedCommit, StringComparison.OrdinalIgnoreCase);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Update identity check: " +
+                $"{(identityIsReady ? "ready" : "failed")}. CurrentVersion: {settings.CurrentVersion}. " +
+                $"CurrentCommit: {settings.CurrentCommit}. ExpectedCommit: {expectedCommit}.{Environment.NewLine}");
+            Environment.ExitCode = identityIsReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Update identity check", exception);
+            Environment.ExitCode = 1;
         }
     }
 
