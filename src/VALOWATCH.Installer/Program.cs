@@ -624,7 +624,20 @@ internal static class Program
 
     private static string GetDefaultInstallDirectory()
     {
-        return Path.Combine(GetValowatchWorkspaceRoot(), "app");
+        string workspaceRoot = GetValowatchWorkspaceRoot();
+        if (IsSourceRepositoryRoot(workspaceRoot))
+        {
+            // Keep the runnable installation inside the allowed workspace without placing it beside source files.
+            return Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app");
+        }
+
+        return Path.Combine(workspaceRoot, "app");
+    }
+
+    private static bool IsSourceRepositoryRoot(string workspaceRoot)
+    {
+        return File.Exists(Path.Combine(workspaceRoot, "VALOWATCH.slnx")) ||
+            Directory.Exists(Path.Combine(workspaceRoot, "src"));
     }
 
     private static string GetWorkspaceRootForInstallDirectory(string installDirectory)

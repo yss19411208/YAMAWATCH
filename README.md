@@ -41,6 +41,8 @@ release\VALOWATCH_Reinstall.exe 既存環境を一度削除して入れ直す復
 
 今回のように、友達のPCですでにVALOWATCHが入っているもののAlt+Tなどが動かない場合は、`VALOWATCH_Reinstall.exe` だけを渡します。実行すると旧app、自動起動、5分生存確認を解除してから再配置します。`installer\.env` と `data` は保持します。
 
+`VALOWATCH_Reinstall.exe` はダブルクリック直後に無表示で処理を開始します。インストール画面、確認画面、追加ボタン操作はありません。開発ソースが同居するこのPCでは、ソースを保護するため実行本体を `data\installed\VALOWATCH\app` へ自動配置します。
+
 再インストール結果は、個人フォルダーを置換した小さな診断ログとして `data\logs\installer-result.pending.log` に保留します。VALOWATCHがDiscordへ接続できた時に `DISCORD_TEXT_CHANNEL_ID` へ1回だけ添付し、送信成功後に削除します。通信できない場合は次回接続まで保持します。GitHub書き込みtokenや `.env` の内容は診断ログへ含めません。
 
 GitHub Releaseでは、更新専用の `VALOWATCH_Update.exe` と、tokenを含まない `VALOWATCH_App.exe` を別アセットとして公開します。更新専用EXEが本体をダウンロードしてSHA-256を検証し、既存の暗号化設定を残したまま置換します。
