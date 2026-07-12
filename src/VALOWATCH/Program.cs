@@ -377,11 +377,20 @@ static class Program
             bool forcedCheckIsDue = schedule.IsDue(startAtUtc.AddSeconds(1), force: true);
             schedule.Reset();
             bool resetCheckIsDue = schedule.IsDue(startAtUtc, force: false);
+            const string diagnosticCommit = "c9e5ec18b1afb440e1f758119f929c2146071c44";
+            bool informationalCommitDetected = string.Equals(
+                GitUpdateSettingsStore.ExtractCommitFromInformationalVersion($"0.1.2+{diagnosticCommit}"),
+                diagnosticCommit,
+                StringComparison.OrdinalIgnoreCase);
+            bool invalidInformationalCommitIgnored = string.IsNullOrEmpty(
+                GitUpdateSettingsStore.ExtractCommitFromInformationalVersion("0.1.2+not-a-commit"));
             bool scheduleIsReady = initialCheckIsDue &&
                 earlyCheckIsBlocked &&
                 fiveMinuteCheckIsDue &&
                 forcedCheckIsDue &&
-                resetCheckIsDue;
+                resetCheckIsDue &&
+                informationalCommitDetected &&
+                invalidInformationalCommitIgnored;
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
             File.AppendAllText(
@@ -389,7 +398,9 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] Update schedule check: {(scheduleIsReady ? "ready" : "failed")}. " +
                 $"IntervalMinutes: {GitUpdateSchedule.DefaultInterval.TotalMinutes:0}. " +
                 $"InitialDue: {initialCheckIsDue}. EarlyBlocked: {earlyCheckIsBlocked}. " +
-                $"FiveMinuteDue: {fiveMinuteCheckIsDue}. ForcedDue: {forcedCheckIsDue}. ResetDue: {resetCheckIsDue}." +
+                $"FiveMinuteDue: {fiveMinuteCheckIsDue}. ForcedDue: {forcedCheckIsDue}. ResetDue: {resetCheckIsDue}. " +
+                $"InformationalCommitDetected: {informationalCommitDetected}. " +
+                $"InvalidInformationalCommitIgnored: {invalidInformationalCommitIgnored}." +
                 Environment.NewLine);
             Environment.ExitCode = scheduleIsReady ? 0 : 1;
         }

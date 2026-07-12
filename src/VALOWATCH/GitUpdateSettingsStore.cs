@@ -15,6 +15,8 @@ public sealed class GitUpdateSettingsStore
     public GitUpdateSettings Load()
     {
         IReadOnlyDictionary<string, string> envValues = EnvSettingsLoader.Load(appPaths);
+        string applicationVersion = GetCurrentApplicationVersion();
+        string applicationCommit = ExtractCommitFromInformationalVersion(applicationVersion);
 
         bool enabled = !TryGetBoolean(
             envValues,
@@ -31,14 +33,17 @@ public sealed class GitUpdateSettingsStore
             ? configuredRepository
             : string.Empty;
 
-        string currentVersion = TryGetString(
+        string configuredVersion = TryGetString(
             envValues,
             out string configuredCurrentVersion,
             "VALOWATCH_UPDATE_CURRENT_VERSION",
             "VALOWATCH_VERSION",
             "CURRENT_VERSION")
             ? configuredCurrentVersion
-            : GetCurrentApplicationVersion();
+            : applicationVersion;
+        string currentVersion = string.IsNullOrWhiteSpace(applicationCommit)
+            ? configuredVersion
+            : applicationVersion;
 
         string gitHubToken = TryGetString(
             envValues,
@@ -56,13 +61,16 @@ public sealed class GitUpdateSettingsStore
             ? configuredBranch
             : "main";
 
-        string currentCommit = TryGetString(
+        string configuredCommit = TryGetString(
             envValues,
             out string configuredCurrentCommit,
             "VALOWATCH_UPDATE_CURRENT_COMMIT",
             "CURRENT_COMMIT")
             ? configuredCurrentCommit
             : string.Empty;
+        string currentCommit = string.IsNullOrWhiteSpace(applicationCommit)
+            ? configuredCommit
+            : applicationCommit;
 
         return new GitUpdateSettings(enabled, repository, currentVersion, gitHubToken, branch, currentCommit);
     }
@@ -122,6 +130,29 @@ public sealed class GitUpdateSettingsStore
         }
 
         return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+    }
+
+    internal static string ExtractCommitFromInformationalVersion(string informationalVersion)
+    {
+        int metadataSeparatorIndex = informationalVersion.IndexOf('+');
+        if (metadataSeparatorIndex < 0 || metadataSeparatorIndex >= informationalVersion.Length - 1)
+        {
+            return string.Empty;
+        }
+
+        foreach (string metadataPart in informationalVersion[(metadataSeparatorIndex + 1)..]
+            .Split(['.', '-'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (metadataPart.Length is < 7 or > 40 ||
+                !metadataPart.All(character => Uri.IsHexDigit(character)))
+            {
+                continue;
+            }
+
+            return metadataPart;
+        }
+
+        return string.Empty;
     }
 
     private static bool TryGetString(

@@ -30,6 +30,8 @@
 - WebView2の通信失敗時だけ次回表示で再試行する。
 - GitHub更新を `VALOWATCH_Update.exe` へ分離し、本体は `VALOWATCH_App.exe` として別配布する。
 - 更新失敗時は既存の `VALOWATCH.exe` を再起動する。
+- 更新判定ではAssembly informational versionのcommitを外部`.env`より優先する。
+- 更新用EXEでも設置済み本体のSHA-256を比較し、同一Releaseの再配置を止める。
 - 途中ダウンロードを保持し、再試行時にHTTP Rangeで再開する。
 
 ## 自動検証結果
@@ -53,6 +55,7 @@
 | マイク＋LINEミックス | 成功 |
 | Discord音声DLL | 成功 |
 | 5分更新周期 | 成功 |
+| 古い`.env`より実行中EXEのcommitを優先 | 成功 |
 | 暗号化設定復元 | 成功 |
 | 更新失敗時の旧本体再起動 | 成功 |
 | 旧appのクリーン再インストール | 成功 |

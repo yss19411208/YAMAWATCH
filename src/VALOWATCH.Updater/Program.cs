@@ -55,6 +55,14 @@ internal static class Program
             "latest release lookup",
             cancellationToken => GetLatestAppAssetAsync(httpClient, cancellationToken)).ConfigureAwait(false);
 
+        if (InstalledAppMatchesRelease(installDirectory, appAsset.ExpectedSha256, out string installedAppStatus))
+        {
+            WriteLog($"Dedicated update skipped because the installed app is already current. {installedAppStatus}");
+            await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            RestartInstalledAppIfPresent(installDirectory);
+            return 0;
+        }
+
         string workspaceRoot = Directory.GetParent(installDirectory)?.FullName
             ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
         string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "dedicated");
@@ -329,6 +337,39 @@ internal static class Program
         throw new InvalidOperationException(
             $"{operationName} failed after {MaximumAttempts} attempts.",
             lastException);
+    }
+
+    private static bool InstalledAppMatchesRelease(
+        string installDirectory,
+        string expectedSha256,
+        out string status)
+    {
+        string installedAppPath = Path.Combine(installDirectory, InstalledAppName);
+        if (!File.Exists(installedAppPath))
+        {
+            status = "Installed app is missing.";
+            return false;
+        }
+
+        try
+        {
+            using FileStream appStream = new(
+                installedAppPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            string installedSha256 = Convert.ToHexString(SHA256.HashData(appStream));
+            bool matches = string.Equals(installedSha256, expectedSha256, StringComparison.OrdinalIgnoreCase);
+            status = matches
+                ? $"Installed SHA-256 matches release: {installedSha256}."
+                : $"Installed SHA-256 differs from release. Installed: {installedSha256}. Expected: {expectedSha256}.";
+            return matches;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            status = $"Installed app SHA-256 could not be read: {exception.Message}";
+            return false;
+        }
     }
 
     private static bool IsRetryable(Exception exception)

@@ -126,6 +126,8 @@ Microsoft は `Run` レジストリキーのプログラムがユーザーログ
 - GitHub Release digestがある場合のSHA-256照合
 - スケジュール、GitHub接続、更新EXE取得を分離した診断コマンド
 - silent installer による無人更新
+- Assembly informational versionのcommitを優先した現在版判定
+- 設置済み本体とReleaseのSHA-256一致時の再インストール抑止
 
 `.env` のキー:
 
