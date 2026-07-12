@@ -12,6 +12,8 @@ internal static class Program
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string EmbeddedFfmpegResourcePrefix = "Tools/ffmpeg/";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
+    private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const int KeepAliveIntervalMinutes = 5;
     private static readonly (string ResourceName, string FileName)[] NativeDependencyResources =
     [
         ("Native/libdave.dll", "libdave.dll"),
@@ -1023,6 +1025,63 @@ internal static class Program
 
         registryKey.SetValue(RegistryValueName, $"\"{installedExecutablePath}\"");
         WriteStartupCommand(installedExecutablePath);
+        TryRegisterKeepAliveTask(installedExecutablePath);
+    }
+
+    private static void TryRegisterKeepAliveTask(string installedExecutablePath)
+    {
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            processStartInfo.ArgumentList.Add("/Create");
+            processStartInfo.ArgumentList.Add("/TN");
+            processStartInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+            processStartInfo.ArgumentList.Add("/TR");
+            processStartInfo.ArgumentList.Add($"\"{installedExecutablePath}\" --keepalive-probe");
+            processStartInfo.ArgumentList.Add("/SC");
+            processStartInfo.ArgumentList.Add("MINUTE");
+            processStartInfo.ArgumentList.Add("/MO");
+            processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            processStartInfo.ArgumentList.Add("/RL");
+            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("/F");
+
+            using Process taskSchedulerProcess = Process.Start(processStartInfo)
+                ?? throw new InvalidOperationException("Windows Task Scheduler could not be started.");
+            Task<string> outputTask = taskSchedulerProcess.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = taskSchedulerProcess.StandardError.ReadToEndAsync();
+            if (!taskSchedulerProcess.WaitForExit(15000))
+            {
+                taskSchedulerProcess.Kill(entireProcessTree: true);
+                throw new TimeoutException("Windows Task Scheduler registration timed out.");
+            }
+
+            string output = outputTask.GetAwaiter().GetResult().Trim();
+            string error = errorTask.GetAwaiter().GetResult().Trim();
+            if (taskSchedulerProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Windows Task Scheduler registration failed with exit code {taskSchedulerProcess.ExitCode}. {error}");
+            }
+
+            WriteInstallerLog(
+                $"Keepalive task registered. Name: {KeepAliveScheduledTaskName}. " +
+                $"IntervalMinutes: {KeepAliveIntervalMinutes}. Output: {output}");
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            WriteInstallerLog(
+                "Keepalive task registration failed. Registry and Startup-folder launch remain enabled.",
+                exception);
+        }
     }
 
     private static void WriteStartupCommand(string installedExecutablePath)

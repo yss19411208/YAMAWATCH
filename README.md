@@ -13,7 +13,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 - オーバーレイ表示時は VALORANT のフォーカスを奪わないように、非アクティブ表示を使います。
 - オーバーレイ全体を少し透過させています。
 - VALORANT ウィンドウの位置が取れる場合は、その上に寄せてオーバーレイを出します。
-- インストーラーを実行すると `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に本体を配置し、ユーザー単位の Windows スタートアップに登録します。
+- インストーラーを実行すると `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に本体を配置し、ユーザー単位の Windows スタートアップと5分間隔の生存確認タスクに登録します。
 - Discord bot 設定が有効な場合、VALORANT 起動検知で指定 VC に入り、物理マイク入力のリレーを開始します。指定テキストチャンネルには起動、使用マイク機種、更新完了を投稿します。
 - VALORANT 終了検知後、録音WAVをMP3へ変換し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
 - 動画録画設定を明示的に有効化した場合、VALORANT 起動中の画面MP4とカメラMP4を保存し、Discordの指定テキストチャンネルへ通知抑制付きで添付します。
@@ -31,7 +31,7 @@ VALOWATCH は、VALORANT 起動中に `Alt + T` で strats.gg のラインナッ
 
 ## 全自動化される範囲
 
-インストーラー実行後、VALOWATCH 本体は `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に配置され、すぐ起動します。次回以降の Windows ログオンでも起動するように、`Run` レジストリとスタートアップフォルダの `VALOWATCH.cmd` の両方に登録します。
+インストーラー実行後、VALOWATCH 本体は `C:\Users\p159yusuke\Documents\VALOWATCH\app\VALOWATCH.exe` に配置され、すぐ起動します。次回以降の Windows ログオンでも起動するように、`Run` レジストリとスタートアップフォルダの `VALOWATCH.cmd` の両方に登録します。さらに `VALOWATCH KeepAlive` タスクが5分ごとに生存確認し、停止している場合だけ本体を再起動します。
 
 外部オーバーレイ基盤は使いません。VALOWATCH 単体の Windows 常駐アプリとして動作します。
 

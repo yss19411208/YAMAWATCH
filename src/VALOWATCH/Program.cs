@@ -7,9 +7,17 @@ namespace VALOWATCH;
 
 static class Program
 {
+    private const string SingleInstanceMutexName = "Local\\VALOWATCH.SingleInstance";
+
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Any(argument => string.Equals(argument, "--keepalive-probe", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunKeepAliveProbe();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-schedule", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateScheduleDiagnostic();
@@ -58,7 +66,7 @@ static class Program
             return;
         }
 
-        using Mutex singleInstanceMutex = new(true, "Local\\VALOWATCH.SingleInstance", out bool ownsSingleInstance);
+        using Mutex singleInstanceMutex = new(true, SingleInstanceMutexName, out bool ownsSingleInstance);
         if (!ownsSingleInstance)
         {
             return;
@@ -84,6 +92,37 @@ static class Program
             disableDiscordAutomation));
 
         GC.KeepAlive(singleInstanceMutex);
+    }
+
+    private static void RunKeepAliveProbe()
+    {
+        try
+        {
+            using Mutex existingInstanceMutex = Mutex.OpenExisting(SingleInstanceMutexName);
+            return;
+        }
+        catch (WaitHandleCannotBeOpenedException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // An inaccessible mutex still proves another VALOWATCH instance owns it.
+            return;
+        }
+
+        string executablePath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("VALOWATCH executable path is unavailable.");
+        ProcessStartInfo processStartInfo = new()
+        {
+            FileName = executablePath,
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(executablePath)
+        };
+
+        if (Process.Start(processStartInfo) is null)
+        {
+            throw new InvalidOperationException("VALOWATCH keepalive could not restart the application.");
+        }
     }
 
     private static void RunUpdateScheduleDiagnostic()
