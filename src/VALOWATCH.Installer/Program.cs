@@ -429,6 +429,7 @@ internal static class Program
         ValidateInstallDirectorySelection(installDirectory);
 
         string installedExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
+        bool replacesExistingInstallation = File.Exists(installedExecutablePath);
 
         progress.Report(new InstallProgress(8, "起動中の VALOWATCH をすべて停止しています。"));
         StopRunningInstalledApp(installedExecutablePath, stopAllValowatchProcesses);
@@ -453,7 +454,7 @@ internal static class Program
             progress.Report(new InstallProgress(92, "Windows 起動時の自動起動登録をスキップしています。"));
         }
 
-        if (markUpdateCompleted)
+        if (markUpdateCompleted || replacesExistingInstallation)
         {
             WriteUpdateCompletedMarker();
         }
