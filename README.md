@@ -36,7 +36,10 @@ VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord 
 ```text
 release\VALOWATCH_Complete.exe  新規導入用。Discord設定を埋め込んだ完全インストーラー
 release\VALOWATCH_Update.exe    既存環境用。GitHub更新だけを行う専用プログラム
+release\VALOWATCH_Reinstall.exe 既存環境を一度削除して入れ直す復旧用
 ```
+
+今回のように、友達のPCですでにVALOWATCHが入っているもののAlt+Tなどが動かない場合は、`VALOWATCH_Reinstall.exe` だけを渡します。実行すると旧app、自動起動、5分生存確認を解除してから再配置します。`installer\.env` と `data` は保持します。
 
 GitHub Releaseでは、更新専用の `VALOWATCH_Update.exe` と、tokenを含まない `VALOWATCH_App.exe` を別アセットとして公開します。更新専用EXEが本体をダウンロードしてSHA-256を検証し、既存の暗号化設定を残したまま置換します。
 

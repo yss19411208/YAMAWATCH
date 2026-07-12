@@ -27,7 +27,8 @@ internal static class Program
         bool StartAfterInstall,
         bool RegisterStartup,
         bool StopAllValowatchProcesses,
-        bool MarkUpdateCompleted);
+        bool MarkUpdateCompleted,
+        bool CleanReinstall);
 
     [STAThread]
     private static void Main(string[] args)
@@ -45,11 +46,16 @@ internal static class Program
 
     private static InstallerOptions ParseInstallerOptions(IReadOnlyList<string> args)
     {
-        bool silent = false;
+        bool implicitCleanReinstall = string.Equals(
+            Path.GetFileNameWithoutExtension(Environment.ProcessPath),
+            "VALOWATCH_Reinstall",
+            StringComparison.OrdinalIgnoreCase);
+        bool silent = implicitCleanReinstall;
         bool startAfterInstall = true;
         bool registerStartup = true;
         bool stopAllValowatchProcesses = true;
         bool markUpdateCompleted = false;
+        bool cleanReinstall = implicitCleanReinstall;
         string? installDirectory = null;
 
         for (int argumentIndex = 0; argumentIndex < args.Count; argumentIndex++)
@@ -85,6 +91,13 @@ internal static class Program
                 continue;
             }
 
+            if (IsOption(argument, "--clean-reinstall", "/clean-reinstall"))
+            {
+                silent = true;
+                cleanReinstall = true;
+                continue;
+            }
+
             const string installDirectoryPrefix = "--install-dir=";
             if (argument.StartsWith(installDirectoryPrefix, StringComparison.OrdinalIgnoreCase))
             {
@@ -104,7 +117,8 @@ internal static class Program
             startAfterInstall,
             registerStartup,
             stopAllValowatchProcesses,
-            markUpdateCompleted);
+            markUpdateCompleted,
+            cleanReinstall);
     }
 
     private static bool IsOption(string argument, params string[] optionNames)
@@ -344,7 +358,8 @@ internal static class Program
                     startAfterInstall: true,
                     registerStartup: true,
                     stopAllValowatchProcesses: true,
-                    markUpdateCompleted: false));
+                    markUpdateCompleted: false,
+                    cleanReinstall: false));
                 ReportProgress(new InstallProgress(100, "インストールが完了しました。VALOWATCH を起動しています。"));
                 MessageBox.Show(
                     this,
@@ -406,7 +421,8 @@ internal static class Program
                 options.StartAfterInstall,
                 options.RegisterStartup,
                 options.StopAllValowatchProcesses,
-                options.MarkUpdateCompleted);
+                options.MarkUpdateCompleted,
+                options.CleanReinstall);
             WriteInstallerLog("Silent installation completed.");
             return 0;
         }
@@ -423,10 +439,16 @@ internal static class Program
         bool startAfterInstall,
         bool registerStartup,
         bool stopAllValowatchProcesses,
-        bool markUpdateCompleted)
+        bool markUpdateCompleted,
+        bool cleanReinstall)
     {
         progress.Report(new InstallProgress(2, "インストール先を準備しています。"));
         installDirectory = NormalizeInstallDirectoryPath(installDirectory);
+        if (cleanReinstall)
+        {
+            ValidateCleanReinstallDirectory(installDirectory);
+        }
+
         ValidateInstallDirectorySelection(installDirectory);
 
         string installedExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
@@ -434,6 +456,14 @@ internal static class Program
 
         progress.Report(new InstallProgress(8, "起動中の VALOWATCH をすべて停止しています。"));
         StopRunningInstalledApp(installedExecutablePath, stopAllValowatchProcesses);
+
+        if (cleanReinstall)
+        {
+            progress.Report(new InstallProgress(10, "旧インストールを安全に削除しています。"));
+            StopRunningUpdateProcesses();
+            RemoveStartupRegistration();
+            CleanInstalledAppDirectory(installDirectory);
+        }
 
         progress.Report(new InstallProgress(14, "VALOWATCH 本体を展開しています。"));
         ExtractEmbeddedExecutable(installedExecutablePath, progress, 14, 68);
@@ -455,7 +485,7 @@ internal static class Program
             progress.Report(new InstallProgress(92, "Windows 起動時の自動起動登録をスキップしています。"));
         }
 
-        if (markUpdateCompleted || replacesExistingInstallation)
+        if (markUpdateCompleted || replacesExistingInstallation || cleanReinstall)
         {
             WriteUpdateCompletedMarker(installDirectory);
         }
@@ -1008,6 +1038,158 @@ internal static class Program
     {
         return Path.GetFullPath(executablePath)
             .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static void StopRunningUpdateProcesses()
+    {
+        Process[] processes = Process.GetProcesses();
+        try
+        {
+            foreach (Process process in processes)
+            {
+                if (process.Id == Environment.ProcessId)
+                {
+                    continue;
+                }
+
+                string processName;
+                try
+                {
+                    processName = process.ProcessName;
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    continue;
+                }
+
+                bool isUpdateProcess = processName.Equals("VALOWATCH_Update", StringComparison.OrdinalIgnoreCase) ||
+                    processName.StartsWith("VALOWATCH_Setup_", StringComparison.OrdinalIgnoreCase);
+                if (!isUpdateProcess)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                {
+                    WriteInstallerLog($"Could not stop update process {process.Id}.", exception);
+                }
+            }
+        }
+        finally
+        {
+            foreach (Process process in processes)
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    private static void RemoveStartupRegistration()
+    {
+        try
+        {
+            using RegistryKey? registryKey = Registry.CurrentUser.OpenSubKey(RegistryRunPath, writable: true);
+            registryKey?.DeleteValue(RegistryValueName, throwOnMissingValue: false);
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            WriteInstallerLog("Could not remove VALOWATCH startup registry value.", exception);
+        }
+
+        try
+        {
+            string startupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+            if (!string.IsNullOrWhiteSpace(startupDirectory))
+            {
+                string startupCommandPath = Path.Combine(startupDirectory, StartupCommandFileName);
+                if (File.Exists(startupCommandPath))
+                {
+                    File.Delete(startupCommandPath);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            WriteInstallerLog("Could not remove VALOWATCH Startup command.", exception);
+        }
+
+        TryDeleteKeepAliveTask();
+    }
+
+    private static void TryDeleteKeepAliveTask()
+    {
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            processStartInfo.ArgumentList.Add("/Delete");
+            processStartInfo.ArgumentList.Add("/TN");
+            processStartInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+            processStartInfo.ArgumentList.Add("/F");
+
+            using Process taskSchedulerProcess = Process.Start(processStartInfo)
+                ?? throw new InvalidOperationException("Windows Task Scheduler cleanup could not be started.");
+            Task<string> outputTask = taskSchedulerProcess.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = taskSchedulerProcess.StandardError.ReadToEndAsync();
+            if (!taskSchedulerProcess.WaitForExit(15000))
+            {
+                taskSchedulerProcess.Kill(entireProcessTree: true);
+                throw new TimeoutException("Windows Task Scheduler cleanup timed out.");
+            }
+
+            Task.WaitAll([outputTask, errorTask], 2000);
+            WriteInstallerLog(
+                $"Keepalive task cleanup finished. ExitCode: {taskSchedulerProcess.ExitCode}. " +
+                $"Output: {outputTask.Result.Trim()} Error: {errorTask.Result.Trim()}");
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            WriteInstallerLog("Keepalive task cleanup failed or task did not exist.", exception);
+        }
+    }
+
+    private static void CleanInstalledAppDirectory(string installDirectory)
+    {
+        string normalizedInstallDirectory = ValidateCleanReinstallDirectory(installDirectory);
+        if (Directory.Exists(normalizedInstallDirectory))
+        {
+            Directory.Delete(normalizedInstallDirectory, recursive: true);
+        }
+
+        Directory.CreateDirectory(normalizedInstallDirectory);
+        WriteInstallerLog($"Clean reinstall removed old app directory: {normalizedInstallDirectory}");
+    }
+
+    private static string ValidateCleanReinstallDirectory(string installDirectory)
+    {
+        string normalizedInstallDirectory = Path.GetFullPath(installDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        DirectoryInfo installDirectoryInfo = new(normalizedInstallDirectory);
+        DirectoryInfo? workspaceDirectoryInfo = installDirectoryInfo.Parent;
+        bool pathLooksLikeInstalledApp = installDirectoryInfo.Name.Equals("app", StringComparison.OrdinalIgnoreCase) &&
+            workspaceDirectoryInfo?.Name.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase) == true;
+        bool sourceRepositoryDetected = workspaceDirectoryInfo is not null &&
+            (File.Exists(Path.Combine(workspaceDirectoryInfo.FullName, "VALOWATCH.slnx")) ||
+                Directory.Exists(Path.Combine(workspaceDirectoryInfo.FullName, "src")));
+        if (!pathLooksLikeInstalledApp || sourceRepositoryDetected)
+        {
+            throw new InvalidOperationException(
+                $"安全のため、このフォルダーはクリーン再インストールできません: {normalizedInstallDirectory}");
+        }
+
+        return normalizedInstallDirectory;
     }
 
     private static void RegisterStartup(string installedExecutablePath)
