@@ -24,7 +24,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan LineLoopbackBufferDuration = TimeSpan.FromMilliseconds(1600);
     private static readonly TimeSpan RelayFrameDuration = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan RelayShutdownTimeout = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
@@ -1598,28 +1598,30 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private void MaybeWriteAudioStats()
     {
         DateTimeOffset now = DateTimeOffset.Now;
-        string statsLine;
+        string? statsLine = null;
 
         lock (audioStatsLock)
         {
-            if (now - lastAudioStatsLogTime < AudioStatsLogInterval)
+            if (now - lastAudioStatsLogTime >= AudioStatsLogInterval)
             {
-                return;
+                lastAudioStatsLogTime = now;
+                statsLine =
+                    "Audio stats. " +
+                    $"CapturedCallbacks: {capturedCallbackCount}. CapturedBytes: {capturedByteCount}. " +
+                    $"CapturedAudibleCallbacks: {capturedAudibleCallbackCount}. CapturedPeak: {capturedPeak:0.0000}. " +
+                    $"CandidateAttemptCallbacks: {microphoneAttemptCallbackCount}. " +
+                    $"CandidateAttemptPeak: {microphoneAttemptPeak:0.0000}. CandidateLocked: {microphoneSignalLocked}. " +
+                    $"WrittenFrames: {writtenFrameCount}. WrittenAudibleFrames: {writtenAudibleFrameCount}. " +
+                    $"WrittenSilenceFrames: {writtenSilenceFrameCount}. WrittenShortFrames: {writtenShortFrameCount}. " +
+                    $"WrittenPeak: {writtenPeak:0.0000}.";
             }
-
-            lastAudioStatsLogTime = now;
-            statsLine =
-                "Audio stats. " +
-                $"CapturedCallbacks: {capturedCallbackCount}. CapturedBytes: {capturedByteCount}. " +
-                $"CapturedAudibleCallbacks: {capturedAudibleCallbackCount}. CapturedPeak: {capturedPeak:0.0000}. " +
-                $"CandidateAttemptCallbacks: {microphoneAttemptCallbackCount}. " +
-                $"CandidateAttemptPeak: {microphoneAttemptPeak:0.0000}. CandidateLocked: {microphoneSignalLocked}. " +
-                $"WrittenFrames: {writtenFrameCount}. WrittenAudibleFrames: {writtenAudibleFrameCount}. " +
-                $"WrittenSilenceFrames: {writtenSilenceFrameCount}. WrittenShortFrames: {writtenShortFrameCount}. " +
-                $"WrittenPeak: {writtenPeak:0.0000}.";
         }
 
-        WriteLog(statsLine);
+        if (statsLine is not null)
+        {
+            WriteLog(statsLine);
+        }
+
         MaybeSendDiscordAudioDiagnostic();
     }
 
