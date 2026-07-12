@@ -26,7 +26,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
-    private static readonly TimeSpan MicrophoneSilentCandidateDuration = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan MicrophoneRecentActivityDuration = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan MicrophoneSilentCandidateDuration = TimeSpan.FromSeconds(30);
     private const float MicrophoneActivityPeakThreshold = 0.0002F;
     private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(20);
@@ -39,6 +40,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly object stateLock = new();
     private readonly object audioStatsLock = new();
     private readonly object microphoneCaptureLock = new();
+    private readonly SemaphoreSlim lifecycleSemaphore = new(1, 1);
 
     private DiscordSocketClient? discordClient;
     private IAudioClient? audioClient;
@@ -59,7 +61,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private float microphoneAttemptPeak;
     private DateTimeOffset microphoneAttemptStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastMicrophoneCallbackAt = DateTimeOffset.MinValue;
+    private DateTimeOffset lastMicrophoneActivityAt = DateTimeOffset.MinValue;
     private bool microphoneSignalLocked;
+    private int discordRecoveryScheduled;
     private bool stopRequested;
     private long capturedCallbackCount;
     private long capturedByteCount;
@@ -95,6 +99,19 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     public bool IsRunning { get; private set; }
 
     public async Task StartForValorantAsync()
+    {
+        await lifecycleSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await StartForValorantCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            lifecycleSemaphore.Release();
+        }
+    }
+
+    private async Task StartForValorantCoreAsync()
     {
         lock (stateLock)
         {
@@ -203,15 +220,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 catch (Exception audioException)
                 {
                     WriteLog("Discord voice channel joined, but microphone audio relay could not start.", audioException);
-                    DisposeAudioObjects();
-                    lock (stateLock)
-                    {
-                        IsRunning = true;
-                        StatusText = FormatRunningStatus(
-                            "Discord joined VC, audio failed",
-                            audioException.Message);
-                    }
-
+                    await StopCoreAsync().ConfigureAwait(false);
+                    StatusText = FormatRunningStatus("Discord audio recovery pending", audioException.Message);
                     return;
                 }
             }
@@ -225,12 +235,25 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         catch (Exception exception)
         {
             WriteLog("Discord startup failed. Stopping Discord client before retry.", exception);
-            await StopAsync().ConfigureAwait(false);
+            await StopCoreAsync().ConfigureAwait(false);
             StatusText = $"Discord failed: {exception.Message}";
         }
     }
 
     public async Task StopAsync()
+    {
+        await lifecycleSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await StopCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            lifecycleSemaphore.Release();
+        }
+    }
+
+    private async Task StopCoreAsync()
     {
         CancellationTokenSource? cancellationTokenSource;
         Task? activeRelayTask;
@@ -532,15 +555,61 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private Task OnDiscordDisconnectedAsync(Exception exception)
     {
         WriteLog("Discord gateway disconnected.", exception);
+        bool shouldRecover = false;
         lock (stateLock)
         {
             if (!stopRequested && IsRunning)
             {
                 StatusText = $"Discord reconnecting: {exception.Message}";
+                shouldRecover = true;
             }
         }
 
+        if (shouldRecover)
+        {
+            ScheduleDiscordRecovery("Discord gateway disconnected", exception);
+        }
+
         return Task.CompletedTask;
+    }
+
+    private void ScheduleDiscordRecovery(string reason, Exception? exception = null)
+    {
+        lock (stateLock)
+        {
+            if (stopRequested || !IsRunning)
+            {
+                return;
+            }
+        }
+
+        if (Interlocked.Exchange(ref discordRecoveryScheduled, 1) != 0)
+        {
+            return;
+        }
+
+        WriteLog($"Discord recovery scheduled. Reason: {reason}.", exception);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await StopAsync().ConfigureAwait(false);
+                StatusText = $"Discord recovery pending: {reason}";
+            }
+            catch (Exception recoveryException)
+            {
+                WriteLog("Discord recovery cleanup failed.", recoveryException);
+                lock (stateLock)
+                {
+                    IsRunning = false;
+                    StatusText = $"Discord recovery failed: {recoveryException.Message}";
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref discordRecoveryScheduled, 0);
+            }
+        });
     }
 
     private static string FormatRunningStatus(string baseStatus, string? audioFailure = null)
@@ -636,11 +705,27 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             await Task.Delay(MicrophoneHealthCheckInterval, cancellationToken).ConfigureAwait(false);
 
+            IAudioClient? activeAudioClient = audioClient;
+            bool relayIsMarkedRunning;
+            lock (stateLock)
+            {
+                relayIsMarkedRunning = IsRunning && !stopRequested;
+            }
+
+            if (relayIsMarkedRunning &&
+                activeAudioClient is not null &&
+                activeAudioClient.ConnectionState != ConnectionState.Connected)
+            {
+                ScheduleDiscordRecovery(
+                    $"Discord voice connection state changed to {activeAudioClient.ConnectionState}");
+                return;
+            }
+
             DateTimeOffset now = DateTimeOffset.Now;
             bool captureFaulted;
             bool hasTimedOutCallbacks;
             bool shouldRotateSilentCandidate;
-            bool signalLocked;
+            bool hasRecentMicrophoneActivity;
 
             lock (audioStatsLock)
             {
@@ -650,10 +735,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     (microphoneAttemptCallbackCount == 0 ||
                         now - lastMicrophoneCallbackAt >= MicrophoneCallbackTimeout);
                 shouldRotateSilentCandidate =
-                    !microphoneSignalLocked &&
-                    microphoneCandidates.Count > 1 &&
-                    now - microphoneAttemptStartedAt >= MicrophoneSilentCandidateDuration;
-                signalLocked = microphoneSignalLocked;
+                    now - lastMicrophoneActivityAt >= MicrophoneSilentCandidateDuration;
+                hasRecentMicrophoneActivity =
+                    now - lastMicrophoneActivityAt < MicrophoneRecentActivityDuration;
             }
 
             if (captureFaulted || hasTimedOutCallbacks)
@@ -668,14 +752,25 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 continue;
             }
 
-            if (!signalLocked && TryFindActiveMicrophoneCandidate(out int activeCandidateIndex) &&
-                activeCandidateIndex != currentMicrophoneCandidateIndex)
+            if (!hasRecentMicrophoneActivity && TryFindActiveMicrophoneCandidate(out int activeCandidateIndex))
             {
-                TrySwitchMicrophoneCapture(
-                    settings,
-                    $"another physical microphone reported input activity (candidate {activeCandidateIndex + 1})",
-                    includeCurrentCandidate: false,
-                    requestedCandidateIndex: activeCandidateIndex);
+                if (activeCandidateIndex != currentMicrophoneCandidateIndex)
+                {
+                    TrySwitchMicrophoneCapture(
+                        settings,
+                        $"another physical microphone reported input activity (candidate {activeCandidateIndex + 1})",
+                        includeCurrentCandidate: false,
+                        requestedCandidateIndex: activeCandidateIndex);
+                }
+                else
+                {
+                    TrySwitchMicrophoneCapture(
+                        settings,
+                        "the selected microphone endpoint had activity but capture remained silent",
+                        includeCurrentCandidate: true,
+                        requestedCandidateIndex: activeCandidateIndex);
+                }
+
                 continue;
             }
 
@@ -683,8 +778,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             {
                 TrySwitchMicrophoneCapture(
                     settings,
-                    "no microphone activity detected during candidate probe",
-                    includeCurrentCandidate: false);
+                    "no microphone activity detected for 30 seconds",
+                    includeCurrentCandidate: microphoneCandidates.Count == 1);
             }
         }
     }
@@ -895,21 +990,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         Exception relayException = completedRelayTask.Exception.GetBaseException();
-        WriteLog("Discord audio relay failed. Keeping the bot in VC without audio.", relayException);
+        WriteLog("Discord audio relay failed. Restarting the Discord voice connection.", relayException);
         QueueDiscordStatusMessage(
             "VALOWATCH 音声リレー停止\n" +
             relayException.Message +
-            "\nVCには残りますが、音声送信は停止しました。");
-        relayCancellationTokenSource?.Cancel();
-        DisposeAudioObjects();
-
-        lock (stateLock)
-        {
-            if (IsRunning && !stopRequested)
-            {
-                StatusText = $"Discord joined VC, audio stopped: {relayException.Message}";
-            }
-        }
+            "\nDiscord音声接続を自動的に再接続します。");
+        ScheduleDiscordRecovery("Discord audio relay stopped", relayException);
     }
 
     private async Task WaitForMicrophoneStartupBufferAsync(CancellationToken cancellationToken)
@@ -1253,6 +1339,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         microphoneAttemptPeak = 0F;
         microphoneAttemptStartedAt = DateTimeOffset.Now;
         lastMicrophoneCallbackAt = DateTimeOffset.MinValue;
+        lastMicrophoneActivityAt = DateTimeOffset.Now;
         microphoneSignalLocked = false;
     }
 
@@ -1272,6 +1359,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             lastMicrophoneCallbackAt = DateTimeOffset.Now;
             if (peak >= MicrophoneActivityPeakThreshold)
             {
+                lastMicrophoneActivityAt = DateTimeOffset.Now;
                 if (!microphoneSignalLocked &&
                     IsRunning &&
                     !string.Equals(

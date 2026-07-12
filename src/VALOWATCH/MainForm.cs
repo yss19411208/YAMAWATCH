@@ -10,7 +10,7 @@ public sealed class MainForm : Form
     private const string NotConnectedText = "Not connected";
     private const string DetectedText = "VALORANT detected";
     private const string NotDetectedText = "VALORANT not detected";
-    private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
 
     private readonly AppPaths appPaths;
