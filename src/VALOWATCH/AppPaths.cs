@@ -111,10 +111,12 @@ public sealed class AppPaths
         string solutionPath = Path.Combine(directoryPath, "VALOWATCH.slnx");
         string installerDirectory = Path.Combine(directoryPath, "installer");
         string sourceDirectory = Path.Combine(directoryPath, "src");
+        string appDirectory = Path.Combine(directoryPath, "app");
         string directoryName = Path.GetFileName(directoryPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
 
         return File.Exists(solutionPath) ||
             (Directory.Exists(installerDirectory) && Directory.Exists(sourceDirectory)) ||
+            (Directory.Exists(installerDirectory) && Directory.Exists(appDirectory)) ||
             (directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase) && Directory.Exists(installerDirectory));
     }
 }

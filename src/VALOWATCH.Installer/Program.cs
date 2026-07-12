@@ -443,7 +443,7 @@ internal static class Program
         RemoveObsoleteCaptureTools(installDirectory);
 
         progress.Report(new InstallProgress(70, "Discord bot 設定を配置しています。"));
-        EnsureEnvFiles();
+        EnsureEnvFiles(installDirectory);
 
         if (registerStartup)
         {
@@ -457,7 +457,7 @@ internal static class Program
 
         if (markUpdateCompleted || replacesExistingInstallation)
         {
-            WriteUpdateCompletedMarker();
+            WriteUpdateCompletedMarker(installDirectory);
         }
 
         if (startAfterInstall)
@@ -471,9 +471,9 @@ internal static class Program
         }
     }
 
-    private static void WriteUpdateCompletedMarker()
+    private static void WriteUpdateCompletedMarker(string installDirectory)
     {
-        string dataDirectory = Path.Combine(GetValowatchWorkspaceRoot(), "data");
+        string dataDirectory = Path.Combine(GetWorkspaceRootForInstallDirectory(installDirectory), "data");
         Directory.CreateDirectory(dataDirectory);
         string markerPath = Path.Combine(dataDirectory, "update-completed.pending");
         File.WriteAllText(markerPath, DateTimeOffset.UtcNow.ToString("O"), Encoding.UTF8);
@@ -483,6 +483,12 @@ internal static class Program
     private static string GetDefaultInstallDirectory()
     {
         return Path.Combine(GetValowatchWorkspaceRoot(), "app");
+    }
+
+    private static string GetWorkspaceRootForInstallDirectory(string installDirectory)
+    {
+        return Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("インストール先の親フォルダーを取得できません。");
     }
 
     private static string GetValowatchWorkspaceRoot()
@@ -723,9 +729,9 @@ internal static class Program
         }
     }
 
-    private static void EnsureEnvFiles()
+    private static void EnsureEnvFiles(string installDirectory)
     {
-        string workspaceRoot = GetValowatchWorkspaceRoot();
+        string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
         string configDirectory = Path.Combine(workspaceRoot, "config");
         string installerEnvDirectory = Path.Combine(workspaceRoot, "installer");
 
