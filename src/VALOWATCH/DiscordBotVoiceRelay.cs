@@ -1693,13 +1693,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             WriteLog(statsLine);
         }
 
-        MaybeSendDiscordAudioDiagnostic();
+        MaybeRecordDiscordAudioDiagnostic();
     }
 
-    private void MaybeSendDiscordAudioDiagnostic()
+    private void MaybeRecordDiscordAudioDiagnostic()
     {
-        string diagnosticMessage;
-
         lock (audioStatsLock)
         {
             DateTimeOffset now = DateTimeOffset.Now;
@@ -1713,40 +1711,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             audioDiagnosticMessageSent = true;
             lastAudioDiagnosticMessageSentAtUtc = nowUtc;
-            string diagnosis;
-            if (capturedPeak < AudiblePeakThreshold)
-            {
-                diagnosis = "マイク入力が検出できません。Windowsのマイク権限、既定の入力デバイス、または DISCORD_MIC_DEVICE_NAME を確認してください。";
-            }
-            else if (writtenPeak < AudiblePeakThreshold)
-            {
-                diagnosis = "マイク入力はありますが、Discordへ送る直前の音声が無音に近いです。アプリ側の音声変換設定を確認してください。";
-            }
-            else
-            {
-                diagnosis = "アプリ側ではマイク入力とDiscord送信用PCMの両方を検出しています。聞こえない場合は、Discord側のbot音量、サーバー権限、ユーザー側ミュートを確認してください。";
-            }
-
-            string activeDevices = string.IsNullOrWhiteSpace(currentCaptureDeviceList)
-                ? "(active capture device list unavailable)"
-                : currentCaptureDeviceList;
-            if (activeDevices.Length > 900)
-            {
-                activeDevices = activeDevices[..900] + "...";
-            }
-
-            diagnosticMessage =
-                "VALOWATCH 音声診断\n" +
-                $"Device: {currentMicrophoneDeviceName}\n" +
-                $"ActiveDevices: {activeDevices}\n" +
-                $"CapturedPeak: {capturedPeak:0.0000}\n" +
-                $"WrittenPeak: {writtenPeak:0.0000}\n" +
-                $"SilenceFrames: {writtenSilenceFrameCount}\n" +
-                $"ShortFrames: {writtenShortFrameCount}\n" +
-                diagnosis;
+            WriteLog(
+                "Discord audio diagnostic notification is disabled. " +
+                $"Device: {currentMicrophoneDeviceName}. " +
+                $"CapturedPeak: {capturedPeak:0.0000}. " +
+                $"WrittenPeak: {writtenPeak:0.0000}. " +
+                $"SilenceFrames: {writtenSilenceFrameCount}. " +
+                $"ShortFrames: {writtenShortFrameCount}.");
         }
-
-        QueueDiscordStatusMessage(diagnosticMessage);
     }
 
     private static string GetValorantOpenedMessage(DiscordBotSettings settings)
