@@ -82,6 +82,14 @@ internal static class Program
                 installDirectory,
                 restartWhenCurrent: true).ConfigureAwait(false);
         }
+        catch (Exception exception) when (ContainsRetryableException(exception))
+        {
+            WriteLog(
+                "Dedicated updater could not reach GitHub; existing VALOWATCH will restart and updates will retry later. " +
+                SummarizeException(exception));
+            RestartInstalledAppIfPresent(installDirectory);
+            updateExitCode = 1;
+        }
         catch (Exception exception)
         {
             WriteLog("Dedicated updater failed.", exception);
@@ -227,6 +235,13 @@ internal static class Program
             return await RunUpdateAsync(
                 installDirectory,
                 restartWhenCurrent: false).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (ContainsRetryableException(exception))
+        {
+            WriteLog(
+                "GITHUB background update check could not reach GitHub; monitoring will retry on the next schedule. " +
+                SummarizeException(exception));
+            return 1;
         }
         catch (Exception exception)
         {
@@ -681,8 +696,8 @@ internal static class Program
                 TimeSpan retryDelay = RetryDelays[attempt - 1];
                 WriteLog(
                     $"{operationName} attempt {attempt}/{MaximumAttempts} failed. " +
-                    $"Retrying in {retryDelay.TotalSeconds:0} seconds.",
-                    exception);
+                    $"Retrying in {retryDelay.TotalSeconds:0} seconds. " +
+                    SummarizeException(exception));
                 await Task.Delay(retryDelay).ConfigureAwait(false);
             }
         }
@@ -800,6 +815,37 @@ internal static class Program
     private static bool IsRetryable(Exception exception)
     {
         return exception is HttpRequestException or TaskCanceledException or IOException or JsonException;
+    }
+
+    private static bool ContainsRetryableException(Exception exception)
+    {
+        for (Exception? currentException = exception;
+             currentException is not null;
+             currentException = currentException.InnerException)
+        {
+            if (IsRetryable(currentException))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string SummarizeException(Exception exception)
+    {
+        List<string> exceptionParts = [];
+        for (Exception? currentException = exception;
+             currentException is not null && exceptionParts.Count < 3;
+             currentException = currentException.InnerException)
+        {
+            string message = currentException.Message
+                .Replace(Environment.NewLine, " ", StringComparison.Ordinal)
+                .Trim();
+            exceptionParts.Add($"{currentException.GetType().Name}: {message}");
+        }
+
+        return $"Exception: {string.Join(" -> ", exceptionParts)}";
     }
 
     private static string ResolveInstallDirectory(IReadOnlyList<string> args)

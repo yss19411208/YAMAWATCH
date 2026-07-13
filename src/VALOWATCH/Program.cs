@@ -2,6 +2,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace VALOWATCH;
 
@@ -190,6 +191,9 @@ static class Program
                     "2026-07-12T00:00:02+09:00 [Overlay] Dedicated key-state monitor health. Responsive: True.",
                     "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Gateway: WebSocket connection was closed",
                     "   at Discord.ConnectionManager.ConnectAsync()",
+                    "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Dave decrypt stream 123: Failed to decrypt audio packet for 123: DecryptionFailure",
+                    "2026-07-12T00:00:03+09:00 GITHUB agent release lookup attempt 1/5 failed. Retrying in 2 seconds. Exception: HttpRequestException: api.github.com",
+                    " ---> System.Net.Sockets.SocketException (11001): そのようなホストは不明です。",
                     "2026-07-12T00:00:04+09:00 GITHUB agent is already current. SHA-256 matches release: 1234."
                 ]);
             File.WriteAllLines(Path.Combine(dataLogsDirectory, "primary.log"), primaryLogLines);
@@ -297,6 +301,16 @@ static class Program
             AddDiagnosticCheck(
                 !initialText.Contains("WebSocket connection was closed", StringComparison.Ordinal),
                 "websocket reconnect stack mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("Dave decrypt", StringComparison.Ordinal) &&
+                    !initialText.Contains("DecryptionFailure", StringComparison.Ordinal),
+                "dave decrypt warning mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("api.github.com", StringComparison.OrdinalIgnoreCase) &&
+                    !initialText.Contains("そのようなホストは不明です", StringComparison.Ordinal),
+                "github dns retry stack mirrored",
                 failedChecks);
             AddDiagnosticCheck(
                 !initialText.Contains("GITHUB agent is already current", StringComparison.Ordinal),
@@ -549,15 +563,14 @@ static class Program
                 invalidInformationalCommitIgnored;
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
-            File.AppendAllText(
+            AppendDiagnosticLogLine(
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Update schedule check: {(scheduleIsReady ? "ready" : "failed")}. " +
                 $"IntervalMinutes: {GitUpdateSchedule.DefaultInterval.TotalMinutes:0}. " +
                 $"InitialDue: {initialCheckIsDue}. EarlyBlocked: {earlyCheckIsBlocked}. " +
                 $"FiveMinuteDue: {fiveMinuteCheckIsDue}. ForcedDue: {forcedCheckIsDue}. ResetDue: {resetCheckIsDue}. " +
                 $"InformationalCommitDetected: {informationalCommitDetected}. " +
-                $"InvalidInformationalCommitIgnored: {invalidInformationalCommitIgnored}." +
-                Environment.NewLine);
+                $"InvalidInformationalCommitIgnored: {invalidInformationalCommitIgnored}.");
             Environment.ExitCode = scheduleIsReady ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
@@ -652,13 +665,24 @@ static class Program
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
-            File.AppendAllText(
+            AppendDiagnosticLogLine(
                 logFilePath,
-                $"{DateTimeOffset.Now:O} [Diagnostics] {diagnosticName} failed: {exception.Message}{Environment.NewLine}");
+                $"{DateTimeOffset.Now:O} [Diagnostics] {diagnosticName} failed: {exception.Message}");
         }
         catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
         {
         }
+    }
+
+    private static void AppendDiagnosticLogLine(string logFilePath, string message)
+    {
+        using FileStream logStream = new(
+            logFilePath,
+            FileMode.Append,
+            FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete);
+        using StreamWriter logWriter = new(logStream, Encoding.UTF8);
+        logWriter.WriteLine(message);
     }
 
     private static void RunDiscordVoiceNativeDiagnostic()

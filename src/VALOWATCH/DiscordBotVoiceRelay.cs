@@ -212,10 +212,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
             audioClient = await voiceChannel
-                .ConnectAsync(selfDeaf: false, selfMute: false)
+                .ConnectAsync(selfDeaf: true, selfMute: false)
                 .WaitAsync(DiscordVoiceConnectTimeout)
                 .ConfigureAwait(false);
-            WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: false. SelfMute: false.");
+            WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: true. SelfMute: false.");
             await SendValorantOpenedNotificationIfNotRecentAsync(settings).ConfigureAwait(false);
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
@@ -360,6 +360,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 try
                 {
                     await activeRelayTask.WaitAsync(RelayShutdownTimeout).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (exception is OperationCanceledException or TimeoutException)
+                {
+                    WriteLog("Audio relay did not confirm shutdown after stream dispose; cleanup will continue.");
                 }
                 catch (Exception exception)
                 {
@@ -549,19 +553,31 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private static bool IsTransientDiscordNetworkWarning(LogMessage logMessage)
     {
+        string source = logMessage.Source ?? string.Empty;
+        string message = logMessage.Message ?? string.Empty;
+        if (IsDiscordDaveDecryptWarning(source, message))
+        {
+            return true;
+        }
+
         if (logMessage.Exception is null)
         {
             return false;
         }
 
-        string source = logMessage.Source ?? string.Empty;
-        string message = logMessage.Message ?? string.Empty;
         return source.Contains("Gateway", StringComparison.OrdinalIgnoreCase) ||
             source.Contains("Audio", StringComparison.OrdinalIgnoreCase) ||
             message.Contains("WebSocket connection was closed", StringComparison.OrdinalIgnoreCase) ||
             ContainsExceptionName(logMessage.Exception, "WebSocketException") ||
             ContainsExceptionName(logMessage.Exception, "SocketException") ||
             ContainsExceptionMessage(logMessage.Exception, "Unable to read data from the transport connection");
+    }
+
+    private static bool IsDiscordDaveDecryptWarning(string source, string message)
+    {
+        return source.Contains("Dave decrypt", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Failed to decrypt audio packet", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("DecryptionFailure", StringComparison.OrdinalIgnoreCase);
     }
 
     private void WriteDiscordNetworkWarningSummary(LogMessage logMessage)
