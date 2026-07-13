@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace VALOWATCH;
 
@@ -31,6 +32,7 @@ internal static class NativeMethods
     public const int WsExAppWindow = 0x00040000;
     public const int GwlExStyle = -20;
     public const uint GwOwner = 4;
+    public const int DwmwaCloaked = 14;
     public const int VirtualKeyMenu = 0x12;
     public const int VirtualKeyLeftMenu = 0xA4;
     public const int VirtualKeyRightMenu = 0xA5;
@@ -95,6 +97,9 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern int GetWindowTextLength(IntPtr windowHandle);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int GetWindowText(IntPtr windowHandle, StringBuilder text, int maximumCount);
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool IsWindowVisible(IntPtr windowHandle);
@@ -111,6 +116,13 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr GetWindowLongPtr64(IntPtr windowHandle, int index);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(
+        IntPtr windowHandle,
+        int attribute,
+        out int attributeValue,
+        int attributeSize);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
