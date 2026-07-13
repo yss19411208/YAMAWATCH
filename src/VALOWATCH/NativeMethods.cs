@@ -28,6 +28,9 @@ internal static class NativeMethods
     public const uint SwpShowWindow = 0x0040;
     public const int WsExToolWindow = 0x00000080;
     public const int WsExTopMost = 0x00000008;
+    public const int WsExAppWindow = 0x00040000;
+    public const int GwlExStyle = -20;
+    public const uint GwOwner = 4;
     public const int VirtualKeyMenu = 0x12;
     public const int VirtualKeyLeftMenu = 0xA4;
     public const int VirtualKeyRightMenu = 0xA5;
@@ -81,10 +84,33 @@ internal static class NativeMethods
     public static extern IntPtr GetForegroundWindow();
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetShellWindow();
+
+    [DllImport("user32.dll")]
     public static extern IntPtr GetAncestor(IntPtr windowHandle, uint flags);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr windowHandle, uint command);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern int GetWindowTextLength(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindowVisible(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr windowHandle, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+    private static extern int GetWindowLong32(IntPtr windowHandle, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtr64(IntPtr windowHandle, int index);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -141,7 +167,16 @@ internal static class NativeMethods
     {
         return (GetAsyncKeyState(virtualKeyCode) & 0x8000) != 0;
     }
+
+    public static IntPtr GetWindowLongPtr(IntPtr windowHandle, int index)
+    {
+        return IntPtr.Size == 8
+            ? GetWindowLongPtr64(windowHandle, index)
+            : new IntPtr(GetWindowLong32(windowHandle, index));
+    }
 }
+
+internal delegate bool EnumWindowsProc(IntPtr windowHandle, IntPtr lParam);
 
 internal delegate IntPtr LowLevelKeyboardProc(int hookCode, IntPtr message, IntPtr keyboardData);
 

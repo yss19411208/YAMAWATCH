@@ -1,3 +1,4 @@
+using Discord;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Diagnostics;
@@ -214,7 +215,7 @@ static class Program
                 "diagnostic-version",
                 (dataLogsDirectory, "data-logs"),
                 (tempLogsDirectory, "temp-logs"));
-            string initialText = string.Join(Environment.NewLine, initialDeltas.SelectMany(delta => delta.DiscordMessages));
+            string initialText = FlattenRuntimeLogEmbeds(initialDeltas.SelectMany(delta => delta.DiscordEmbeds));
             foreach (RuntimeLogFileDelta delta in initialDeltas)
             {
                 RuntimeLogMessageCollector.Commit(cursorPath, delta.CursorKey, delta.CurrentLineCount);
@@ -231,7 +232,7 @@ static class Program
                 (tempLogsDirectory, "temp-logs"));
             string incrementalText = string.Join(
                 Environment.NewLine,
-                incrementalDeltas.SelectMany(delta => delta.DiscordMessages));
+                incrementalDeltas.SelectMany(delta => delta.DiscordEmbeds).Select(DescribeRuntimeLogEmbed));
             string[] cursorKeys = initialDeltas.Select(delta => delta.CursorKey).ToArray();
             string[] initialMessageLines = initialText.Split(
                 [Environment.NewLine],
@@ -250,11 +251,12 @@ static class Program
                 "env file was included",
                 failedChecks);
             AddDiagnosticCheck(
-                initialDeltas.SelectMany(delta => delta.DiscordMessages).All(message =>
-                    message.Length <= 2000 &&
-                    message.StartsWith("```text", StringComparison.Ordinal) &&
-                    message.EndsWith("```", StringComparison.Ordinal)),
-                "discord message framing failed",
+                initialDeltas.SelectMany(delta => delta.DiscordEmbeds).All(embed =>
+                    string.Equals(embed.Title, "VALOWATCH ログ", StringComparison.Ordinal) &&
+                    !string.IsNullOrWhiteSpace(embed.Description) &&
+                    embed.Description.Length <= 4096 &&
+                    !embed.Description.Contains("```", StringComparison.Ordinal)),
+                "discord embed framing failed",
                 failedChecks);
             AddDiagnosticCheck(
                 !initialText.Contains("first Discord log sync skipped older", StringComparison.Ordinal),
@@ -338,8 +340,8 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Runtime log message check: {(ready ? "ready" : "failed")}. " +
                 $"Files: {string.Join(",", cursorKeys)}. InitialMessages: " +
-                $"{initialDeltas.Sum(delta => delta.DiscordMessages.Count)}. " +
-                $"IncrementalMessages: {incrementalDeltas.Sum(delta => delta.DiscordMessages.Count)}. " +
+                $"{initialDeltas.Sum(delta => delta.DiscordEmbeds.Count)}. " +
+                $"IncrementalMessages: {incrementalDeltas.Sum(delta => delta.DiscordEmbeds.Count)}. " +
                 $"Failures: {(ready ? "none" : string.Join("; ", failedChecks))}.{Environment.NewLine}");
             Environment.ExitCode = ready ? 0 : 1;
         }
@@ -371,6 +373,25 @@ static class Program
             {
             }
         }
+    }
+
+    private static string FlattenRuntimeLogEmbeds(IEnumerable<Embed> embeds)
+    {
+        return string.Join(Environment.NewLine, embeds.Select(DescribeRuntimeLogEmbed));
+    }
+
+    private static string DescribeRuntimeLogEmbed(Embed embed)
+    {
+        StringBuilder textBuilder = new();
+        textBuilder.AppendLine(embed.Title);
+        textBuilder.AppendLine(embed.Description);
+        foreach (EmbedField field in embed.Fields)
+        {
+            textBuilder.AppendLine($"{field.Name}: {field.Value}");
+        }
+
+        textBuilder.AppendLine(embed.Footer?.Text ?? string.Empty);
+        return textBuilder.ToString();
     }
 
     private static void RunUpdateIdentityDiagnostic(IReadOnlyList<string> args)
@@ -1086,11 +1107,11 @@ static class Program
 
         try
         {
-            string message = RunningApplicationSnapshot.BuildDiscordMessage();
+            string message = RunningApplicationSnapshot.BuildDiagnosticText();
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             bool snapshotIsReady = message.Length <= 2000 &&
-                message.StartsWith("```text", StringComparison.Ordinal) &&
-                message.EndsWith("```", StringComparison.Ordinal) &&
+                message.Contains("VALOWATCH 実行中アプリ", StringComparison.Ordinal) &&
+                !message.Contains("```", StringComparison.Ordinal) &&
                 !message.Contains(userProfile, StringComparison.OrdinalIgnoreCase);
             AppendDiagnosticLogLine(
                 logFilePath,

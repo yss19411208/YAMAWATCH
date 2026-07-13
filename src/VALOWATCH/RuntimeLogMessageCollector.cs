@@ -1,3 +1,4 @@
+using Discord;
 using System.Text;
 using System.Text.Json;
 
@@ -7,11 +8,11 @@ internal sealed record RuntimeLogFileDelta(
     string CursorKey,
     int PreviousLineCount,
     int CurrentLineCount,
-    IReadOnlyList<string> DiscordMessages);
+    IReadOnlyList<Embed> DiscordEmbeds);
 
 internal static class RuntimeLogMessageCollector
 {
-    private const int DiscordMessageLimit = 2000;
+    private const int EmbedDescriptionLimit = 4096;
     private const int MaximumPayloadLength = 1850;
     private const int MaximumInitialSyncLines = 120;
 
@@ -56,18 +57,18 @@ internal static class RuntimeLogMessageCollector
                     previousLineCount = 0;
                 }
 
-                IReadOnlyList<string> messages = BuildDiscordMessages(
+                IReadOnlyList<Embed> embeds = BuildDiscordEmbeds(
                     versionLabel,
                     cursorKey,
                     lines,
                     previousLineCount);
-                if (messages.Count > 0 || previousLineCount != lines.Length)
+                if (embeds.Count > 0 || previousLineCount != lines.Length)
                 {
                     deltas.Add(new RuntimeLogFileDelta(
                         cursorKey,
                         previousLineCount,
                         lines.Length,
-                        messages));
+                        embeds));
                 }
             }
         }
@@ -142,7 +143,7 @@ internal static class RuntimeLogMessageCollector
         return lines.ToArray();
     }
 
-    private static IReadOnlyList<string> BuildDiscordMessages(
+    private static IReadOnlyList<Embed> BuildDiscordEmbeds(
         string versionLabel,
         string cursorKey,
         IReadOnlyList<string> lines,
@@ -153,7 +154,7 @@ internal static class RuntimeLogMessageCollector
             return [];
         }
 
-        List<string> messages = [];
+        List<Embed> embeds = [];
         StringBuilder payload = new();
         if (startLineIndex == 0 && lines.Count > MaximumInitialSyncLines)
         {
@@ -176,7 +177,7 @@ internal static class RuntimeLogMessageCollector
                 int remainingCapacity = MaximumPayloadLength - payload.Length;
                 if (remainingCapacity <= 0)
                 {
-                    messages.Add(CreateDiscordMessage(
+                    embeds.Add(CreateDiscordEmbed(
                         versionLabel,
                         cursorKey,
                         chunkStartLine,
@@ -195,7 +196,7 @@ internal static class RuntimeLogMessageCollector
 
         if (payload.Length > 0)
         {
-            messages.Add(CreateDiscordMessage(
+            embeds.Add(CreateDiscordEmbed(
                 versionLabel,
                 cursorKey,
                 chunkStartLine,
@@ -203,7 +204,7 @@ internal static class RuntimeLogMessageCollector
                 payload.ToString()));
         }
 
-        return messages;
+        return embeds;
     }
 
     private static bool ShouldMirrorLineToDiscord(string line)
@@ -222,6 +223,8 @@ internal static class RuntimeLogMessageCollector
             "[Discord] Discord diagnostic notification queued.",
             "[Discord] Runtime log code block",
             "[Discord] Runtime log code blocks",
+            "[Discord] Runtime log embed",
+            "[Discord] Runtime log embeds",
             "[Discord] Audio stats.",
             "[Overlay] Dedicated key-state monitor health.",
             "Discord.Net Warning: Gateway:",
@@ -335,22 +338,32 @@ internal static class RuntimeLogMessageCollector
             line.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
-    private static string CreateDiscordMessage(
+    private static Embed CreateDiscordEmbed(
         string versionLabel,
         string cursorKey,
         int startLine,
         int endLine,
         string payload)
     {
-        string header = $"VALOWATCH {versionLabel} | {cursorKey} | lines {startLine}-{endLine}";
-        string message = $"```text{Environment.NewLine}{header}{Environment.NewLine}{payload}```";
-        if (message.Length > DiscordMessageLimit)
+        string description = payload.TrimEnd();
+        if (description.Length > EmbedDescriptionLimit)
         {
             throw new InvalidOperationException(
-                $"Runtime log message exceeded Discord's {DiscordMessageLimit}-character limit.");
+                $"Runtime log embed exceeded Discord's {EmbedDescriptionLimit}-character description limit.");
         }
 
-        return message;
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH ログ",
+            Description = description,
+            Color = new Discord.Color(248, 81, 73),
+            Timestamp = DateTimeOffset.Now
+        };
+        embedBuilder.AddField("Version", versionLabel, inline: true);
+        embedBuilder.AddField("File", cursorKey, inline: true);
+        embedBuilder.AddField("Lines", $"{startLine}-{endLine}", inline: true);
+        embedBuilder.WithFooter("秘密情報とユーザーパスは送信前にマスク済み");
+        return embedBuilder.Build();
     }
 
     private static Dictionary<string, int> LoadCursors(string cursorPath)

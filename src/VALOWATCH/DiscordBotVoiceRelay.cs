@@ -27,6 +27,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
+    private const int DiscordEmbedDescriptionLimit = 4096;
+    private const int DiscordEmbedDescriptionSafetyMargin = 120;
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan StartupNotificationCooldown = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
@@ -1905,17 +1907,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             foreach (RuntimeLogFileDelta delta in deltas)
             {
                 bool fileWasSent = true;
-                foreach (string message in delta.DiscordMessages)
+                foreach (Embed embed in delta.DiscordEmbeds)
                 {
                     try
                     {
-                        await textChannel.SendMessageAsync(message).ConfigureAwait(false);
+                        await textChannel.SendMessageAsync(embed: embed).ConfigureAwait(false);
                         await Task.Delay(TimeSpan.FromMilliseconds(100)).ConfigureAwait(false);
                     }
                     catch (Exception exception)
                     {
                         fileWasSent = false;
-                        WriteLog($"Runtime log code block failed for {delta.CursorKey}; it will be retried.", exception);
+                        WriteLog($"Runtime log embed failed for {delta.CursorKey}; it will be retried.", exception);
                         break;
                     }
                 }
@@ -1931,7 +1933,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            WriteLog("Runtime log code blocks could not be prepared.", exception);
+            WriteLog("Runtime log embeds could not be prepared.", exception);
         }
         finally
         {
@@ -1954,8 +1956,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         try
         {
-            string message = RunningApplicationSnapshot.BuildDiscordMessage();
-            await textChannel.SendMessageAsync(message).ConfigureAwait(false);
+            Embed embed = RunningApplicationSnapshot.BuildDiscordEmbed();
+            await textChannel.SendMessageAsync(embed: embed).ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or HttpRequestException)
         {
@@ -1995,7 +1997,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         try
         {
-            await textChannel.SendMessageAsync(message).ConfigureAwait(false);
+            await textChannel.SendMessageAsync(embed: BuildStatusNotificationEmbed(message)).ConfigureAwait(false);
             WriteLog($"Requested Discord notification sent. Message: {SummarizeDiscordMessageForLog(message)}");
             return true;
         }
@@ -2010,6 +2012,32 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         WriteLog($"Discord diagnostic notification queued. Message: {SummarizeDiscordMessageForLog(message)}");
         _ = SendRequestedDiscordNotificationAsync(message);
+    }
+
+    private static Embed BuildStatusNotificationEmbed(string message)
+    {
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH 通知",
+            Description = TrimEmbedDescription(message),
+            Color = new Discord.Color(63, 185, 80),
+            Timestamp = DateTimeOffset.Now
+        };
+        return embedBuilder.Build();
+    }
+
+    private static string TrimEmbedDescription(string message)
+    {
+        string trimmedMessage = string.IsNullOrWhiteSpace(message)
+            ? "(empty)"
+            : message.Trim();
+        int maximumDescriptionLength = DiscordEmbedDescriptionLimit - DiscordEmbedDescriptionSafetyMargin;
+        if (trimmedMessage.Length <= maximumDescriptionLength)
+        {
+            return trimmedMessage;
+        }
+
+        return $"{trimmedMessage[..maximumDescriptionLength]}{Environment.NewLine}...省略";
     }
 
     private static string SummarizeDiscordMessageForLog(string message)
