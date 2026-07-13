@@ -37,8 +37,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan MicrophoneRecentActivityDuration = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan MicrophoneSilentCandidateDuration = TimeSpan.FromSeconds(30);
     private const float MicrophoneActivityPeakThreshold = 0.0002F;
-    private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan DiscordGatewayReadyTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan DiscordShutdownTimeout = TimeSpan.FromSeconds(5);
     private const bool DiscordVoiceDaveEncryptionEnabled = true;
 
     private readonly DiscordBotSettingsStore settingsStore;
@@ -173,8 +174,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
             $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}.");
 
+        string startupStage = "initializing Discord client";
         try
         {
+            startupStage = "creating Discord client";
             DiscordSocketClient client = CreateClient();
             WriteRuntimeDiagnostic(client);
             AttachClientEvents(client);
@@ -187,8 +190,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return Task.CompletedTask;
             };
 
+            startupStage = "Discord login";
             await client.LoginAsync(TokenType.Bot, settings.BotToken).ConfigureAwait(false);
+            startupStage = "Discord gateway start";
             await client.StartAsync().ConfigureAwait(false);
+            startupStage = "Discord gateway ready";
             await readyCompletionSource.Task.WaitAsync(DiscordGatewayReadyTimeout).ConfigureAwait(false);
             WriteLog("Discord gateway is ready.");
 
@@ -214,6 +220,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             EnsureVoiceChannelPermissions(guild, voiceChannel);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
+            startupStage = "Discord voice channel connect";
             audioClient = await voiceChannel
                 .ConnectAsync(selfDeaf: true, selfMute: false)
                 .WaitAsync(DiscordVoiceConnectTimeout)
@@ -257,6 +264,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             _ = Task.Run(SendRuntimeLogUpdatesAsync);
             StartRuntimeLogUpdates();
+        }
+        catch (TimeoutException exception)
+        {
+            WriteLog($"Discord startup timed out during {startupStage}. Stopping Discord client before retry.", exception);
+            await StopCoreAsync().ConfigureAwait(false);
+            StatusText = $"Discord timed out: {startupStage}";
         }
         catch (Exception exception)
         {
@@ -398,7 +411,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         if (audioClient is not null)
         {
-            await audioClient.StopAsync().ConfigureAwait(false);
+            await CompleteShutdownOperationAsync(
+                () => audioClient.StopAsync(),
+                "Discord voice client stop").ConfigureAwait(false);
             audioClient.Dispose();
             audioClient = null;
         }
@@ -409,11 +424,60 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (discordClient is not null)
         {
             DetachClientEvents(discordClient);
-            await discordClient.LogoutAsync().ConfigureAwait(false);
-            await discordClient.StopAsync().ConfigureAwait(false);
-            await discordClient.DisposeAsync().ConfigureAwait(false);
+            await CompleteShutdownOperationAsync(
+                () => discordClient.LogoutAsync(),
+                "Discord client logout").ConfigureAwait(false);
+            await CompleteShutdownOperationAsync(
+                () => discordClient.StopAsync(),
+                "Discord client stop").ConfigureAwait(false);
+            await CompleteShutdownOperationAsync(
+                () => discordClient.DisposeAsync().AsTask(),
+                "Discord client dispose").ConfigureAwait(false);
             discordClient = null;
             discordStatusTextChannel = null;
+        }
+    }
+
+    private async Task CompleteShutdownOperationAsync(Func<Task> shutdownOperation, string operationName)
+    {
+        Task shutdownTask;
+        try
+        {
+            shutdownTask = shutdownOperation();
+        }
+        catch (Exception exception)
+        {
+            WriteLog($"{operationName} could not start; cleanup will continue.", exception);
+            return;
+        }
+
+        try
+        {
+            await shutdownTask.WaitAsync(DiscordShutdownTimeout).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (TimeoutException exception)
+        {
+            WriteLog($"{operationName} timed out; cleanup will continue.", exception);
+            _ = ObserveLateShutdownFaultAsync(shutdownTask, operationName);
+        }
+        catch (Exception exception)
+        {
+            WriteLog($"{operationName} failed; cleanup will continue.", exception);
+        }
+    }
+
+    private async Task ObserveLateShutdownFaultAsync(Task shutdownTask, string operationName)
+    {
+        try
+        {
+            await shutdownTask.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            WriteLog($"{operationName} finished later with an error.", exception);
         }
     }
 
