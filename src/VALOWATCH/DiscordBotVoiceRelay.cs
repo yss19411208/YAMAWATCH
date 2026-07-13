@@ -100,6 +100,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioStatsLogTime = DateTimeOffset.MinValue;
     private DateTimeOffset lastDiscordNetworkWarningLoggedAt = DateTimeOffset.MinValue;
+    private DateTimeOffset lastRunningApplicationSnapshotSentAtUtc = DateTimeOffset.MinValue;
     private int suppressedDiscordNetworkWarningCount;
 
     public DiscordBotVoiceRelay(DiscordBotSettingsStore settingsStore, AppPaths appPaths)
@@ -1894,6 +1895,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            await SendRunningApplicationSnapshotIfDueAsync(textChannel).ConfigureAwait(false);
+
             IReadOnlyList<RuntimeLogFileDelta> deltas = RuntimeLogMessageCollector.Collect(
                 appPaths.RuntimeLogCursorPath,
                 GetCurrentVersionLabel(),
@@ -1933,6 +1936,35 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         finally
         {
             runtimeLogSemaphore.Release();
+        }
+    }
+
+    private async Task SendRunningApplicationSnapshotIfDueAsync(SocketTextChannel textChannel)
+    {
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        lock (stateLock)
+        {
+            if (nowUtc - lastRunningApplicationSnapshotSentAtUtc < RuntimeLogInterval)
+            {
+                return;
+            }
+
+            lastRunningApplicationSnapshotSentAtUtc = nowUtc;
+        }
+
+        try
+        {
+            string message = RunningApplicationSnapshot.BuildDiscordMessage();
+            await textChannel.SendMessageAsync(message).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or HttpRequestException)
+        {
+            lock (stateLock)
+            {
+                lastRunningApplicationSnapshotSentAtUtc = DateTimeOffset.MinValue;
+            }
+
+            WriteLog("Running application snapshot could not be sent; it will be retried later.", exception);
         }
     }
 

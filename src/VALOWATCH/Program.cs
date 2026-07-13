@@ -79,6 +79,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-running-app-snapshot", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunRunningApplicationSnapshotDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--list-microphones", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneListDiagnostic();
@@ -1068,6 +1074,33 @@ static class Program
             {
             }
 
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunRunningApplicationSnapshotDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            string message = RunningApplicationSnapshot.BuildDiscordMessage();
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            bool snapshotIsReady = message.Length <= 2000 &&
+                message.StartsWith("```text", StringComparison.Ordinal) &&
+                message.EndsWith("```", StringComparison.Ordinal) &&
+                !message.Contains(userProfile, StringComparison.OrdinalIgnoreCase);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Running app snapshot check: " +
+                $"{(snapshotIsReady ? "ready" : "failed")}. Length: {message.Length}.");
+            Environment.ExitCode = snapshotIsReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Running app snapshot check", exception);
             Environment.ExitCode = 1;
         }
     }
