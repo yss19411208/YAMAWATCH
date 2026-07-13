@@ -28,6 +28,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan StartupNotificationCooldown = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan DiscordFrameWriteTimeout = TimeSpan.FromSeconds(5);
@@ -88,6 +89,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private string currentMicrophoneDeviceName = string.Empty;
     private string lastNotifiedMicrophoneDeviceName = string.Empty;
     private bool versionNotificationSent;
+    private DateTimeOffset lastValorantOpenedMessageSentAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastMicrophoneMessageSentAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastAudioDiagnosticMessageSentAtUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? runtimeLogCancellationTokenSource;
     private Task? runtimeLogTask;
     private string currentCaptureDeviceList = string.Empty;
@@ -211,7 +215,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .WaitAsync(DiscordVoiceConnectTimeout)
                 .ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: false. SelfMute: false.");
-            await SendRequestedDiscordNotificationAsync(GetValorantOpenedMessage(settings)).ConfigureAwait(false);
+            await SendValorantOpenedNotificationIfNotRecentAsync(settings).ConfigureAwait(false);
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
@@ -223,7 +227,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 {
                     StartMicrophoneAudioRelay(settings);
                     audioRelayStarted = true;
-                    if (await SendRequestedDiscordNotificationAsync($"使用マイク: {currentMicrophoneDeviceName}")
+                    if (await SendMicrophoneNotificationIfNotRecentAsync(currentMicrophoneDeviceName)
                         .ConfigureAwait(false))
                     {
                         lastNotifiedMicrophoneDeviceName = currentMicrophoneDeviceName;
@@ -683,25 +687,28 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private Task OnDiscordConnectedAsync()
     {
         WriteLog("Discord gateway connected.");
+        lock (stateLock)
+        {
+            if (!stopRequested && IsRunning)
+            {
+                StatusText = FormatRunningStatus("Discord mic live");
+            }
+        }
+
         return Task.CompletedTask;
     }
 
     private Task OnDiscordDisconnectedAsync(Exception exception)
     {
-        WriteLog("Discord gateway disconnected.", exception);
-        bool shouldRecover = false;
+        WriteLog(
+            "Discord gateway disconnected; Discord.Net will reconnect automatically. " +
+            $"Exception: {FormatExceptionSummary(exception)}");
         lock (stateLock)
         {
             if (!stopRequested && IsRunning)
             {
                 StatusText = $"Discord reconnecting: {exception.Message}";
-                shouldRecover = true;
             }
-        }
-
-        if (shouldRecover)
-        {
-            ScheduleDiscordRecovery("Discord gateway disconnected", exception);
         }
 
         return Task.CompletedTask;
@@ -1523,7 +1530,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                         StringComparison.OrdinalIgnoreCase))
                 {
                     lastNotifiedMicrophoneDeviceName = currentMicrophoneDeviceName;
-                    microphoneChangeNotification = $"使用マイク: {currentMicrophoneDeviceName}";
+                    microphoneChangeNotification = currentMicrophoneDeviceName;
                 }
 
                 microphoneSignalLocked = true;
@@ -1547,7 +1554,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         if (!string.IsNullOrWhiteSpace(microphoneChangeNotification))
         {
-            _ = SendRequestedDiscordNotificationAsync(microphoneChangeNotification);
+            _ = SendMicrophoneNotificationIfNotRecentAsync(microphoneChangeNotification);
         }
     }
 
@@ -1631,13 +1638,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         lock (audioStatsLock)
         {
+            DateTimeOffset now = DateTimeOffset.Now;
+            DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
             if (audioDiagnosticMessageSent ||
-                DateTimeOffset.Now - audioStatsStartedAt < TimeSpan.FromSeconds(12))
+                now - audioStatsStartedAt < TimeSpan.FromSeconds(12) ||
+                nowUtc - lastAudioDiagnosticMessageSentAtUtc < StartupNotificationCooldown)
             {
                 return;
             }
 
             audioDiagnosticMessageSent = true;
+            lastAudioDiagnosticMessageSentAtUtc = nowUtc;
             string diagnosis;
             if (capturedPeak < AudiblePeakThreshold)
             {
@@ -1680,6 +1691,44 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ? "VALORANTを開きました。"
             : settings.ValorantOpenedMessage.Trim();
         return message.EndsWith('。') ? message : $"{message}。";
+    }
+
+    private async Task SendValorantOpenedNotificationIfNotRecentAsync(DiscordBotSettings settings)
+    {
+        if (!TryReserveNotificationSlot(ref lastValorantOpenedMessageSentAtUtc))
+        {
+            WriteLog("Skipped duplicate VALORANT opened notification during reconnect cooldown.");
+            return;
+        }
+
+        await SendRequestedDiscordNotificationAsync(GetValorantOpenedMessage(settings)).ConfigureAwait(false);
+    }
+
+    private async Task<bool> SendMicrophoneNotificationIfNotRecentAsync(string microphoneDeviceName)
+    {
+        if (!TryReserveNotificationSlot(ref lastMicrophoneMessageSentAtUtc))
+        {
+            WriteLog("Skipped duplicate microphone notification during reconnect cooldown.");
+            return false;
+        }
+
+        return await SendRequestedDiscordNotificationAsync($"使用マイク: {microphoneDeviceName}")
+            .ConfigureAwait(false);
+    }
+
+    private bool TryReserveNotificationSlot(ref DateTimeOffset lastSentAtUtc)
+    {
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        lock (stateLock)
+        {
+            if (nowUtc - lastSentAtUtc < StartupNotificationCooldown)
+            {
+                return false;
+            }
+
+            lastSentAtUtc = nowUtc;
+            return true;
+        }
     }
 
     private async Task SendPendingUpdateNotificationAsync()
