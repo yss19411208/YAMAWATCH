@@ -11,6 +11,7 @@ public sealed class MainForm : Form
     private static readonly TimeSpan HotKeyRegistrationRetryInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HotKeyTriggerCooldown = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan LineNotificationRetryInterval = TimeSpan.FromSeconds(10);
 
     private readonly AppPaths appPaths;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
@@ -30,6 +31,10 @@ public sealed class MainForm : Form
     private bool rawKeyboardInputRegistered;
     private bool hotKeyRegistered;
     private bool lastValorantDetected;
+    private bool lastLineDetected;
+    private bool lineStatusInitialized;
+    private bool lineOpenedNotificationPending;
+    private bool lineNotificationInProgress;
     private bool discordTransitionInProgress;
     private bool hidOnInitialShow;
     private bool stratsTogglePending;
@@ -39,6 +44,7 @@ public sealed class MainForm : Form
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextKeyStateMonitorHealthLogAtUtc = DateTimeOffset.MinValue;
 
     public MainForm(
@@ -193,6 +199,66 @@ public sealed class MainForm : Form
         if (valorantDetected)
         {
             PreloadStratsOverlayIfNeeded();
+        }
+
+        RefreshLineStatus();
+    }
+
+    private void RefreshLineStatus()
+    {
+        bool lineDetected = LineProcessMonitor.IsLineRunning();
+        if (!lineStatusInitialized)
+        {
+            lastLineDetected = lineDetected;
+            lineStatusInitialized = true;
+        }
+
+        if (lineDetected && !lastLineDetected)
+        {
+            lineOpenedNotificationPending = true;
+            nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
+            WriteAppLog("Discord", "LINE process opened; Discord notification is pending.");
+        }
+
+        if (!lineDetected)
+        {
+            lastLineDetected = false;
+            lineOpenedNotificationPending = false;
+            nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
+            return;
+        }
+
+        lastLineDetected = true;
+        if (!lineOpenedNotificationPending ||
+            lineNotificationInProgress ||
+            disableDiscordAutomation ||
+            DateTimeOffset.UtcNow < nextLineNotificationRetryAtUtc)
+        {
+            return;
+        }
+
+        lineNotificationInProgress = true;
+        nextLineNotificationRetryAtUtc = DateTimeOffset.UtcNow.Add(LineNotificationRetryInterval);
+        _ = SendLineOpenedNotificationAsync();
+    }
+
+    private async Task SendLineOpenedNotificationAsync()
+    {
+        try
+        {
+            bool sentOrSuppressed = await discordBotVoiceRelay.NotifyLineOpenedAsync().ConfigureAwait(true);
+            if (sentOrSuppressed)
+            {
+                lineOpenedNotificationPending = false;
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteAppLog("Discord", "LINE opened notification failed.", exception);
+        }
+        finally
+        {
+            lineNotificationInProgress = false;
         }
     }
 

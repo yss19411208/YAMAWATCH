@@ -91,6 +91,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool versionNotificationSent;
     private DateTimeOffset lastValorantOpenedMessageSentAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastMicrophoneMessageSentAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastLineOpenedMessageSentAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioDiagnosticMessageSentAtUtc = DateTimeOffset.MinValue;
     private CancellationTokenSource? runtimeLogCancellationTokenSource;
     private Task? runtimeLogTask;
@@ -273,6 +274,46 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             lifecycleSemaphore.Release();
         }
+    }
+
+    public async Task<bool> NotifyLineOpenedAsync()
+    {
+        lock (stateLock)
+        {
+            if (stopRequested || !IsRunning)
+            {
+                WriteLog("LINE opened notification delayed because Discord is not running.");
+                return false;
+            }
+        }
+
+        if (discordStatusTextChannel is null)
+        {
+            WriteLog("LINE opened notification delayed because the text channel is not ready.");
+            return false;
+        }
+
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        lock (stateLock)
+        {
+            if (nowUtc - lastLineOpenedMessageSentAtUtc < StartupNotificationCooldown)
+            {
+                WriteLog("Skipped duplicate LINE opened notification during reconnect cooldown.");
+                return true;
+            }
+        }
+
+        if (!await SendRequestedDiscordNotificationAsync("LINEを開いた").ConfigureAwait(false))
+        {
+            return false;
+        }
+
+        lock (stateLock)
+        {
+            lastLineOpenedMessageSentAtUtc = DateTimeOffset.UtcNow;
+        }
+
+        return true;
     }
 
     private async Task StopCoreAsync()
