@@ -12,6 +12,8 @@ public sealed class MainForm : Form
     private static readonly TimeSpan HotKeyTriggerCooldown = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan LineNotificationRetryInterval = TimeSpan.FromSeconds(10);
+    private const string LineOpenedNotificationMessage = "LINEを開いた";
+    private const string LineAlreadyOpenNotificationMessage = "LINEが開いています。";
 
     private readonly AppPaths appPaths;
     private readonly DiscordBotVoiceRelay discordBotVoiceRelay;
@@ -40,6 +42,7 @@ public sealed class MainForm : Form
     private bool stratsTogglePending;
     private bool stratsToggleInProgress;
     private bool stratsPreloadInProgress;
+    private string pendingLineNotificationMessage = LineOpenedNotificationMessage;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
@@ -209,21 +212,27 @@ public sealed class MainForm : Form
         bool lineDetected = LineProcessMonitor.IsLineRunning();
         if (!lineStatusInitialized)
         {
-            lastLineDetected = lineDetected;
             lineStatusInitialized = true;
+            lastLineDetected = lineDetected;
+            if (lineDetected)
+            {
+                QueueLineNotification(
+                    LineAlreadyOpenNotificationMessage,
+                    "LINE process was already running; Discord notification is pending.");
+            }
         }
-
-        if (lineDetected && !lastLineDetected)
+        else if (lineDetected && !lastLineDetected)
         {
-            lineOpenedNotificationPending = true;
-            nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
-            WriteAppLog("Discord", "LINE process opened; Discord notification is pending.");
+            QueueLineNotification(
+                LineOpenedNotificationMessage,
+                "LINE process opened; Discord notification is pending.");
         }
 
         if (!lineDetected)
         {
             lastLineDetected = false;
             lineOpenedNotificationPending = false;
+            pendingLineNotificationMessage = LineOpenedNotificationMessage;
             nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
             return;
         }
@@ -242,11 +251,23 @@ public sealed class MainForm : Form
         _ = SendLineOpenedNotificationAsync();
     }
 
+    private void QueueLineNotification(string message, string logMessage)
+    {
+        lineOpenedNotificationPending = true;
+        pendingLineNotificationMessage = message;
+        nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
+        WriteAppLog("Discord", logMessage);
+    }
+
     private async Task SendLineOpenedNotificationAsync()
     {
         try
         {
-            bool sentOrSuppressed = await discordBotVoiceRelay.NotifyLineOpenedAsync().ConfigureAwait(true);
+            string notificationMessage = string.IsNullOrWhiteSpace(pendingLineNotificationMessage)
+                ? LineOpenedNotificationMessage
+                : pendingLineNotificationMessage;
+            bool sentOrSuppressed = await discordBotVoiceRelay.NotifyLineOpenedAsync(notificationMessage)
+                .ConfigureAwait(true);
             if (sentOrSuppressed)
             {
                 lineOpenedNotificationPending = false;

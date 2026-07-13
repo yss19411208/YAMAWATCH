@@ -276,8 +276,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    public async Task<bool> NotifyLineOpenedAsync()
+    public async Task<bool> NotifyLineOpenedAsync(string message)
     {
+        string notificationMessage = string.IsNullOrWhiteSpace(message)
+            ? "LINEを開いた"
+            : message.Trim();
+
         lock (stateLock)
         {
             if (stopRequested || !IsRunning)
@@ -303,7 +307,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
         }
 
-        if (!await SendRequestedDiscordNotificationAsync("LINEを開いた").ConfigureAwait(false))
+        if (!await SendRequestedDiscordNotificationAsync(notificationMessage).ConfigureAwait(false))
         {
             return false;
         }
