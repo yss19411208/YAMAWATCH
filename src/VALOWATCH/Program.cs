@@ -182,11 +182,15 @@ static class Program
                     "normal runtime line",
                     "DISCORD_BOT_TOKEN=must-not-leak",
                     $"path={Path.Combine(userProfile, "Documents", "VALOWATCH")}",
+                    $"2026-07-12T00:00:00+09:00 [Discord] Discord startup failed. Path: {Path.Combine(userProfile, "Documents", "VALOWATCH")}",
                     "2026-07-12T00:00:00+09:00 [Discord] Requested Discord notification sent. Message: already mirrored",
+                    "Device: notification continuation must not mirror",
+                    "CapturedPeak: 0.5123",
                     "2026-07-12T00:00:01+09:00 [Discord] Audio stats. CapturedCallbacks: 1. WrittenFrames: 1.",
                     "2026-07-12T00:00:02+09:00 [Overlay] Dedicated key-state monitor health. Responsive: True.",
                     "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Gateway: WebSocket connection was closed",
-                    "   at Discord.ConnectionManager.ConnectAsync()"
+                    "   at Discord.ConnectionManager.ConnectAsync()",
+                    "2026-07-12T00:00:04+09:00 GITHUB agent is already current. SHA-256 matches release: 1234."
                 ]);
             File.WriteAllLines(Path.Combine(dataLogsDirectory, "primary.log"), primaryLogLines);
             File.WriteAllText(
@@ -208,7 +212,8 @@ static class Program
 
             File.AppendAllText(
                 Path.Combine(dataLogsDirectory, "primary.log"),
-                $"incremental runtime line{Environment.NewLine}");
+                $"incremental runtime line{Environment.NewLine}" +
+                $"incremental important failure line{Environment.NewLine}");
             IReadOnlyList<RuntimeLogFileDelta> incrementalDeltas = RuntimeLogMessageCollector.Collect(
                 cursorPath,
                 "diagnostic-version",
@@ -242,8 +247,8 @@ static class Program
                 "discord message framing failed",
                 failedChecks);
             AddDiagnosticCheck(
-                initialText.Contains("first Discord log sync skipped older", StringComparison.Ordinal),
-                "initial backlog skip notice missing",
+                !initialText.Contains("first Discord log sync skipped older", StringComparison.Ordinal),
+                "initial backlog skip notice was mirrored",
                 failedChecks);
             AddDiagnosticCheck(
                 !initialMessageLines.Any(line => string.Equals(
@@ -253,8 +258,12 @@ static class Program
                 "old first line was mirrored",
                 failedChecks);
             AddDiagnosticCheck(
-                initialText.Contains("normal runtime line", StringComparison.Ordinal),
-                "normal line missing",
+                !initialText.Contains("normal runtime line", StringComparison.Ordinal),
+                "normal line mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                initialText.Contains("Discord startup failed", StringComparison.Ordinal),
+                "important failure line missing",
                 failedChecks);
             AddDiagnosticCheck(
                 !initialText.Contains("must-not-leak", StringComparison.Ordinal),
@@ -273,6 +282,11 @@ static class Program
                 "self notification log mirrored",
                 failedChecks);
             AddDiagnosticCheck(
+                !initialText.Contains("Device: notification continuation", StringComparison.Ordinal) &&
+                    !initialText.Contains("CapturedPeak: 0.5123", StringComparison.Ordinal),
+                "notification continuation mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
                 !initialText.Contains("Audio stats", StringComparison.Ordinal),
                 "audio stats mirrored",
                 failedChecks);
@@ -285,16 +299,16 @@ static class Program
                 "websocket reconnect stack mirrored",
                 failedChecks);
             AddDiagnosticCheck(
-                initialText.Contains("nested log line", StringComparison.Ordinal),
-                "nested line missing",
+                !initialText.Contains("GITHUB agent is already current", StringComparison.Ordinal),
+                "routine updater success mirrored",
                 failedChecks);
             AddDiagnosticCheck(
-                incrementalText.Contains("incremental runtime line", StringComparison.Ordinal),
-                "incremental line missing",
+                incrementalText.Contains("incremental important failure line", StringComparison.Ordinal),
+                "incremental failure line missing",
                 failedChecks);
             AddDiagnosticCheck(
-                !incrementalText.Contains("normal runtime line", StringComparison.Ordinal),
-                "incremental repeated old line",
+                !incrementalText.Contains("incremental runtime line", StringComparison.Ordinal),
+                "incremental routine line mirrored",
                 failedChecks);
 
             bool ready = failedChecks.Count == 0;

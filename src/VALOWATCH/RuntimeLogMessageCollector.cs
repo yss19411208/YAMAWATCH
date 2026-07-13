@@ -157,10 +157,7 @@ internal static class RuntimeLogMessageCollector
         StringBuilder payload = new();
         if (startLineIndex == 0 && lines.Count > MaximumInitialSyncLines)
         {
-            int skippedLineCount = lines.Count - MaximumInitialSyncLines;
-            startLineIndex = skippedLineCount;
-            payload.Append(
-                $"[first Discord log sync skipped older {skippedLineCount} local lines]{Environment.NewLine}");
+            startLineIndex = lines.Count - MaximumInitialSyncLines;
         }
 
         int chunkStartLine = startLineIndex + 1;
@@ -249,7 +246,80 @@ internal static class RuntimeLogMessageCollector
             return false;
         }
 
-        return true;
+        string[] notificationContinuationMarkers =
+        [
+            "Device:",
+            "ActiveDevices:",
+            "CapturedPeak:",
+            "WrittenPeak:",
+            "SilenceFrames:",
+            "ShortFrames:"
+        ];
+        if (notificationContinuationMarkers.Any(marker =>
+                trimmedLine.StartsWith(marker, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        string[] routineMarkers =
+        [
+            "VALORANT trigger received.",
+            "Discord settings loaded.",
+            "Runtime diagnostic.",
+            "Discord gateway connected.",
+            "Discord gateway is ready.",
+            "Discord voice permissions.",
+            "Connecting to Discord voice channel",
+            "Joined Discord voice channel",
+            "Pending update notification was sent and cleared.",
+            "Ordered physical microphone candidates:",
+            "Microphone capture selected.",
+            "LINE process-only loopback provider started.",
+            "LINE process-only loopback started.",
+            "Microphone audio relay started.",
+            "Microphone relay start buffer ready.",
+            "Microphone input became audible.",
+            "Discord audio relay started sending audible PCM.",
+            "GITHUB agent is already current.",
+            "Dedicated update skipped because the installed app is already current.",
+            "GITHUB background update check completed. ExitCode: 0.",
+            "App PE and SHA-256 validation passed:",
+            "App download progress:",
+            "Dedicated update completed.",
+            "GITHUB watch agent started.",
+            "GITHUB watch agent launch requested:",
+            "GITHUB agent replacement completed:",
+            "GITHUB is exiting so the validated replacement can be installed."
+        ];
+        if (routineMarkers.Any(marker =>
+                line.Contains(marker, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        string[] importantMarkers =
+        [
+            "failed",
+            "failure",
+            "could not",
+            "missing",
+            "denied",
+            "unauthorized",
+            "exception",
+            "timeout",
+            "timed out",
+            "mismatch",
+            "invalid",
+            "not a Windows PE",
+            "returned exit code",
+            "crash",
+            "faulted",
+            "recovery pending",
+            "remained unavailable"
+        ];
+
+        return importantMarkers.Any(marker =>
+            line.Contains(marker, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string CreateDiscordMessage(

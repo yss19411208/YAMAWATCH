@@ -1845,27 +1845,41 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         SocketTextChannel? textChannel = discordStatusTextChannel;
         if (textChannel is null)
         {
-            WriteLog($"Requested Discord notification could not be sent because the text channel is missing. Message: {message}");
+            WriteLog(
+                "Requested Discord notification could not be sent because the text channel is missing. " +
+                $"Message: {SummarizeDiscordMessageForLog(message)}");
             return false;
         }
 
         try
         {
             await textChannel.SendMessageAsync(message).ConfigureAwait(false);
-            WriteLog($"Requested Discord notification sent. Message: {message}");
+            WriteLog($"Requested Discord notification sent. Message: {SummarizeDiscordMessageForLog(message)}");
             return true;
         }
         catch (Exception exception)
         {
-            WriteLog($"Requested Discord notification failed. Message: {message}", exception);
+            WriteLog($"Requested Discord notification failed. Message: {SummarizeDiscordMessageForLog(message)}", exception);
             return false;
         }
     }
 
     private void QueueDiscordStatusMessage(string message)
     {
-        WriteLog($"Discord diagnostic notification queued. Message: {message}");
+        WriteLog($"Discord diagnostic notification queued. Message: {SummarizeDiscordMessageForLog(message)}");
         _ = SendRequestedDiscordNotificationAsync(message);
+    }
+
+    private static string SummarizeDiscordMessageForLog(string message)
+    {
+        string oneLineMessage = message
+            .Replace("\r\n", " / ", StringComparison.Ordinal)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        return oneLineMessage.Length <= 240
+            ? oneLineMessage
+            : oneLineMessage[..240] + "...";
     }
 
     private static float CalculateFloat32Peak(byte[] buffer, int offset, int byteCount)
