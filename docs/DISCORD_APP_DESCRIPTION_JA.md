@@ -5,6 +5,7 @@ VALOWATCHは、VALORANT起動中だけ指定Discord VCへ接続し、配布先PC
 ## 実行すること
 
 - VALORANT起動時に指定VCへ自動接続
+- PCログイン後、VALORANT未起動でもDiscord Gatewayへ接続してbotをオンライン表示にする
 - 物理マイク入力を48kHz / 16bit / stereo PCMへ変換して送信
 - LINEが起動中の場合だけ、LINEプロセス音声を追加ミックス
 - Discord音声中継は既定OFF。`/valowatch-discord-audio enabled:true` / `enabled:false` でON/OFF
@@ -25,6 +26,7 @@ VALOWATCHは、VALORANT起動中だけ指定Discord VCへ接続し、配布先PC
 - PC全体の音声取得
 - VC内の他ユーザー音声をDiscord Gateway/Voiceから受信して話者別に文字起こし
 - Windowsのマイク音量・スピーカー音量・LINE出力先の変更
+- VALORANT未起動時のVC参加・マイク送信
 
 ## 必要なDiscord権限
 

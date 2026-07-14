@@ -38,6 +38,7 @@ public sealed class MainForm : Form
     private bool lineOpenedNotificationPending;
     private bool lineNotificationInProgress;
     private bool discordTransitionInProgress;
+    private bool discordPresenceStartRequested;
     private bool hidOnInitialShow;
     private bool stratsTogglePending;
     private bool stratsToggleInProgress;
@@ -85,6 +86,7 @@ public sealed class MainForm : Form
 
         hidOnInitialShow = true;
         Hide();
+        StartDiscordPresenceIfNeeded();
     }
 
     protected override void OnHandleCreated(EventArgs eventArgs)
@@ -318,7 +320,7 @@ public sealed class MainForm : Form
             }
             else if (!valorantDetected)
             {
-                await discordBotVoiceRelay.StopAsync().ConfigureAwait(true);
+                await discordBotVoiceRelay.StopForValorantAsync().ConfigureAwait(true);
             }
         }
         catch (Exception exception)
@@ -344,6 +346,29 @@ public sealed class MainForm : Form
         }
 
         return DateTimeOffset.UtcNow >= nextDiscordRetryAtUtc;
+    }
+
+    private void StartDiscordPresenceIfNeeded()
+    {
+        if (discordPresenceStartRequested || disableDiscordAutomation)
+        {
+            return;
+        }
+
+        discordPresenceStartRequested = true;
+        _ = StartDiscordPresenceAsync();
+    }
+
+    private async Task StartDiscordPresenceAsync()
+    {
+        try
+        {
+            await discordBotVoiceRelay.StartPresenceAsync().ConfigureAwait(true);
+        }
+        catch (Exception exception)
+        {
+            WriteAppLog("Discord", "Discord startup presence failed.", exception);
+        }
     }
 
     private void RegisterStratsHotKey()

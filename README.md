@@ -11,6 +11,7 @@ VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord 
 - ホットキー登録が競合した場合も代替経路で動作し、5秒ごとに通常登録へ復旧します。
 - 低レベルキーボードフック内では表示やログ処理を行わず、専用メッセージを送るだけにしてWindowsによるタイムアウト解除を防ぎます。
 - 表示時はオーバーレイへ操作フォーカスを移し、非表示時はVALORANTへ戻します。
+- PCログイン後にVALOWATCHが起動した時点でDiscord botをオンラインにします。VALORANT未起動時はVCへ入らず、Gateway接続だけを維持します。
 - VALORANT起動時、Discord botが指定VCへ入り、物理マイクとLINEプロセス音声を送ります。
 - Discordアプリ音声の中継は既定OFFです。必要な時だけDiscordの `/valowatch-discord-audio enabled:true` でON、`enabled:false` でOFFにできます。
 - Discordへ送る物理マイク＋LINE＋任意のDiscordアプリ音声を、無料のローカルVoskモデルで文字起こしし、入室中VCのテキストチャットへ投稿します。
@@ -66,7 +67,7 @@ C:\Users\<Windowsユーザー名>\Documents\VALOWATCH\app\VALOWATCH.exe
 C:\Users\<Windowsユーザー名>\Documents\VALOWATCH\GITHUB.exe
 ```
 
-インストール直後に起動し、次回以降は自動起動します。VALORANTを開いたまま更新できますが、更新中はbotが短時間VCから抜けて再接続します。
+インストール直後に起動し、次回以降は自動起動します。PCログイン後、VALORANTを開いていなくてもbotはオンラインになります。VALORANTを開いたまま更新できますが、更新中はbotが短時間VCから抜けて再接続します。
 
 ## Discord設定
 

@@ -136,7 +136,22 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     public bool HasConfig => settingsStore.HasConfig;
 
+    public bool IsOnline { get; private set; }
+
     public bool IsRunning { get; private set; }
+
+    public async Task StartPresenceAsync()
+    {
+        await lifecycleSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await StartPresenceCoreAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            lifecycleSemaphore.Release();
+        }
+    }
 
     public async Task StartForValorantAsync()
     {
@@ -148,6 +163,58 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         finally
         {
             lifecycleSemaphore.Release();
+        }
+    }
+
+    private async Task StartPresenceCoreAsync()
+    {
+        lock (stateLock)
+        {
+            if (IsOnline && discordClient is not null)
+            {
+                return;
+            }
+
+            stopRequested = false;
+            StatusText = settingsStore.HasConfig ? "Discord presence connecting" : "Discord config missing";
+        }
+
+        WriteLog("PC startup presence requested. Starting Discord gateway without voice.");
+
+        DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+        if (settings is null)
+        {
+            StatusText = statusText;
+            return;
+        }
+
+        try
+        {
+            DiscordGatewayContext gatewayContext = await EnsureDiscordGatewayReadyAsync(settings)
+                .ConfigureAwait(false);
+            await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
+            await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
+
+            lock (stateLock)
+            {
+                IsOnline = true;
+                stopRequested = false;
+                StatusText = "Discord online idle";
+            }
+
+            WriteLog("Discord gateway is online for PC startup presence.");
+        }
+        catch (TimeoutException exception)
+        {
+            WriteLog("Discord presence startup timed out. Stopping Discord client before retry.", exception);
+            await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+            StatusText = "Discord presence timed out";
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Discord presence startup failed. Stopping Discord client before retry.", exception);
+            await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+            StatusText = $"Discord presence failed: {exception.Message}";
         }
     }
 
@@ -166,21 +233,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         WriteLog("VALORANT trigger received. Starting Discord automation.");
 
-        DiscordBotSettings? settings;
-        try
+        DiscordBotSettings? settings = LoadUsableSettings(out string configStatusText);
+        if (settings is null)
         {
-            settings = settingsStore.Load(out string configStatusText);
-            if (settings is null)
-            {
-                StatusText = configStatusText;
-                WriteLog($"Discord settings are not usable: {configStatusText}");
-                return;
-            }
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
-        {
-            StatusText = $"Discord config failed: {exception.Message}";
-            WriteLog("Discord settings failed to load.", exception);
+            StatusText = configStatusText;
             return;
         }
 
@@ -201,29 +257,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         string startupStage = "initializing Discord client";
         try
         {
-            startupStage = "creating Discord client";
-            DiscordSocketClient client = CreateClient();
-            WriteRuntimeDiagnostic(client);
-            AttachClientEvents(client);
-            discordClient = client;
-
-            TaskCompletionSource readyCompletionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            client.Ready += () =>
-            {
-                readyCompletionSource.TrySetResult();
-                return Task.CompletedTask;
-            };
-
-            startupStage = "Discord login";
-            await client.LoginAsync(TokenType.Bot, settings.BotToken).ConfigureAwait(false);
-            startupStage = "Discord gateway start";
-            await client.StartAsync().ConfigureAwait(false);
             startupStage = "Discord gateway ready";
-            await readyCompletionSource.Task.WaitAsync(DiscordGatewayReadyTimeout).ConfigureAwait(false);
-            WriteLog("Discord gateway is ready.");
-
-            SocketGuild guild = client.GetGuild(settings.GuildId)
-                ?? throw new InvalidOperationException("指定されたDiscordサーバーが見つかりません。Botがサーバーに参加しているか確認してください。");
+            DiscordGatewayContext gatewayContext = await EnsureDiscordGatewayReadyAsync(settings)
+                .ConfigureAwait(false);
+            SocketGuild guild = gatewayContext.Guild;
             SocketVoiceChannel voiceChannel = guild.GetVoiceChannel(settings.VoiceChannelId)
                 ?? throw new InvalidOperationException("指定されたDiscord VCが見つかりません。VoiceChannelIdを確認してください。");
             ConfigureDiscordConversationState(settings, guild, voiceChannel);
@@ -243,7 +280,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 await SendRequestedDiscordNotificationAsync(
                     $"VALOWATCH 音声DLL確認失敗: {nativeDependencyStatus}").ConfigureAwait(false);
                 await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
-                await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+                await StopCoreAsync(
+                        resetValorantNotificationSession: false,
+                        keepDiscordGatewayOnline: true)
+                    .ConfigureAwait(false);
                 return;
             }
 
@@ -281,7 +321,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     await SendRequestedDiscordNotificationAsync(
                         $"VALOWATCH 音声開始失敗: {audioException.Message}").ConfigureAwait(false);
                     await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
-                    await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+                    await StopCoreAsync(
+                            resetValorantNotificationSession: false,
+                            keepDiscordGatewayOnline: true)
+                        .ConfigureAwait(false);
                     StatusText = FormatRunningStatus("Discord audio recovery pending", audioException.Message);
                     return;
                 }
@@ -299,13 +342,19 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         catch (TimeoutException exception)
         {
             WriteLog($"Discord startup timed out during {startupStage}. Stopping Discord client before retry.", exception);
-            await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+            await StopCoreAsync(
+                    resetValorantNotificationSession: false,
+                    keepDiscordGatewayOnline: IsOnline && discordClient is not null)
+                .ConfigureAwait(false);
             StatusText = $"Discord timed out: {startupStage}";
         }
         catch (Exception exception)
         {
             WriteLog("Discord startup failed. Stopping Discord client before retry.", exception);
-            await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+            await StopCoreAsync(
+                    resetValorantNotificationSession: false,
+                    keepDiscordGatewayOnline: IsOnline && discordClient is not null)
+                .ConfigureAwait(false);
             StatusText = $"Discord failed: {exception.Message}";
         }
     }
@@ -323,6 +372,116 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    public async Task StopForValorantAsync()
+    {
+        await lifecycleSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await StopCoreAsync(
+                    resetValorantNotificationSession: true,
+                    keepDiscordGatewayOnline: true)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            lifecycleSemaphore.Release();
+        }
+    }
+
+    private DiscordBotSettings? LoadUsableSettings(out string statusText)
+    {
+        try
+        {
+            DiscordBotSettings? settings = settingsStore.Load(out statusText);
+            if (settings is null)
+            {
+                WriteLog($"Discord settings are not usable: {statusText}");
+            }
+
+            return settings;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            statusText = $"Discord config failed: {exception.Message}";
+            WriteLog("Discord settings failed to load.", exception);
+            return null;
+        }
+    }
+
+    private async Task<DiscordGatewayContext> EnsureDiscordGatewayReadyAsync(DiscordBotSettings settings)
+    {
+        DiscordSocketClient? existingClient = discordClient;
+        if (existingClient is not null)
+        {
+            if (existingClient.ConnectionState != ConnectionState.Disconnected)
+            {
+                await existingClient.SetStatusAsync(UserStatus.Online).ConfigureAwait(false);
+                lock (stateLock)
+                {
+                    IsOnline = true;
+                    stopRequested = false;
+                }
+
+                return ResolveDiscordGatewayContext(existingClient, settings);
+            }
+
+            WriteLog("Discord gateway client was disconnected; recreating the gateway session.");
+            DetachClientEvents(existingClient);
+            await CompleteShutdownOperationAsync(
+                () => existingClient.DisposeAsync().AsTask(),
+                "Discord disconnected client dispose").ConfigureAwait(false);
+            discordClient = null;
+            IsOnline = false;
+        }
+
+        DiscordSocketClient client = CreateClient();
+        WriteRuntimeDiagnostic(client);
+        AttachClientEvents(client);
+        discordClient = client;
+
+        TaskCompletionSource readyCompletionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task OnReadyAsync()
+        {
+            readyCompletionSource.TrySetResult();
+            return Task.CompletedTask;
+        }
+
+        client.Ready += OnReadyAsync;
+        try
+        {
+            await client.LoginAsync(TokenType.Bot, settings.BotToken).ConfigureAwait(false);
+            await client.StartAsync().ConfigureAwait(false);
+            await readyCompletionSource.Task.WaitAsync(DiscordGatewayReadyTimeout).ConfigureAwait(false);
+            await client.SetStatusAsync(UserStatus.Online).ConfigureAwait(false);
+        }
+        finally
+        {
+            client.Ready -= OnReadyAsync;
+        }
+
+        lock (stateLock)
+        {
+            IsOnline = true;
+            stopRequested = false;
+        }
+
+        WriteLog("Discord gateway is ready and bot status is online.");
+        return ResolveDiscordGatewayContext(client, settings);
+    }
+
+    private DiscordGatewayContext ResolveDiscordGatewayContext(
+        DiscordSocketClient client,
+        DiscordBotSettings settings)
+    {
+        SocketGuild guild = client.GetGuild(settings.GuildId)
+            ?? throw new InvalidOperationException("指定されたDiscordサーバーが見つかりません。Botがサーバーに参加しているか確認してください。");
+
+        discordStatusTextChannel = settings.TextChannelId == 0
+            ? null
+            : guild.GetTextChannel(settings.TextChannelId);
+        return new DiscordGatewayContext(client, guild);
+    }
+
     public async Task<bool> NotifyLineOpenedAsync(string message)
     {
         string notificationMessage = string.IsNullOrWhiteSpace(message)
@@ -331,7 +490,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         lock (stateLock)
         {
-            if (stopRequested || !IsRunning)
+            if (stopRequested || !IsOnline)
             {
                 WriteLog("LINE opened notification delayed because Discord is not running.");
                 return false;
@@ -367,7 +526,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return true;
     }
 
-    private async Task StopCoreAsync(bool resetValorantNotificationSession)
+    private async Task StopCoreAsync(
+        bool resetValorantNotificationSession,
+        bool keepDiscordGatewayOnline = false)
     {
         CancellationTokenSource? cancellationTokenSource;
         Task? activeRelayTask;
@@ -382,8 +543,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             relayTask = null;
             microphoneHealthTask = null;
             IsRunning = false;
-            stopRequested = true;
-            StatusText = settingsStore.HasConfig ? "Discord idle" : "Discord config missing";
+            stopRequested = !keepDiscordGatewayOnline;
+            StatusText = keepDiscordGatewayOnline
+                ? "Discord online idle"
+                : settingsStore.HasConfig ? "Discord idle" : "Discord config missing";
             if (resetValorantNotificationSession)
             {
                 valorantOpenedNotificationSentForCurrentSession = false;
@@ -461,6 +624,18 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         await StopRuntimeLogUpdatesAsync().ConfigureAwait(false);
         await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
 
+        if (keepDiscordGatewayOnline)
+        {
+            lock (stateLock)
+            {
+                IsOnline = discordClient is not null &&
+                    discordClient.ConnectionState != ConnectionState.Disconnected;
+                stopRequested = false;
+            }
+
+            return;
+        }
+
         if (discordClient is not null)
         {
             DetachClientEvents(discordClient);
@@ -476,6 +651,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             discordClient = null;
             discordStatusTextChannel = null;
             discordTranscriptionTextChannel = null;
+        }
+
+        lock (stateLock)
+        {
+            IsOnline = false;
         }
     }
 
@@ -941,9 +1121,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         WriteLog("Discord gateway connected.");
         lock (stateLock)
         {
+            IsOnline = true;
             if (!stopRequested && IsRunning)
             {
                 StatusText = FormatRunningStatus("Discord mic live");
+            }
+            else if (!stopRequested)
+            {
+                StatusText = "Discord online idle";
             }
         }
 
@@ -957,9 +1142,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Exception: {FormatExceptionSummary(exception)}");
         lock (stateLock)
         {
+            IsOnline = false;
             if (!stopRequested && IsRunning)
             {
                 StatusText = $"Discord reconnecting: {exception.Message}";
+            }
+            else if (!stopRequested)
+            {
+                StatusText = $"Discord presence reconnecting: {exception.Message}";
             }
         }
 
@@ -1010,7 +1200,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         await lifecycleSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            await StopCoreAsync(resetValorantNotificationSession: false).ConfigureAwait(false);
+            await StopCoreAsync(
+                    resetValorantNotificationSession: false,
+                    keepDiscordGatewayOnline: true)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -2948,4 +3141,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
         }
     }
+
+    private sealed record DiscordGatewayContext(
+        DiscordSocketClient Client,
+        SocketGuild Guild);
 }
