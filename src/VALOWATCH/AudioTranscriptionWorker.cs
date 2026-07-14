@@ -17,6 +17,7 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
     private readonly IMessageChannel destinationChannel;
     private readonly IAudioTranscriber transcriber;
     private readonly Action<string, Exception?> writeLog;
+    private readonly Func<string>? conversationLabelProvider;
     private readonly Channel<AudioTranscriptionChunk> chunkChannel;
     private readonly CancellationTokenSource workerCancellationTokenSource = new();
     private readonly Task workerTask;
@@ -31,13 +32,15 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
         float minimumPeak,
         IMessageChannel destinationChannel,
         IAudioTranscriber transcriber,
-        Action<string, Exception?> writeLog)
+        Action<string, Exception?> writeLog,
+        Func<string>? conversationLabelProvider = null)
     {
         this.waveFormat = waveFormat;
         this.minimumPeak = minimumPeak;
         this.destinationChannel = destinationChannel;
         this.transcriber = transcriber;
         this.writeLog = writeLog;
+        this.conversationLabelProvider = conversationLabelProvider;
 
         targetChunkBytes = CalculateTargetChunkBytes(waveFormat, chunkDuration);
         chunkChannel = Channel.CreateBounded<AudioTranscriptionChunk>(new BoundedChannelOptions(2)
@@ -201,7 +204,7 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
         }
     }
 
-    private static Embed BuildTranscriptionEmbed(string transcript)
+    private Embed BuildTranscriptionEmbed(string transcript)
     {
         EmbedBuilder embedBuilder = new()
         {
@@ -210,6 +213,13 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
         };
+
+        string conversationLabel = conversationLabelProvider?.Invoke() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(conversationLabel))
+        {
+            embedBuilder.AddField("会話", TrimEmbedField(conversationLabel), inline: false);
+        }
+
         return embedBuilder.Build();
     }
 
@@ -220,6 +230,15 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
         return trimmedText.Length <= maximumLength
             ? trimmedText
             : trimmedText[..maximumLength] + "...";
+    }
+
+    private static string TrimEmbedField(string text)
+    {
+        string trimmedText = text.Trim();
+        const int maximumFieldLength = 1024;
+        return trimmedText.Length <= maximumFieldLength
+            ? trimmedText
+            : trimmedText[..(maximumFieldLength - 3)] + "...";
     }
 
     private sealed record AudioTranscriptionChunk(byte[] PcmBytes, float Peak);

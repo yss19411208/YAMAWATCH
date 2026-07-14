@@ -1051,6 +1051,25 @@ static class Program
                 0,
                 mixedBytesRead);
 
+            byte[] discordMixedFrameBuffer = new byte[3840];
+            IWaveProvider discordMixedProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.16F),
+                0.85F,
+                0F,
+                new DiagnosticToneWaveProvider(880F, 0.16F),
+                0.45F,
+                new DiagnosticToneWaveProvider(660F, 0.16F),
+                0.45F);
+            int discordMixedBytesRead = discordMixedProvider.Read(
+                discordMixedFrameBuffer,
+                0,
+                discordMixedFrameBuffer.Length);
+            float discordMixedPeak = DiscordBotVoiceRelay.CalculateAudioPeak(
+                discordMixedProvider.WaveFormat,
+                discordMixedFrameBuffer,
+                0,
+                discordMixedBytesRead);
+
             byte[] quietVoiceFrameBuffer = new byte[3840];
             IWaveProvider quietVoiceProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
                 new DiagnosticToneWaveProvider(440F, 0.008F),
@@ -1127,6 +1146,8 @@ static class Program
             bool mixLooksReady = micOnlyBytesRead == micOnlyFrameBuffer.Length &&
                 mixedBytesRead == mixedFrameBuffer.Length &&
                 mixedPeak > micOnlyPeak * 1.05F &&
+                discordMixedBytesRead == discordMixedFrameBuffer.Length &&
+                discordMixedPeak > micOnlyPeak * 1.05F &&
                 quietVoiceBytesRead == quietVoiceFrameBuffer.Length &&
                 quietVoicePeak >= 0.03F &&
                 loudVoiceBytesRead == loudVoiceFrameBuffer.Length &&
@@ -1141,13 +1162,15 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Discord audio mix check: {(mixLooksReady ? "ready" : "failed")}. " +
                 $"MicOnlyBytes: {micOnlyBytesRead}. MixedBytes: {mixedBytesRead}. " +
+                $"DiscordMixedBytes: {discordMixedBytesRead}. " +
                 $"MicOnlyPeak: {micOnlyPeak:0.0000}. MixedPeak: {mixedPeak:0.0000}. " +
+                $"DiscordMixedPeak: {discordMixedPeak:0.0000}. " +
                 $"QuietVoiceBytes: {quietVoiceBytesRead}. QuietVoicePeak: {quietVoicePeak:0.0000}. " +
                 $"LoudVoiceBytes: {loudVoiceBytesRead}. LoudVoicePeak: {loudVoicePeak:0.0000}. " +
                 $"LowNoiseBytes: {lowNoiseBytesRead}. LowNoisePeak: {lowNoisePeak:0.0000}. " +
                 $"WatchdogHealthy: {watchdogAllowsHealthyFrames}. WatchdogStalled: {watchdogRecoversStalledFrames}. " +
                 $"WatchdogStopped: {watchdogIgnoresStoppedRelay}. " +
-                "Sources: microphone+LINE. OutputPlayback: unchanged; no render device opened by this diagnostic." +
+                "Sources: microphone+LINE+Discord-process. OutputPlayback: unchanged; no render device opened by this diagnostic." +
                 $"{Environment.NewLine}");
             Environment.ExitCode = mixLooksReady ? 0 : 1;
         }

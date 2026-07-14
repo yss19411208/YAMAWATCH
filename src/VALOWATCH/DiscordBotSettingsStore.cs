@@ -89,6 +89,10 @@ public sealed class DiscordBotSettingsStore
             StreamLineAudioWhenRunning = true,
             LineAudioProcessNames = ["LINE", "Line", "line"],
             LineAudioVolume = 0.45F,
+            StreamDiscordAudioWhenRunning = false,
+            DiscordAudioProcessNames = ["Discord", "DiscordCanary", "DiscordPTB"],
+            DiscordAudioVolume = 0.45F,
+            DiscordAudioCommandEnabled = true,
             TranscriptionEnabled = false,
             TranscriptionEngine = "vosk",
             TranscriptionModelPath = string.Empty,
@@ -212,6 +216,39 @@ public sealed class DiscordBotSettingsStore
             settings.LineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
         }
 
+        if (TryGetBoolean(
+            envValues,
+            out bool streamDiscordAudio,
+            "DISCORD_STREAM_DISCORD_AUDIO",
+            "DISCORD_STREAM_DISCORD_OUTPUT_AUDIO",
+            "VALOWATCH_DISCORD_AUDIO_ENABLED"))
+        {
+            settings.StreamDiscordAudioWhenRunning = streamDiscordAudio;
+        }
+
+        if (TryGetString(envValues, out string discordProcessNames, "DISCORD_AUDIO_PROCESS_NAMES", "DISCORD_PROCESS_NAMES"))
+        {
+            string[] parsedProcessNames = ParseProcessNameList(discordProcessNames);
+            if (parsedProcessNames.Length > 0)
+            {
+                settings.DiscordAudioProcessNames = parsedProcessNames;
+            }
+        }
+
+        if (TryGetSingle(envValues, out float discordAudioVolume, "DISCORD_AUDIO_VOLUME", "DISCORD_OUTPUT_AUDIO_VOLUME"))
+        {
+            settings.DiscordAudioVolume = Math.Clamp(discordAudioVolume, 0.0F, 1.0F);
+        }
+
+        if (TryGetBoolean(
+            envValues,
+            out bool discordAudioCommandEnabled,
+            "DISCORD_AUDIO_COMMAND_ENABLED",
+            "VALOWATCH_DISCORD_AUDIO_COMMAND_ENABLED"))
+        {
+            settings.DiscordAudioCommandEnabled = discordAudioCommandEnabled;
+        }
+
         bool transcriptionEnabledWasConfigured = TryGetBoolean(
             envValues,
             out bool transcriptionEnabled,
@@ -262,6 +299,10 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_STREAM_LINE_AUDIO=true",
             "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
             "DISCORD_LINE_AUDIO_VOLUME=0.45",
+            "DISCORD_STREAM_DISCORD_AUDIO=false",
+            "DISCORD_AUDIO_PROCESS_NAMES=Discord,DiscordCanary,DiscordPTB",
+            "DISCORD_AUDIO_VOLUME=0.45",
+            "DISCORD_AUDIO_COMMAND_ENABLED=true",
             "VALOWATCH_TRANSCRIPTION_ENABLED=false",
             "VALOWATCH_TRANSCRIPTION_ENGINE=vosk",
             "VALOWATCH_TRANSCRIPTION_MODEL_PATH=",
@@ -380,6 +421,15 @@ public sealed class DiscordBotSettingsStore
         }
 
         return float.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static string[] ParseProcessNameList(string processNames)
+    {
+        return processNames
+            .Split([',', ';', '|'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(processName => !string.IsNullOrWhiteSpace(processName))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static bool TryGetInt32(

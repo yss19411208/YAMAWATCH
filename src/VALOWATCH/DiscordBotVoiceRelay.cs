@@ -41,6 +41,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan DiscordShutdownTimeout = TimeSpan.FromSeconds(5);
     private const bool DiscordVoiceDaveEncryptionEnabled = true;
+    private const string DiscordAudioCommandName = "valowatch-discord-audio";
+    private const string DiscordAudioCommandEnabledOptionName = "enabled";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -62,6 +64,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private WasapiCapture? microphoneCapture;
     private BufferedWaveProvider? bufferedWaveProvider;
     private LineProcessLoopbackWaveProvider? lineProcessLoopbackProvider;
+    private LineProcessLoopbackWaveProvider? discordProcessLoopbackProvider;
     private IWaveProvider? discordPcmProvider;
     private AudioOutStream? discordStream;
     private AudioTranscriptionWorker? audioTranscriptionWorker;
@@ -69,6 +72,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private Task? relayTask;
     private Task? microphoneHealthTask;
     private SwitchingSampleProvider? microphoneSourceSwitcher;
+    private SwitchingSampleProvider? discordAudioSourceSwitcher;
     private IReadOnlyList<MicrophoneDeviceCandidate> microphoneCandidates = [];
     private int currentMicrophoneCandidateIndex = -1;
     private bool microphoneCaptureFaulted;
@@ -106,6 +110,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private Task? runtimeLogTask;
     private string currentCaptureDeviceList = string.Empty;
     private string currentLineLoopbackSourceName = string.Empty;
+    private string currentDiscordLoopbackSourceName = string.Empty;
+    private string[] currentDiscordAudioProcessNames = [];
+    private float currentDiscordAudioVolume;
+    private bool discordProcessAudioRuntimeEnabled;
+    private bool discordAudioCommandEnabled;
+    private ulong currentVoiceGuildId;
+    private string currentVoiceGuildName = string.Empty;
+    private string currentVoiceChannelName = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioStatsLogTime = DateTimeOffset.MinValue;
     private DateTimeOffset lastDiscordNetworkWarningLoggedAt = DateTimeOffset.MinValue;
@@ -179,6 +191,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"NoiseGate: {settings.MicrophoneNoiseGate:0.000}. " +
             $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
             $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}. " +
+            $"StreamDiscordAudio: {settings.StreamDiscordAudioWhenRunning}. " +
+            $"DiscordAudioProcesses: {string.Join(",", settings.DiscordAudioProcessNames)}. " +
+            $"DiscordAudioCommand: {settings.DiscordAudioCommandEnabled}. " +
             $"Transcription: {settings.TranscriptionEnabled}. " +
             $"TranscriptionEngine: {settings.TranscriptionEngine}. " +
             $"TranscriptionChunkSeconds: {settings.TranscriptionChunkSeconds}.");
@@ -211,6 +226,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 ?? throw new InvalidOperationException("指定されたDiscordサーバーが見つかりません。Botがサーバーに参加しているか確認してください。");
             SocketVoiceChannel voiceChannel = guild.GetVoiceChannel(settings.VoiceChannelId)
                 ?? throw new InvalidOperationException("指定されたDiscord VCが見つかりません。VoiceChannelIdを確認してください。");
+            ConfigureDiscordConversationState(settings, guild, voiceChannel);
             discordStatusTextChannel = settings.TextChannelId == 0
                 ? null
                 : guild.GetTextChannel(settings.TextChannelId);
@@ -232,6 +248,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
 
             EnsureVoiceChannelPermissions(guild, voiceChannel);
+            await EnsureDiscordAudioCommandAsync(guild, settings).ConfigureAwait(false);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
             startupStage = "Discord voice channel connect";
@@ -605,6 +622,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         client.Log += OnDiscordLogAsync;
         client.Connected += OnDiscordConnectedAsync;
         client.Disconnected += OnDiscordDisconnectedAsync;
+        client.SlashCommandExecuted += OnSlashCommandExecutedAsync;
     }
 
     private void DetachClientEvents(DiscordSocketClient client)
@@ -612,6 +630,85 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         client.Log -= OnDiscordLogAsync;
         client.Connected -= OnDiscordConnectedAsync;
         client.Disconnected -= OnDiscordDisconnectedAsync;
+        client.SlashCommandExecuted -= OnSlashCommandExecutedAsync;
+    }
+
+    private async Task OnSlashCommandExecutedAsync(SocketSlashCommand command)
+    {
+        if (!string.Equals(command.Data.Name, DiscordAudioCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            if (!discordAudioCommandEnabled)
+            {
+                await command
+                    .RespondAsync("VALOWATCHのDiscord音声中継コマンドは無効です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (command.User is not SocketGuildUser guildUser ||
+                (currentVoiceGuildId != 0 && guildUser.Guild.Id != currentVoiceGuildId))
+            {
+                await command
+                    .RespondAsync("このサーバーではVALOWATCHのDiscord音声中継を操作できません。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHのDiscord音声中継を切り替えるにはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            object? optionValue = command.Data.Options
+                .FirstOrDefault(option => string.Equals(
+                    option.Name,
+                    DiscordAudioCommandEnabledOptionName,
+                    StringComparison.OrdinalIgnoreCase))
+                ?.Value;
+            if (optionValue is not bool enabled)
+            {
+                await command
+                    .RespondAsync("enabled に true か false を指定してください。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            bool stateChanged = SetDiscordProcessAudioEnabled(enabled, "Discord slash command");
+            bool enabledAfterCommand = discordProcessLoopbackProvider is not null;
+            string statusText = enabledAfterCommand ? "ON" : "OFF";
+            string changedText = stateChanged
+                ? "切り替えました"
+                : enabled == enabledAfterCommand
+                    ? "すでにその状態です"
+                    : "切り替えできませんでした";
+            await command
+                .RespondAsync(
+                    $"VALOWATCH Discord音声中継: {statusText} ({changedText})",
+                    ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or HttpRequestException or TaskCanceledException or Discord.Net.HttpException)
+        {
+            WriteLog("Discord audio slash command handling failed.", exception);
+            try
+            {
+                await command
+                    .RespondAsync("VALOWATCH Discord音声中継の切り替えに失敗しました。", ephemeral: true)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Discord audio slash command error response failed.", responseException);
+            }
+        }
     }
 
     private Task OnDiscordLogAsync(LogMessage logMessage)
@@ -948,6 +1045,77 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private void ConfigureDiscordConversationState(
+        DiscordBotSettings settings,
+        SocketGuild guild,
+        SocketVoiceChannel voiceChannel)
+    {
+        currentVoiceGuildId = guild.Id;
+        currentVoiceGuildName = string.IsNullOrWhiteSpace(guild.Name) ? guild.Id.ToString() : guild.Name.Trim();
+        currentVoiceChannelName = string.IsNullOrWhiteSpace(voiceChannel.Name)
+            ? voiceChannel.Id.ToString()
+            : voiceChannel.Name.Trim();
+        currentDiscordAudioProcessNames = settings.DiscordAudioProcessNames.Length == 0
+            ? ["Discord", "DiscordCanary", "DiscordPTB"]
+            : settings.DiscordAudioProcessNames;
+        currentDiscordAudioVolume = Math.Clamp(settings.DiscordAudioVolume, 0.0F, 1.0F);
+        discordProcessAudioRuntimeEnabled = settings.StreamDiscordAudioWhenRunning;
+        discordAudioCommandEnabled = settings.DiscordAudioCommandEnabled;
+
+        WriteLog(
+            "Discord conversation state configured. " +
+            $"Guild: {currentVoiceGuildName} ({currentVoiceGuildId}). " +
+            $"Voice: {currentVoiceChannelName} ({voiceChannel.Id}). " +
+            $"DiscordAudioDefault: {discordProcessAudioRuntimeEnabled}. " +
+            $"DiscordAudioVolume: {currentDiscordAudioVolume:0.00}.");
+    }
+
+    private async Task EnsureDiscordAudioCommandAsync(SocketGuild guild, DiscordBotSettings settings)
+    {
+        if (!settings.DiscordAudioCommandEnabled)
+        {
+            WriteLog("Discord audio slash command registration is disabled.");
+            return;
+        }
+
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            bool commandAlreadyExists = commands.Any(command =>
+                string.Equals(command.Name, DiscordAudioCommandName, StringComparison.OrdinalIgnoreCase));
+            if (commandAlreadyExists)
+            {
+                WriteLog($"Discord audio slash command already exists: /{DiscordAudioCommandName}.");
+                return;
+            }
+
+            SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
+                .WithName(DiscordAudioCommandName)
+                .WithDescription("VALOWATCHのDiscord音声中継をON/OFFします")
+                .WithContextTypes(InteractionContextType.Guild)
+                .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+                .AddOption(
+                    DiscordAudioCommandEnabledOptionName,
+                    ApplicationCommandOptionType.Boolean,
+                    "trueでON、falseでOFF",
+                    isRequired: true);
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Discord audio slash command registered: /{DiscordAudioCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Discord audio slash command could not be registered. " +
+                "Existing audio relay will still run; command control may be unavailable until the next startup.",
+                exception);
+        }
+    }
+
     private IMessageChannel? ResolveTranscriptionTextChannel(
         SocketGuild guild,
         SocketVoiceChannel voiceChannel,
@@ -1022,7 +1190,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 settings.TranscriptionMinimumPeak,
                 transcriptionTextChannel,
                 transcriber,
-                WriteLog);
+                WriteLog,
+                GetCurrentConversationLabel);
             WriteLog(
                 "Audio transcription started. " +
                 $"Target: {DescribeMessageChannel(transcriptionTextChannel)}. " +
@@ -1074,6 +1243,30 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             : channel.GetType().Name;
     }
 
+    private string GetCurrentConversationLabel()
+    {
+        List<string> labels = [];
+        LineProcessLoopbackWaveProvider? lineProvider = lineProcessLoopbackProvider;
+        if (lineProvider?.IsCapturing == true)
+        {
+            labels.Add("LINE会話");
+        }
+
+        LineProcessLoopbackWaveProvider? discordProvider = discordProcessLoopbackProvider;
+        if (discordProcessAudioRuntimeEnabled && discordProvider?.IsCapturing == true)
+        {
+            string guildName = string.IsNullOrWhiteSpace(currentVoiceGuildName)
+                ? "不明なサーバー"
+                : currentVoiceGuildName;
+            string voiceChannelName = string.IsNullOrWhiteSpace(currentVoiceChannelName)
+                ? "不明なVC"
+                : currentVoiceChannelName;
+            labels.Add($"Discord会話: {guildName} / {voiceChannelName}");
+        }
+
+        return labels.Count == 0 ? "マイク" : string.Join(Environment.NewLine, labels);
+    }
+
     private void StartMicrophoneAudioRelay(DiscordBotSettings settings)
     {
         if (audioClient is null)
@@ -1095,12 +1288,20 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         IWaveProvider? lineAudioProvider = TryStartLineLoopbackAudio(settings);
+        discordAudioSourceSwitcher = new SwitchingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
+        IWaveProvider discordAudioSwitchProvider = new SampleToWaveProvider(discordAudioSourceSwitcher);
         discordPcmProvider = CreateDiscordPcmProvider(
             new SampleToWaveProvider(microphoneSourceSwitcher),
             settings.MicrophoneVolume,
             settings.MicrophoneNoiseGate,
             lineAudioProvider,
-            settings.LineAudioVolume);
+            settings.LineAudioVolume,
+            discordAudioSwitchProvider,
+            1.0F);
+        if (settings.StreamDiscordAudioWhenRunning)
+        {
+            SetDiscordProcessAudioEnabled(true, "startup default setting");
+        }
 
         discordStream = audioClient.CreatePCMStream(AudioApplication.Voice);
         relayCancellationTokenSource = new CancellationTokenSource();
@@ -1116,6 +1317,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Volume: {settings.MicrophoneVolume:0.00}. Noise gate: {settings.MicrophoneNoiseGate:0.000}. " +
             $"Line loopback: {(lineAudioProvider is null ? "off" : currentLineLoopbackSourceName)}. " +
             $"Line volume: {settings.LineAudioVolume:0.00}. " +
+            $"Discord loopback: {(settings.StreamDiscordAudioWhenRunning ? currentDiscordLoopbackSourceName : "off")}. " +
+            $"Discord volume: {currentDiscordAudioVolume:0.00}. " +
             "Output playback: unchanged; capture-only relay. " +
             $"Preferred device: {settings.MicrophoneDeviceName}.");
 
@@ -1515,6 +1718,77 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private bool SetDiscordProcessAudioEnabled(bool enabled, string reason)
+    {
+        if (enabled)
+        {
+            bool alreadyEnabled = discordProcessAudioRuntimeEnabled && discordProcessLoopbackProvider is not null;
+            if (alreadyEnabled)
+            {
+                WriteLog($"Discord process-only loopback audio is already enabled. Reason: {reason}.");
+                return false;
+            }
+
+            discordProcessAudioRuntimeEnabled = true;
+            return TryStartDiscordProcessLoopbackAudio(reason);
+        }
+
+        bool wasEnabled = discordProcessAudioRuntimeEnabled || discordProcessLoopbackProvider is not null;
+        discordProcessAudioRuntimeEnabled = false;
+        DisposeDiscordLoopbackObjects();
+        WriteLog($"Discord process-only loopback audio disabled. Reason: {reason}.");
+        return wasEnabled;
+    }
+
+    private bool TryStartDiscordProcessLoopbackAudio(string reason)
+    {
+        if (discordAudioSourceSwitcher is null)
+        {
+            WriteLog($"Discord process-only loopback audio could not start because the mixer is not ready. Reason: {reason}.");
+            return false;
+        }
+
+        if (discordProcessLoopbackProvider is not null)
+        {
+            WriteLog($"Discord process-only loopback audio is already enabled. Reason: {reason}.");
+            return false;
+        }
+
+        string[] discordProcessNames = currentDiscordAudioProcessNames.Length == 0
+            ? ["Discord", "DiscordCanary", "DiscordPTB"]
+            : currentDiscordAudioProcessNames;
+
+        try
+        {
+            discordProcessLoopbackProvider = new LineProcessLoopbackWaveProvider(
+                discordProcessNames,
+                LineLoopbackBufferDuration,
+                (message, exception) => WriteLog(message, exception),
+                "Discord");
+            currentDiscordLoopbackSourceName = discordProcessLoopbackProvider.CurrentSourceDescription;
+
+            ISampleProvider discordLoopbackSampleProvider = CreateMono48KhzSampleProvider(
+                discordProcessLoopbackProvider,
+                "Discord process loopback");
+            discordLoopbackSampleProvider = new SimpleVolumeSampleProvider(
+                discordLoopbackSampleProvider,
+                currentDiscordAudioVolume);
+            discordAudioSourceSwitcher.SetSource(discordLoopbackSampleProvider);
+
+            WriteLog(
+                $"Discord process-only loopback provider enabled. Reason: {reason}. " +
+                $"Format: {discordProcessLoopbackProvider.WaveFormat}. Buffer: {LineLoopbackBufferDuration.TotalMilliseconds:0}ms. " +
+                $"ProcessNames: {string.Join(", ", discordProcessNames)}. Volume: {currentDiscordAudioVolume:0.00}.");
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or COMException or ArgumentException)
+        {
+            WriteLog("Discord process-only loopback provider could not start. Continuing without Discord app audio.", exception);
+            DisposeDiscordLoopbackObjects();
+            return false;
+        }
+    }
+
     private void OnMicrophoneRecordingStopped(object? sender, StoppedEventArgs eventArgs)
     {
         if (!ReferenceEquals(sender, microphoneCapture) || stopRequested)
@@ -1553,6 +1827,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         DisposeLineLoopbackObjects();
+        DisposeDiscordLoopbackObjects();
+        discordAudioSourceSwitcher = null;
         discordStream?.Dispose();
 
         discordStream = null;
@@ -1584,6 +1860,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         lineProcessLoopbackProvider?.Dispose();
         lineProcessLoopbackProvider = null;
         currentLineLoopbackSourceName = string.Empty;
+    }
+
+    private void DisposeDiscordLoopbackObjects()
+    {
+        discordAudioSourceSwitcher?.ClearSource();
+        discordProcessLoopbackProvider?.Dispose();
+        discordProcessLoopbackProvider = null;
+        currentDiscordLoopbackSourceName = string.Empty;
     }
 
     internal static MMDevice GetDefaultMicrophoneDevice(string? preferredDeviceName = null)
@@ -1665,25 +1949,47 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         float microphoneVolume,
         float microphoneNoiseGate,
         IWaveProvider? lineLoopbackWaveProvider = null,
-        float lineLoopbackVolume = 0.45F)
+        float lineLoopbackVolume = 0.45F,
+        IWaveProvider? discordLoopbackWaveProvider = null,
+        float discordLoopbackVolume = 0.45F)
     {
         ISampleProvider microphoneSampleProvider = CreateMono48KhzSampleProvider(microphoneWaveProvider, "microphone");
         microphoneSampleProvider = new MicrophoneVoiceSampleProvider(microphoneSampleProvider, microphoneVolume, microphoneNoiseGate);
 
         ISampleProvider mixedSampleProvider = microphoneSampleProvider;
+        List<ISampleProvider> additionalSampleProviders = [];
         if (lineLoopbackWaveProvider is not null)
         {
             ISampleProvider lineLoopbackSampleProvider = CreateMono48KhzSampleProvider(lineLoopbackWaveProvider, "LINE loopback");
             lineLoopbackSampleProvider = new SimpleVolumeSampleProvider(
                 lineLoopbackSampleProvider,
                 Math.Clamp(lineLoopbackVolume, 0.0F, 1.0F));
+            additionalSampleProviders.Add(lineLoopbackSampleProvider);
+        }
 
+        if (discordLoopbackWaveProvider is not null)
+        {
+            ISampleProvider discordLoopbackSampleProvider = CreateMono48KhzSampleProvider(
+                discordLoopbackWaveProvider,
+                "Discord process loopback");
+            discordLoopbackSampleProvider = new SimpleVolumeSampleProvider(
+                discordLoopbackSampleProvider,
+                Math.Clamp(discordLoopbackVolume, 0.0F, 1.0F));
+            additionalSampleProviders.Add(discordLoopbackSampleProvider);
+        }
+
+        if (additionalSampleProviders.Count > 0)
+        {
             MixingSampleProvider mixer = new(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1))
             {
                 ReadFully = true
             };
             mixer.AddMixerInput(microphoneSampleProvider);
-            mixer.AddMixerInput(lineLoopbackSampleProvider);
+            foreach (ISampleProvider additionalSampleProvider in additionalSampleProviders)
+            {
+                mixer.AddMixerInput(additionalSampleProvider);
+            }
+
             mixedSampleProvider = new SoftLimiterSampleProvider(mixer);
         }
 
@@ -2428,6 +2734,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
 
             Volatile.Write(ref sourceProvider, nextSourceProvider);
+        }
+
+        public void ClearSource()
+        {
+            Volatile.Write(ref sourceProvider, null);
         }
 
         public int Read(float[] buffer, int offset, int count)

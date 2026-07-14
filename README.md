@@ -1,6 +1,6 @@
 # VALOWATCH
 
-VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord VCへの物理マイク＋LINE音声中継だけを行う Windows 10/11・.NET 8 WinForms 常駐アプリです。
+VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord VCへの物理マイク＋LINE音声中継を行う Windows 10/11・.NET 8 WinForms 常駐アプリです。
 
 ## 動作
 
@@ -11,8 +11,10 @@ VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord 
 - ホットキー登録が競合した場合も代替経路で動作し、5秒ごとに通常登録へ復旧します。
 - 低レベルキーボードフック内では表示やログ処理を行わず、専用メッセージを送るだけにしてWindowsによるタイムアウト解除を防ぎます。
 - 表示時はオーバーレイへ操作フォーカスを移し、非表示時はVALORANTへ戻します。
-- VALORANT起動時、Discord botが指定VCへ入り、物理マイクとLINEプロセス音声だけを送ります。
-- Discordへ送る物理マイク＋LINEミックス音声を、無料のローカルVoskモデルで文字起こしし、入室中VCのテキストチャットへ投稿します。
+- VALORANT起動時、Discord botが指定VCへ入り、物理マイクとLINEプロセス音声を送ります。
+- Discordアプリ音声の中継は既定OFFです。必要な時だけDiscordの `/valowatch-discord-audio enabled:true` でON、`enabled:false` でOFFにできます。
+- Discordへ送る物理マイク＋LINE＋任意のDiscordアプリ音声を、無料のローカルVoskモデルで文字起こしし、入室中VCのテキストチャットへ投稿します。
+- 文字起こしには、LINE捕捉中は `LINE会話`、Discordアプリ音声中継中はbotが入っているサーバー名とVC名を表示します。
 - PCのスピーカー音量、LINEの出力先、Windowsのマイク音量は変更しません。
 - Discord音声フレームが5秒停止した場合はVCを自動再接続します。
 - 小さいマイク音だけを自動増幅し、無音レベルのノイズは増幅しません。
@@ -89,6 +91,10 @@ DISCORD_MIC_NOISE_GATE=0
 DISCORD_STREAM_LINE_AUDIO=true
 DISCORD_LINE_PROCESS_NAMES=LINE,Line,line
 DISCORD_LINE_AUDIO_VOLUME=0.45
+DISCORD_STREAM_DISCORD_AUDIO=false
+DISCORD_AUDIO_PROCESS_NAMES=Discord,DiscordCanary,DiscordPTB
+DISCORD_AUDIO_VOLUME=0.45
+DISCORD_AUDIO_COMMAND_ENABLED=true
 VALOWATCH_TRANSCRIPTION_ENABLED=false
 VALOWATCH_TRANSCRIPTION_ENGINE=vosk
 VALOWATCH_TRANSCRIPTION_MODEL_PATH=
@@ -105,6 +111,10 @@ VALOWATCH_GITHUB_TOKEN=
 `DISCORD_MIC_DEVICE_NAME` が空の場合は、Windowsの既定の通話用・コンソール用マイクを優先します。仮想入力、ステレオミキサー、スピーカー入力は自動選択しません。
 
 LINEが起動している間だけ、`DISCORD_LINE_PROCESS_NAMES` に一致するプロセスのApplication Loopback音声をマイクへ追加します。LINEが無い間はマイクだけを送ります。
+
+Discordアプリ音声は `DISCORD_STREAM_DISCORD_AUDIO=false` が既定です。Discord上で `/valowatch-discord-audio enabled:true` を実行すると、`DISCORD_AUDIO_PROCESS_NAMES` に一致するDiscordデスクトップアプリの音声をマイクへ追加します。OFFに戻す場合は `/valowatch-discord-audio enabled:false` を実行します。このコマンドはサーバー管理権限を持つユーザーだけが使えます。
+
+Discordアプリ音声はプロセス単位で捕捉します。Discord内の話者や、配布先ユーザーがDiscord画面上でどのサーバーを見ているかまでは分離しません。文字起こしに表示するサーバー名とVC名は、botが接続している指定VCの情報です。
 
 文字起こしは `VALOWATCH_TRANSCRIPTION_ENABLED=true` で有効化します。GitHub公開更新版では `VALOWATCH_TRANSCRIPTION_ENGINE=vosk` を使い、Vosk日本語smallモデルをexeから `data\models` へ自動展開します。VCがText-In-Voice対応なら入室中VCのテキストチャットへ投稿し、使えない場合だけ `DISCORD_TEXT_CHANNEL_ID` へ投稿します。
 

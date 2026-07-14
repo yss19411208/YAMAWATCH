@@ -28,6 +28,14 @@ public sealed class DiscordBotSettings
 
     public float LineAudioVolume { get; set; } = 0.45F;
 
+    public bool StreamDiscordAudioWhenRunning { get; set; }
+
+    public string[] DiscordAudioProcessNames { get; set; } = ["Discord", "DiscordCanary", "DiscordPTB"];
+
+    public float DiscordAudioVolume { get; set; } = 0.45F;
+
+    public bool DiscordAudioCommandEnabled { get; set; } = true;
+
     public bool TranscriptionEnabled { get; set; }
 
     public string TranscriptionEngine { get; set; } = "vosk";

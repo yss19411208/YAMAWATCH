@@ -8,6 +8,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
     private static readonly TimeSpan ProcessRefreshInterval = TimeSpan.FromSeconds(2);
 
     private readonly string[] processNames;
+    private readonly string sourceLabel;
     private readonly BufferedWaveProvider bufferedWaveProvider;
     private readonly Action<string, Exception?> writeLog;
     private readonly object sync = new();
@@ -20,7 +21,8 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
     public LineProcessLoopbackWaveProvider(
         IEnumerable<string> processNames,
         TimeSpan bufferDuration,
-        Action<string, Exception?> writeLog)
+        Action<string, Exception?> writeLog,
+        string sourceLabel = "LINE")
     {
         this.processNames = processNames
             .Select(NormalizeProcessName)
@@ -28,6 +30,9 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .DefaultIfEmpty("LINE")
             .ToArray();
+        this.sourceLabel = string.IsNullOrWhiteSpace(sourceLabel)
+            ? "process"
+            : sourceLabel.Trim();
         this.writeLog = writeLog;
         bufferedWaveProvider = new BufferedWaveProvider(ProcessLoopbackCapture.CaptureWaveFormat)
         {
@@ -36,13 +41,24 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             ReadFully = true
         };
 
-        CurrentSourceDescription = "LINE process loopback waiting";
+        CurrentSourceDescription = $"{this.sourceLabel} process loopback waiting";
         refreshTimer = new System.Threading.Timer(_ => RefreshActiveCaptureSafely(), null, TimeSpan.Zero, ProcessRefreshInterval);
     }
 
     public WaveFormat WaveFormat => bufferedWaveProvider.WaveFormat;
 
     public string CurrentSourceDescription { get; private set; }
+
+    public bool IsCapturing
+    {
+        get
+        {
+            lock (sync)
+            {
+                return activeCapture is not null;
+            }
+        }
+    }
 
     public int Read(byte[] buffer, int offset, int count)
     {
@@ -53,7 +69,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
     {
         disposed = true;
         refreshTimer.Dispose();
-        StopActiveCapture("LINE process loopback disposed.");
+        StopActiveCapture($"{sourceLabel} process loopback disposed.");
     }
 
     private void RefreshActiveCaptureSafely()
@@ -69,7 +85,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            writeLog("LINE process loopback refresh failed.", exception);
+            writeLog($"{sourceLabel} process loopback refresh failed.", exception);
         }
         finally
         {
@@ -87,8 +103,8 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         TargetProcess? targetProcess = FindTargetProcess();
         if (targetProcess is null)
         {
-            StopActiveCapture("LINE process is not running. Waiting for LINE audio.");
-            CurrentSourceDescription = "LINE process loopback waiting";
+            StopActiveCapture($"{sourceLabel} process is not running. Waiting for {sourceLabel} audio.");
+            CurrentSourceDescription = $"{sourceLabel} process loopback waiting";
             return;
         }
 
@@ -105,7 +121,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             }
         }
 
-        StopActiveCapture($"Switching LINE process loopback to PID {targetProcess.ProcessId}.");
+        StopActiveCapture($"Switching {sourceLabel} process loopback to PID {targetProcess.ProcessId}.");
         StartCaptureForProcess(targetProcess);
     }
 
@@ -147,7 +163,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         {
             capture.StartRecording();
             writeLog(
-                $"LINE process-only loopback started. {targetProcess.Description}. " +
+                $"{sourceLabel} process-only loopback started. {targetProcess.Description}. " +
                 $"Format: {capture.WaveFormat}. Buffer: {bufferedWaveProvider.BufferDuration.TotalMilliseconds:0}ms.",
                 null);
         }
@@ -159,8 +175,8 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             capture.Dispose();
             bufferedWaveProvider.ClearBuffer();
             writeLog(
-                $"LINE process-only loopback could not start for {targetProcess.Description}. " +
-                "The bot will keep sending microphone audio and retry LINE audio automatically.",
+                $"{sourceLabel} process-only loopback could not start for {targetProcess.Description}. " +
+                $"The bot will keep sending microphone audio and retry {sourceLabel} audio automatically.",
                 exception);
         }
     }
@@ -178,7 +194,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             captureToStop = activeCapture;
             activeCapture = null;
             activeProcessId = 0;
-            CurrentSourceDescription = "LINE process loopback waiting";
+            CurrentSourceDescription = $"{sourceLabel} process loopback waiting";
             bufferedWaveProvider.ClearBuffer();
         }
 
@@ -191,7 +207,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         }
         catch (InvalidOperationException exception)
         {
-            writeLog("LINE process loopback stop failed.", exception);
+            writeLog($"{sourceLabel} process loopback stop failed.", exception);
         }
         finally
         {
@@ -230,11 +246,11 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         bufferedWaveProvider.ClearBuffer();
         if (eventArgs.Exception is null)
         {
-            writeLog("LINE process-only loopback stopped.", null);
+            writeLog($"{sourceLabel} process-only loopback stopped.", null);
         }
         else
         {
-            writeLog("LINE process-only loopback stopped because of an audio error. It will retry automatically.", eventArgs.Exception);
+            writeLog($"{sourceLabel} process-only loopback stopped because of an audio error. It will retry automatically.", eventArgs.Exception);
         }
     }
 
@@ -249,7 +265,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
 
             activeCapture = null;
             activeProcessId = 0;
-            CurrentSourceDescription = "LINE process loopback waiting";
+            CurrentSourceDescription = $"{sourceLabel} process loopback waiting";
             return true;
         }
     }
