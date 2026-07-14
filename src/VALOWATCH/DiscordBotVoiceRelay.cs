@@ -180,8 +180,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
             $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}. " +
             $"Transcription: {settings.TranscriptionEnabled}. " +
-            $"TranscriptionModel: {settings.TranscriptionModel}. " +
-            $"TranscriptionLanguage: {settings.TranscriptionLanguage}. " +
+            $"TranscriptionEngine: {settings.TranscriptionEngine}. " +
             $"TranscriptionChunkSeconds: {settings.TranscriptionChunkSeconds}.");
 
         string startupStage = "initializing Discord client";
@@ -997,9 +996,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.OpenAiApiKey))
+        if (!settings.TranscriptionEngine.Equals("vosk", StringComparison.OrdinalIgnoreCase))
         {
-            WriteLog("Audio transcription is disabled because OPENAI_API_KEY is missing.");
+            WriteLog($"Audio transcription is disabled because the engine is unsupported: {settings.TranscriptionEngine}.");
             return;
         }
 
@@ -1012,12 +1011,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         try
         {
-            OpenAiAudioTranscriber transcriber = new(
-                settings.OpenAiApiKey,
-                settings.TranscriptionModel,
-                settings.TranscriptionLanguage,
-                settings.TranscriptionPrompt,
-                TimeSpan.FromSeconds(60));
+            string modelPath = VoskModelProvider.EnsureJapaneseModel(
+                appPaths,
+                settings.TranscriptionModelPath,
+                WriteLog);
+            VoskAudioTranscriber transcriber = new(modelPath);
             audioTranscriptionWorker = new AudioTranscriptionWorker(
                 DiscordPcmFormat,
                 TimeSpan.FromSeconds(settings.TranscriptionChunkSeconds),
@@ -1028,12 +1026,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             WriteLog(
                 "Audio transcription started. " +
                 $"Target: {DescribeMessageChannel(transcriptionTextChannel)}. " +
-                $"Model: {settings.TranscriptionModel}. " +
-                $"Language: {settings.TranscriptionLanguage}. " +
+                $"Engine: {transcriber.Description}. " +
                 $"ChunkSeconds: {settings.TranscriptionChunkSeconds}. " +
                 $"MinimumPeak: {settings.TranscriptionMinimumPeak:0.0000}.");
         }
-        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        catch (Exception exception) when (exception is ArgumentException or DirectoryNotFoundException or FileNotFoundException or InvalidOperationException or DllNotFoundException or BadImageFormatException)
         {
             WriteLog("Audio transcription could not start.", exception);
         }

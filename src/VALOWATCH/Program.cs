@@ -80,9 +80,11 @@ static class Program
             return;
         }
 
-        if (args.Any(argument => string.Equals(argument, "--check-transcription-wav", StringComparison.OrdinalIgnoreCase)))
+        if (args.Any(argument =>
+            string.Equals(argument, "--check-transcription-local", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(argument, "--check-transcription-wav", StringComparison.OrdinalIgnoreCase)))
         {
-            RunTranscriptionWavDiagnostic();
+            RunOfflineTranscriptionDiagnostic();
             return;
         }
 
@@ -866,7 +868,7 @@ static class Program
         }
     }
 
-    private static void RunTranscriptionWavDiagnostic()
+    private static void RunOfflineTranscriptionDiagnostic()
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
@@ -874,41 +876,42 @@ static class Program
 
         try
         {
+            List<string> providerMessages = [];
             WaveFormat waveFormat = DiscordBotVoiceRelay.DiscordPcmWaveFormat;
             byte[] pcmBytes = CreateDiagnosticPcmTone(waveFormat, TimeSpan.FromSeconds(2), 440F, 0.2F);
-            byte[] waveBytes = PcmWaveFile.CreatePcm16WaveFile(waveFormat, pcmBytes, pcmBytes.Length);
-            using MemoryStream waveStream = new(waveBytes);
-            using WaveFileReader waveReader = new(waveStream);
-
-            bool riffHeaderReady = waveBytes.Length > 44 &&
-                waveBytes[0] == (byte)'R' &&
-                waveBytes[1] == (byte)'I' &&
-                waveBytes[2] == (byte)'F' &&
-                waveBytes[3] == (byte)'F';
-            bool formatReady = waveReader.WaveFormat.Encoding == WaveFormatEncoding.Pcm &&
-                waveReader.WaveFormat.SampleRate == 48000 &&
-                waveReader.WaveFormat.BitsPerSample == 16 &&
-                waveReader.WaveFormat.Channels == 2;
-            bool durationReady = Math.Abs(waveReader.TotalTime.TotalSeconds - 2.0) < 0.05;
-            bool ready = riffHeaderReady && formatReady && durationReady;
+            byte[] mono16KhzBytes = Pcm16Mono16KhzConverter.Convert(waveFormat, pcmBytes);
+            bool convertedLengthReady = mono16KhzBytes.Length == 2 * Pcm16Mono16KhzConverter.TargetSampleRate * sizeof(short);
+            string modelPath = VoskModelProvider.EnsureJapaneseModel(
+                appPaths,
+                configuredModelPath: string.Empty,
+                (message, exception) =>
+                {
+                    providerMessages.Add(exception is null ? message : $"{message} {exception.Message}");
+                });
+            using VoskAudioTranscriber transcriber = new(modelPath);
+            string transcript = transcriber
+                .TranscribePcm16Async(waveFormat, pcmBytes, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            bool ready = convertedLengthReady && Directory.Exists(modelPath);
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
             File.AppendAllText(
                 logFilePath,
-                $"{DateTimeOffset.Now:O} [Diagnostics] Transcription WAV check: {(ready ? "ready" : "failed")}. " +
-                $"WaveBytes: {waveBytes.Length}. Format: {waveReader.WaveFormat}. " +
-                $"DurationSeconds: {waveReader.TotalTime.TotalSeconds:0.000}. " +
-                $"RiffHeader: {riffHeaderReady}. FormatReady: {formatReady}. DurationReady: {durationReady}{Environment.NewLine}");
+                $"{DateTimeOffset.Now:O} [Diagnostics] Offline transcription check: {(ready ? "ready" : "failed")}. " +
+                $"Engine: {transcriber.Description}. SourceFormat: {waveFormat}. " +
+                $"ConvertedBytes: {mono16KhzBytes.Length}. ConvertedLengthReady: {convertedLengthReady}. " +
+                $"TranscriptLength: {transcript.Length}. ProviderMessages: {string.Join(" | ", providerMessages)}{Environment.NewLine}");
             Environment.ExitCode = ready ? 0 : 1;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentOutOfRangeException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentOutOfRangeException or System.Text.Json.JsonException or DllNotFoundException or BadImageFormatException)
         {
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
                 File.AppendAllText(
                     logFilePath,
-                    $"{DateTimeOffset.Now:O} [Diagnostics] Transcription WAV check failed: {exception.Message}{Environment.NewLine}");
+                    $"{DateTimeOffset.Now:O} [Diagnostics] Offline transcription check failed: {exception.Message}{Environment.NewLine}");
             }
             catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
             {

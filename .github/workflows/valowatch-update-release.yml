@@ -33,8 +33,31 @@ jobs:
             "VALOWATCH_UPDATE_BRANCH=main"
             "VALOWATCH_UPDATE_CURRENT_COMMIT=${{ github.sha }}"
             "VALOWATCH_GITHUB_TOKEN="
+            "VALOWATCH_TRANSCRIPTION_ENABLED=true"
+            "VALOWATCH_TRANSCRIPTION_ENGINE=vosk"
+            "VALOWATCH_TRANSCRIPTION_MODEL_PATH="
           )
           Set-Content -Path installer/.env -Value $envLines -Encoding UTF8
+
+      - name: Download offline transcription model
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .\models -Force | Out-Null
+          $modelZipPath = ".\models\vosk-model-small-ja-0.22.zip"
+          Invoke-WebRequest `
+            -Uri "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip" `
+            -OutFile $modelZipPath
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $modelZip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $modelZipPath))
+          try {
+            if ($modelZip.Entries.Count -le 0) {
+              throw "Vosk model zip is empty."
+            }
+          }
+          finally {
+            $modelZip.Dispose()
+          }
 
       - name: Publish VALOWATCH app
         shell: pwsh

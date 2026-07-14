@@ -90,10 +90,8 @@ public sealed class DiscordBotSettingsStore
             LineAudioProcessNames = ["LINE", "Line", "line"],
             LineAudioVolume = 0.45F,
             TranscriptionEnabled = false,
-            OpenAiApiKey = string.Empty,
-            TranscriptionModel = "gpt-4o-mini-transcribe",
-            TranscriptionLanguage = "ja",
-            TranscriptionPrompt = "VALORANT、Discord、LINE通話の日本語会話を自然に文字起こししてください。",
+            TranscriptionEngine = "vosk",
+            TranscriptionModelPath = string.Empty,
             TranscriptionChunkSeconds = 12,
             TranscriptionMinimumPeak = 0.006F
         };
@@ -225,36 +223,22 @@ public sealed class DiscordBotSettingsStore
             settings.TranscriptionEnabled = transcriptionEnabled;
         }
 
-        if (TryGetString(envValues, out string openAiApiKey, "OPENAI_API_KEY", "VALOWATCH_OPENAI_API_KEY"))
+        if (TryGetString(envValues, out string transcriptionEngine, "VALOWATCH_TRANSCRIPTION_ENGINE", "DISCORD_TRANSCRIPTION_ENGINE"))
         {
-            settings.OpenAiApiKey = openAiApiKey;
-            if (!transcriptionEnabledWasConfigured)
-            {
-                settings.TranscriptionEnabled = true;
-            }
+            settings.TranscriptionEngine = transcriptionEngine;
         }
 
-        if (TryGetString(envValues, out string transcriptionModel, "VALOWATCH_TRANSCRIPTION_MODEL", "OPENAI_TRANSCRIPTION_MODEL"))
+        if (TryGetString(envValues, out string transcriptionModelPath, "VALOWATCH_TRANSCRIPTION_MODEL_PATH", "VOSK_MODEL_PATH"))
         {
-            settings.TranscriptionModel = transcriptionModel;
+            settings.TranscriptionModelPath = transcriptionModelPath;
         }
 
-        if (TryGetString(envValues, out string transcriptionLanguage, "VALOWATCH_TRANSCRIPTION_LANGUAGE", "OPENAI_TRANSCRIPTION_LANGUAGE"))
-        {
-            settings.TranscriptionLanguage = transcriptionLanguage;
-        }
-
-        if (TryGetString(envValues, out string transcriptionPrompt, "VALOWATCH_TRANSCRIPTION_PROMPT", "OPENAI_TRANSCRIPTION_PROMPT"))
-        {
-            settings.TranscriptionPrompt = transcriptionPrompt;
-        }
-
-        if (TryGetInt32(envValues, out int transcriptionChunkSeconds, "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS", "OPENAI_TRANSCRIPTION_CHUNK_SECONDS"))
+        if (TryGetInt32(envValues, out int transcriptionChunkSeconds, "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS"))
         {
             settings.TranscriptionChunkSeconds = Math.Clamp(transcriptionChunkSeconds, 5, 30);
         }
 
-        if (TryGetSingle(envValues, out float transcriptionMinimumPeak, "VALOWATCH_TRANSCRIPTION_MIN_PEAK", "OPENAI_TRANSCRIPTION_MIN_PEAK"))
+        if (TryGetSingle(envValues, out float transcriptionMinimumPeak, "VALOWATCH_TRANSCRIPTION_MIN_PEAK"))
         {
             settings.TranscriptionMinimumPeak = Math.Clamp(transcriptionMinimumPeak, 0.0F, 0.2F);
         }
@@ -279,10 +263,8 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
             "DISCORD_LINE_AUDIO_VOLUME=0.45",
             "VALOWATCH_TRANSCRIPTION_ENABLED=false",
-            "OPENAI_API_KEY=",
-            "VALOWATCH_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe",
-            "VALOWATCH_TRANSCRIPTION_LANGUAGE=ja",
-            "VALOWATCH_TRANSCRIPTION_PROMPT=VALORANT、Discord、LINE通話の日本語会話を自然に文字起こししてください。",
+            "VALOWATCH_TRANSCRIPTION_ENGINE=vosk",
+            "VALOWATCH_TRANSCRIPTION_MODEL_PATH=",
             "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS=12",
             "VALOWATCH_TRANSCRIPTION_MIN_PEAK=0.006"
         ];

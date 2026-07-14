@@ -30,13 +30,9 @@ public sealed class DiscordBotSettings
 
     public bool TranscriptionEnabled { get; set; }
 
-    public string OpenAiApiKey { get; set; } = string.Empty;
+    public string TranscriptionEngine { get; set; } = "vosk";
 
-    public string TranscriptionModel { get; set; } = "gpt-4o-mini-transcribe";
-
-    public string TranscriptionLanguage { get; set; } = "ja";
-
-    public string TranscriptionPrompt { get; set; } = "VALORANT、Discord、LINE通話の日本語会話を自然に文字起こししてください。";
+    public string TranscriptionModelPath { get; set; } = string.Empty;
 
     public int TranscriptionChunkSeconds { get; set; } = 12;
 

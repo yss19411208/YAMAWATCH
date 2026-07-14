@@ -15,7 +15,7 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
     private readonly int targetChunkBytes;
     private readonly float minimumPeak;
     private readonly IMessageChannel destinationChannel;
-    private readonly OpenAiAudioTranscriber transcriber;
+    private readonly IAudioTranscriber transcriber;
     private readonly Action<string, Exception?> writeLog;
     private readonly Channel<AudioTranscriptionChunk> chunkChannel;
     private readonly CancellationTokenSource workerCancellationTokenSource = new();
@@ -30,7 +30,7 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
         TimeSpan chunkDuration,
         float minimumPeak,
         IMessageChannel destinationChannel,
-        OpenAiAudioTranscriber transcriber,
+        IAudioTranscriber transcriber,
         Action<string, Exception?> writeLog)
     {
         this.waveFormat = waveFormat;
@@ -167,12 +167,8 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
 
             try
             {
-                byte[] waveBytes = PcmWaveFile.CreatePcm16WaveFile(
-                    waveFormat,
-                    chunk.PcmBytes,
-                    chunk.PcmBytes.Length);
                 string transcript = await transcriber
-                    .TranscribeWaveAsync(waveBytes, cancellationToken)
+                    .TranscribePcm16Async(waveFormat, chunk.PcmBytes, cancellationToken)
                     .ConfigureAwait(false);
                 if (string.IsNullOrWhiteSpace(transcript))
                 {
