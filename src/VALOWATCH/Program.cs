@@ -199,6 +199,7 @@ static class Program
                     "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Gateway: WebSocket connection was closed",
                     "   at Discord.ConnectionManager.ConnectAsync()",
                     "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Dave decrypt stream 123: Failed to decrypt audio packet for 123: DecryptionFailure",
+                    "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Dave encrypt stream: Failed to encrypt dave audio: MissingKeyRatchet",
                     "2026-07-12T00:00:03+09:00 GITHUB agent release lookup attempt 1/5 failed. Retrying in 2 seconds. Exception: HttpRequestException: api.github.com",
                     " ---> System.Net.Sockets.SocketException (11001): そのようなホストは不明です。",
                     "2026-07-12T00:00:04+09:00 GITHUB agent is already current. SHA-256 matches release: 1234."
@@ -312,8 +313,10 @@ static class Program
                 failedChecks);
             AddDiagnosticCheck(
                 !initialText.Contains("Dave decrypt", StringComparison.Ordinal) &&
-                    !initialText.Contains("DecryptionFailure", StringComparison.Ordinal),
-                "dave decrypt warning mirrored",
+                    !initialText.Contains("Dave encrypt", StringComparison.Ordinal) &&
+                    !initialText.Contains("DecryptionFailure", StringComparison.Ordinal) &&
+                    !initialText.Contains("MissingKeyRatchet", StringComparison.Ordinal),
+                "dave transition warning mirrored",
                 failedChecks);
             AddDiagnosticCheck(
                 !initialText.Contains("api.github.com", StringComparison.OrdinalIgnoreCase) &&

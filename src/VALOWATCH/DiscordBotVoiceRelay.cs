@@ -632,7 +632,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         string source = logMessage.Source ?? string.Empty;
         string message = logMessage.Message ?? string.Empty;
-        if (IsDiscordDaveDecryptWarning(source, message))
+        if (IsDiscordDaveTransitionWarning(source, message))
         {
             return true;
         }
@@ -650,11 +650,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ContainsExceptionMessage(logMessage.Exception, "Unable to read data from the transport connection");
     }
 
-    private static bool IsDiscordDaveDecryptWarning(string source, string message)
+    private static bool IsDiscordDaveTransitionWarning(string source, string message)
     {
         return source.Contains("Dave decrypt", StringComparison.OrdinalIgnoreCase) ||
+            source.Contains("Dave encrypt", StringComparison.OrdinalIgnoreCase) ||
             message.Contains("Failed to decrypt audio packet", StringComparison.OrdinalIgnoreCase) ||
-            message.Contains("DecryptionFailure", StringComparison.OrdinalIgnoreCase);
+            message.Contains("Failed to encrypt dave audio", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("DecryptionFailure", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("MissingKeyRatchet", StringComparison.OrdinalIgnoreCase);
     }
 
     private void WriteDiscordNetworkWarningSummary(LogMessage logMessage)
