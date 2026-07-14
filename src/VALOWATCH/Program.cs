@@ -881,6 +881,10 @@ static class Program
             byte[] pcmBytes = CreateDiagnosticPcmTone(waveFormat, TimeSpan.FromSeconds(2), 440F, 0.2F);
             byte[] mono16KhzBytes = Pcm16Mono16KhzConverter.Convert(waveFormat, pcmBytes);
             bool convertedLengthReady = mono16KhzBytes.Length == 2 * Pcm16Mono16KhzConverter.TargetSampleRate * sizeof(short);
+            int workerChunkBytes = AudioTranscriptionWorker.CalculateTargetChunkBytes(
+                waveFormat,
+                TimeSpan.FromSeconds(12));
+            bool workerChunkReady = workerChunkBytes == waveFormat.AverageBytesPerSecond * 12;
             string modelPath = VoskModelProvider.EnsureJapaneseModel(
                 appPaths,
                 configuredModelPath: string.Empty,
@@ -893,7 +897,7 @@ static class Program
                 .TranscribePcm16Async(waveFormat, pcmBytes, CancellationToken.None)
                 .GetAwaiter()
                 .GetResult();
-            bool ready = convertedLengthReady && Directory.Exists(modelPath);
+            bool ready = convertedLengthReady && workerChunkReady && Directory.Exists(modelPath);
 
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
             File.AppendAllText(
@@ -901,6 +905,7 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] Offline transcription check: {(ready ? "ready" : "failed")}. " +
                 $"Engine: {transcriber.Description}. SourceFormat: {waveFormat}. " +
                 $"ConvertedBytes: {mono16KhzBytes.Length}. ConvertedLengthReady: {convertedLengthReady}. " +
+                $"WorkerChunkBytes: {workerChunkBytes}. WorkerChunkReady: {workerChunkReady}. " +
                 $"TranscriptLength: {transcript.Length}. ProviderMessages: {string.Join(" | ", providerMessages)}{Environment.NewLine}");
             Environment.ExitCode = ready ? 0 : 1;
         }

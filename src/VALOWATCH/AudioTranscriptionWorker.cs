@@ -39,8 +39,7 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
         this.transcriber = transcriber;
         this.writeLog = writeLog;
 
-        int safeChunkMilliseconds = Math.Clamp((int)chunkDuration.TotalMilliseconds, 5_000, 30_000);
-        targetChunkBytes = checked(waveFormat.AverageBytesPerSecond * safeChunkMilliseconds / 1000);
+        targetChunkBytes = CalculateTargetChunkBytes(waveFormat, chunkDuration);
         chunkChannel = Channel.CreateBounded<AudioTranscriptionChunk>(new BoundedChannelOptions(2)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
@@ -48,6 +47,15 @@ internal sealed class AudioTranscriptionWorker : IAsyncDisposable
             SingleWriter = true
         });
         workerTask = Task.Run(() => ProcessChunksAsync(workerCancellationTokenSource.Token));
+    }
+
+    internal static int CalculateTargetChunkBytes(WaveFormat waveFormat, TimeSpan chunkDuration)
+    {
+        int safeChunkMilliseconds = Math.Clamp((int)chunkDuration.TotalMilliseconds, 5_000, 30_000);
+        long rawTargetChunkBytes = (long)waveFormat.AverageBytesPerSecond * safeChunkMilliseconds / 1000L;
+        int blockAlign = Math.Max(1, waveFormat.BlockAlign);
+        long alignedTargetChunkBytes = rawTargetChunkBytes - rawTargetChunkBytes % blockAlign;
+        return (int)Math.Clamp(alignedTargetChunkBytes, blockAlign, int.MaxValue);
     }
 
     public void ObservePcmFrame(byte[] frameBuffer, int byteCount)
