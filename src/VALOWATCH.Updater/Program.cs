@@ -16,6 +16,7 @@ internal static class Program
     private const string AgentFileName = "GITHUB.exe";
     private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
+    private const int ApplicationControlPolicyBlockedErrorCode = 4551;
     private static int appReplacementInProgress;
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromMinutes(5);
@@ -25,6 +26,12 @@ internal static class Program
         TimeSpan.FromSeconds(5),
         TimeSpan.FromSeconds(15),
         TimeSpan.FromSeconds(30)
+    ];
+    private static readonly TimeSpan[] PolicyBlockedStartRetryDelays =
+    [
+        TimeSpan.FromSeconds(10),
+        TimeSpan.FromSeconds(30),
+        TimeSpan.FromSeconds(60)
     ];
 
     [STAThread]
@@ -293,8 +300,11 @@ internal static class Program
         replacementProcessStartInfo.ArgumentList.Add(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
         replacementProcessStartInfo.ArgumentList.Add("--install-dir");
         replacementProcessStartInfo.ArgumentList.Add(installDirectory);
-        _ = Process.Start(replacementProcessStartInfo)
-            ?? throw new InvalidOperationException("Validated GITHUB replacement process could not be started.");
+        Process replacementProcess = await StartProcessWithPolicyRetryAsync(
+                replacementProcessStartInfo,
+                "validated GITHUB replacement")
+            .ConfigureAwait(false);
+        replacementProcess.Dispose();
         WriteLog($"Validated GITHUB replacement was started. Current: {currentStatus}");
         return true;
     }
@@ -655,8 +665,10 @@ internal static class Program
         processStartInfo.ArgumentList.Add("--install-dir");
         processStartInfo.ArgumentList.Add(installDirectory);
 
-        using Process updateProcess = Process.Start(processStartInfo)
-            ?? throw new InvalidOperationException("Downloaded app self-update process could not be started.");
+        using Process updateProcess = await StartProcessWithPolicyRetryAsync(
+                processStartInfo,
+                "downloaded app self-update")
+            .ConfigureAwait(false);
         using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(2));
         try
         {
@@ -676,6 +688,48 @@ internal static class Program
         }
 
         return updateProcess.ExitCode;
+    }
+
+    private static async Task<Process> StartProcessWithPolicyRetryAsync(
+        ProcessStartInfo processStartInfo,
+        string operationName)
+    {
+        System.ComponentModel.Win32Exception? lastPolicyException = null;
+        int maximumStartAttempts = PolicyBlockedStartRetryDelays.Length + 1;
+        for (int attempt = 1; attempt <= maximumStartAttempts; attempt++)
+        {
+            try
+            {
+                return Process.Start(processStartInfo)
+                    ?? throw new InvalidOperationException($"{operationName} process could not be started.");
+            }
+            catch (System.ComponentModel.Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
+            {
+                lastPolicyException = exception;
+                if (attempt >= maximumStartAttempts)
+                {
+                    break;
+                }
+
+                TimeSpan retryDelay = PolicyBlockedStartRetryDelays[attempt - 1];
+                WriteLog(
+                    $"{operationName} was blocked by Windows application control policy. " +
+                    $"Attempt {attempt}/{maximumStartAttempts}; retrying in {retryDelay.TotalSeconds:0} seconds. " +
+                    SummarizeException(exception));
+                await Task.Delay(retryDelay).ConfigureAwait(false);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"{operationName} remained blocked by Windows application control policy after {maximumStartAttempts} attempts.",
+            lastPolicyException);
+    }
+
+    private static bool IsApplicationControlPolicyBlock(System.ComponentModel.Win32Exception exception)
+    {
+        return exception.NativeErrorCode == ApplicationControlPolicyBlockedErrorCode ||
+            exception.Message.Contains("application control policy", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("アプリケーション制御ポリシー", StringComparison.OrdinalIgnoreCase);
     }
 
     private static async Task<T> ExecuteWithRetryAsync<T>(
