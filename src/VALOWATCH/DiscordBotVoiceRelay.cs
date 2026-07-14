@@ -42,6 +42,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan DiscordShutdownTimeout = TimeSpan.FromSeconds(5);
     private const bool DiscordVoiceDaveEncryptionEnabled = true;
 
+    internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
+
     private readonly DiscordBotSettingsStore settingsStore;
     private readonly AppPaths appPaths;
     private readonly string logFilePath;
@@ -56,11 +58,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private DiscordSocketClient? discordClient;
     private IAudioClient? audioClient;
     private SocketTextChannel? discordStatusTextChannel;
+    private IMessageChannel? discordTranscriptionTextChannel;
     private WasapiCapture? microphoneCapture;
     private BufferedWaveProvider? bufferedWaveProvider;
     private LineProcessLoopbackWaveProvider? lineProcessLoopbackProvider;
     private IWaveProvider? discordPcmProvider;
     private AudioOutStream? discordStream;
+    private AudioTranscriptionWorker? audioTranscriptionWorker;
     private CancellationTokenSource? relayCancellationTokenSource;
     private Task? relayTask;
     private Task? microphoneHealthTask;
@@ -174,7 +178,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"MicDevice: {settings.MicrophoneDeviceName}. Volume: {settings.MicrophoneVolume:0.00}. " +
             $"NoiseGate: {settings.MicrophoneNoiseGate:0.000}. " +
             $"StreamLineAudio: {settings.StreamLineAudioWhenRunning}. " +
-            $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}.");
+            $"LineProcesses: {string.Join(",", settings.LineAudioProcessNames)}. " +
+            $"Transcription: {settings.TranscriptionEnabled}. " +
+            $"TranscriptionModel: {settings.TranscriptionModel}. " +
+            $"TranscriptionLanguage: {settings.TranscriptionLanguage}. " +
+            $"TranscriptionChunkSeconds: {settings.TranscriptionChunkSeconds}.");
 
         string startupStage = "initializing Discord client";
         try
@@ -207,6 +215,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             discordStatusTextChannel = settings.TextChannelId == 0
                 ? null
                 : guild.GetTextChannel(settings.TextChannelId);
+            discordTranscriptionTextChannel = ResolveTranscriptionTextChannel(
+                guild,
+                voiceChannel,
+                discordStatusTextChannel,
+                settings);
 
             if (!TryEnsureVoiceNativeDependencies(out string nativeDependencyStatus))
             {
@@ -418,6 +431,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         DisposeAudioObjects();
+        await StopAudioTranscriptionWorkerAsync().ConfigureAwait(false);
 
         if (audioClient is not null)
         {
@@ -445,6 +459,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 "Discord client dispose").ConfigureAwait(false);
             discordClient = null;
             discordStatusTextChannel = null;
+            discordTranscriptionTextChannel = null;
         }
     }
 
@@ -934,6 +949,134 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private IMessageChannel? ResolveTranscriptionTextChannel(
+        SocketGuild guild,
+        SocketVoiceChannel voiceChannel,
+        SocketTextChannel? fallbackTextChannel,
+        DiscordBotSettings settings)
+    {
+        if (!settings.TranscriptionEnabled)
+        {
+            return null;
+        }
+
+        if (voiceChannel is IMessageChannel voiceMessageChannel &&
+            HasSendMessagePermission(guild, voiceChannel, "voice text transcription"))
+        {
+            WriteLog($"Audio transcription will post to voice channel text chat. Channel: {voiceChannel.Id}.");
+            return voiceMessageChannel;
+        }
+
+        if (fallbackTextChannel is not null &&
+            HasSendMessagePermission(guild, fallbackTextChannel, "fallback transcription"))
+        {
+            WriteLog(
+                "Audio transcription will post to the configured fallback text channel because " +
+                $"the voice channel text chat was unavailable. Channel: {fallbackTextChannel.Id}.");
+            return fallbackTextChannel;
+        }
+
+        WriteLog("Audio transcription is enabled, but no writable Discord text channel was available.");
+        return null;
+    }
+
+    private bool HasSendMessagePermission(SocketGuild guild, SocketGuildChannel channel, string purpose)
+    {
+        ChannelPermissions permissions = guild.CurrentUser.GetPermissions(channel);
+        WriteLog(
+            $"Discord text permissions for {purpose}. Channel: {channel.Id}. " +
+            $"View: {permissions.ViewChannel}. SendMessages: {permissions.SendMessages}.");
+        return permissions.ViewChannel && permissions.SendMessages;
+    }
+
+    private void StartAudioTranscriptionWorker(DiscordBotSettings settings)
+    {
+        if (!settings.TranscriptionEnabled)
+        {
+            WriteLog("Audio transcription is disabled.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.OpenAiApiKey))
+        {
+            WriteLog("Audio transcription is disabled because OPENAI_API_KEY is missing.");
+            return;
+        }
+
+        IMessageChannel? transcriptionTextChannel = discordTranscriptionTextChannel;
+        if (transcriptionTextChannel is null)
+        {
+            WriteLog("Audio transcription is disabled because no text channel is available.");
+            return;
+        }
+
+        try
+        {
+            OpenAiAudioTranscriber transcriber = new(
+                settings.OpenAiApiKey,
+                settings.TranscriptionModel,
+                settings.TranscriptionLanguage,
+                settings.TranscriptionPrompt,
+                TimeSpan.FromSeconds(60));
+            audioTranscriptionWorker = new AudioTranscriptionWorker(
+                DiscordPcmFormat,
+                TimeSpan.FromSeconds(settings.TranscriptionChunkSeconds),
+                settings.TranscriptionMinimumPeak,
+                transcriptionTextChannel,
+                transcriber,
+                WriteLog);
+            WriteLog(
+                "Audio transcription started. " +
+                $"Target: {DescribeMessageChannel(transcriptionTextChannel)}. " +
+                $"Model: {settings.TranscriptionModel}. " +
+                $"Language: {settings.TranscriptionLanguage}. " +
+                $"ChunkSeconds: {settings.TranscriptionChunkSeconds}. " +
+                $"MinimumPeak: {settings.TranscriptionMinimumPeak:0.0000}.");
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            WriteLog("Audio transcription could not start.", exception);
+        }
+    }
+
+    private async Task StopAudioTranscriptionWorkerAsync()
+    {
+        AudioTranscriptionWorker? worker = audioTranscriptionWorker;
+        audioTranscriptionWorker = null;
+        if (worker is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await worker.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+            WriteLog("Audio transcription worker cleanup failed.", exception);
+        }
+    }
+
+    private void ObserveTranscriptionFrame(byte[] frameBuffer, int byteCount)
+    {
+        try
+        {
+            audioTranscriptionWorker?.ObservePcmFrame(frameBuffer, byteCount);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+        {
+            WriteLog("Audio transcription frame could not be queued.", exception);
+        }
+    }
+
+    private static string DescribeMessageChannel(IMessageChannel channel)
+    {
+        return channel is IChannel discordChannel
+            ? $"{discordChannel.GetType().Name}:{discordChannel.Id}"
+            : channel.GetType().Name;
+    }
+
     private void StartMicrophoneAudioRelay(DiscordBotSettings settings)
     {
         if (audioClient is null)
@@ -964,6 +1107,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         discordStream = audioClient.CreatePCMStream(AudioApplication.Voice);
         relayCancellationTokenSource = new CancellationTokenSource();
+        StartAudioTranscriptionWorker(settings);
         WasapiCapture activeMicrophoneCapture = microphoneCapture
             ?? throw new InvalidOperationException("Microphone capture was not initialized.");
         WriteLog(
@@ -1238,18 +1382,21 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 {
                     await discordStream.WriteAsync(SilenceFrame, cancellationToken).ConfigureAwait(false);
                     ObserveWrittenDiscordFrame(SilenceFrame, SilenceFrame.Length);
+                    ObserveTranscriptionFrame(SilenceFrame, SilenceFrame.Length);
                     ObserveWrittenSilenceFrame();
                 }
                 else if (bytesRead == pcmFrameBuffer.Length)
                 {
                     await discordStream.WriteAsync(pcmFrameBuffer, cancellationToken).ConfigureAwait(false);
                     ObserveWrittenDiscordFrame(pcmFrameBuffer, pcmFrameBuffer.Length);
+                    ObserveTranscriptionFrame(pcmFrameBuffer, pcmFrameBuffer.Length);
                 }
                 else
                 {
                     Array.Clear(pcmFrameBuffer, bytesRead, pcmFrameBuffer.Length - bytesRead);
                     await discordStream.WriteAsync(pcmFrameBuffer, cancellationToken).ConfigureAwait(false);
                     ObserveWrittenDiscordFrame(pcmFrameBuffer, pcmFrameBuffer.Length);
+                    ObserveTranscriptionFrame(pcmFrameBuffer, pcmFrameBuffer.Length);
                     ObserveWrittenShortFrame();
                 }
 

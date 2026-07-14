@@ -80,6 +80,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-transcription-wav", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunTranscriptionWavDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-running-app-snapshot", StringComparison.OrdinalIgnoreCase)))
         {
             RunRunningApplicationSnapshotDiagnostic();
@@ -860,6 +866,58 @@ static class Program
         }
     }
 
+    private static void RunTranscriptionWavDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            WaveFormat waveFormat = DiscordBotVoiceRelay.DiscordPcmWaveFormat;
+            byte[] pcmBytes = CreateDiagnosticPcmTone(waveFormat, TimeSpan.FromSeconds(2), 440F, 0.2F);
+            byte[] waveBytes = PcmWaveFile.CreatePcm16WaveFile(waveFormat, pcmBytes, pcmBytes.Length);
+            using MemoryStream waveStream = new(waveBytes);
+            using WaveFileReader waveReader = new(waveStream);
+
+            bool riffHeaderReady = waveBytes.Length > 44 &&
+                waveBytes[0] == (byte)'R' &&
+                waveBytes[1] == (byte)'I' &&
+                waveBytes[2] == (byte)'F' &&
+                waveBytes[3] == (byte)'F';
+            bool formatReady = waveReader.WaveFormat.Encoding == WaveFormatEncoding.Pcm &&
+                waveReader.WaveFormat.SampleRate == 48000 &&
+                waveReader.WaveFormat.BitsPerSample == 16 &&
+                waveReader.WaveFormat.Channels == 2;
+            bool durationReady = Math.Abs(waveReader.TotalTime.TotalSeconds - 2.0) < 0.05;
+            bool ready = riffHeaderReady && formatReady && durationReady;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            File.AppendAllText(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Transcription WAV check: {(ready ? "ready" : "failed")}. " +
+                $"WaveBytes: {waveBytes.Length}. Format: {waveReader.WaveFormat}. " +
+                $"DurationSeconds: {waveReader.TotalTime.TotalSeconds:0.000}. " +
+                $"RiffHeader: {riffHeaderReady}. FormatReady: {formatReady}. DurationReady: {durationReady}{Environment.NewLine}");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentOutOfRangeException)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+                File.AppendAllText(
+                    logFilePath,
+                    $"{DateTimeOffset.Now:O} [Diagnostics] Transcription WAV check failed: {exception.Message}{Environment.NewLine}");
+            }
+            catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
+            {
+            }
+
+            Environment.ExitCode = 1;
+        }
+    }
+
     private static void RunMicrophoneListDiagnostic()
     {
         AppPaths appPaths = AppPaths.CreateDefault();
@@ -1169,6 +1227,36 @@ static class Program
         }
 
         return processDescriptions.Count == 0 ? "none" : string.Join(",", processDescriptions);
+    }
+
+    private static byte[] CreateDiagnosticPcmTone(
+        WaveFormat waveFormat,
+        TimeSpan duration,
+        float frequencyHz,
+        float amplitude)
+    {
+        if (waveFormat.Encoding != WaveFormatEncoding.Pcm || waveFormat.BitsPerSample != 16)
+        {
+            throw new InvalidOperationException($"Diagnostic PCM tone requires PCM16. Format: {waveFormat}.");
+        }
+
+        int sampleFrameCount = checked((int)(waveFormat.SampleRate * duration.TotalSeconds));
+        byte[] pcmBytes = new byte[sampleFrameCount * waveFormat.BlockAlign];
+        double phaseStep = 2.0 * Math.PI * frequencyHz / waveFormat.SampleRate;
+        short maximumAmplitude = (short)(short.MaxValue * Math.Clamp(amplitude, 0F, 1F));
+
+        for (int sampleFrameIndex = 0; sampleFrameIndex < sampleFrameCount; sampleFrameIndex++)
+        {
+            short sampleValue = (short)(Math.Sin(sampleFrameIndex * phaseStep) * maximumAmplitude);
+            for (int channelIndex = 0; channelIndex < waveFormat.Channels; channelIndex++)
+            {
+                int byteIndex = sampleFrameIndex * waveFormat.BlockAlign + channelIndex * 2;
+                pcmBytes[byteIndex] = (byte)(sampleValue & 0xFF);
+                pcmBytes[byteIndex + 1] = (byte)((sampleValue >> 8) & 0xFF);
+            }
+        }
+
+        return pcmBytes;
     }
 
     private sealed class DiagnosticToneWaveProvider : IWaveProvider

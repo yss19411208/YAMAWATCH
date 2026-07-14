@@ -40,6 +40,7 @@ internal static class EnvSettingsLoader
         }
 
         if (HasUsableDiscordConfig(freshEnvValues) ||
+            HasUsableOpenAiConfig(freshEnvValues) && HasUsableDiscordConfig(envValues) ||
             !File.Exists(appPaths.DurableEnvPath) && HasUsableDiscordConfig(envValues))
         {
             PersistDurableEnv(appPaths, envValues);
@@ -110,6 +111,15 @@ internal static class EnvSettingsLoader
             "DISCORD_VOICE_CHANNEL_ID",
             "VOICE_CHANNEL_ID");
         return hasToken && hasGuild && hasVoiceChannel;
+    }
+
+    private static bool HasUsableOpenAiConfig(IReadOnlyDictionary<string, string> envValues)
+    {
+        return TryGetNonPlaceholderValue(
+            envValues,
+            out _,
+            "OPENAI_API_KEY",
+            "VALOWATCH_OPENAI_API_KEY");
     }
 
     private static bool TryGetNonPlaceholderValue(

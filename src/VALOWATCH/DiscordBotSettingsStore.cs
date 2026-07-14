@@ -88,7 +88,14 @@ public sealed class DiscordBotSettingsStore
             MicrophoneNoiseGate = 0F,
             StreamLineAudioWhenRunning = true,
             LineAudioProcessNames = ["LINE", "Line", "line"],
-            LineAudioVolume = 0.45F
+            LineAudioVolume = 0.45F,
+            TranscriptionEnabled = false,
+            OpenAiApiKey = string.Empty,
+            TranscriptionModel = "gpt-4o-mini-transcribe",
+            TranscriptionLanguage = "ja",
+            TranscriptionPrompt = "VALORANT、Discord、LINE通話の日本語会話を自然に文字起こししてください。",
+            TranscriptionChunkSeconds = 12,
+            TranscriptionMinimumPeak = 0.006F
         };
 
         Directory.CreateDirectory(appPaths.ConfigDirectory);
@@ -207,6 +214,51 @@ public sealed class DiscordBotSettingsStore
             settings.LineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
         }
 
+        bool transcriptionEnabledWasConfigured = TryGetBoolean(
+            envValues,
+            out bool transcriptionEnabled,
+            "VALOWATCH_TRANSCRIPTION_ENABLED",
+            "DISCORD_TRANSCRIPTION_ENABLED",
+            "DISCORD_TRANSCRIBE_ENABLED");
+        if (transcriptionEnabledWasConfigured)
+        {
+            settings.TranscriptionEnabled = transcriptionEnabled;
+        }
+
+        if (TryGetString(envValues, out string openAiApiKey, "OPENAI_API_KEY", "VALOWATCH_OPENAI_API_KEY"))
+        {
+            settings.OpenAiApiKey = openAiApiKey;
+            if (!transcriptionEnabledWasConfigured)
+            {
+                settings.TranscriptionEnabled = true;
+            }
+        }
+
+        if (TryGetString(envValues, out string transcriptionModel, "VALOWATCH_TRANSCRIPTION_MODEL", "OPENAI_TRANSCRIPTION_MODEL"))
+        {
+            settings.TranscriptionModel = transcriptionModel;
+        }
+
+        if (TryGetString(envValues, out string transcriptionLanguage, "VALOWATCH_TRANSCRIPTION_LANGUAGE", "OPENAI_TRANSCRIPTION_LANGUAGE"))
+        {
+            settings.TranscriptionLanguage = transcriptionLanguage;
+        }
+
+        if (TryGetString(envValues, out string transcriptionPrompt, "VALOWATCH_TRANSCRIPTION_PROMPT", "OPENAI_TRANSCRIPTION_PROMPT"))
+        {
+            settings.TranscriptionPrompt = transcriptionPrompt;
+        }
+
+        if (TryGetInt32(envValues, out int transcriptionChunkSeconds, "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS", "OPENAI_TRANSCRIPTION_CHUNK_SECONDS"))
+        {
+            settings.TranscriptionChunkSeconds = Math.Clamp(transcriptionChunkSeconds, 5, 30);
+        }
+
+        if (TryGetSingle(envValues, out float transcriptionMinimumPeak, "VALOWATCH_TRANSCRIPTION_MIN_PEAK", "OPENAI_TRANSCRIPTION_MIN_PEAK"))
+        {
+            settings.TranscriptionMinimumPeak = Math.Clamp(transcriptionMinimumPeak, 0.0F, 0.2F);
+        }
+
     }
 
     private void EnsureEnvExample()
@@ -226,7 +278,13 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_STREAM_LINE_AUDIO=true",
             "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
             "DISCORD_LINE_AUDIO_VOLUME=0.45",
-            "DISCORD_LINE_AUDIO_VOLUME=0.45"
+            "VALOWATCH_TRANSCRIPTION_ENABLED=false",
+            "OPENAI_API_KEY=",
+            "VALOWATCH_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe",
+            "VALOWATCH_TRANSCRIPTION_LANGUAGE=ja",
+            "VALOWATCH_TRANSCRIPTION_PROMPT=VALORANT、Discord、LINE通話の日本語会話を自然に文字起こししてください。",
+            "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS=12",
+            "VALOWATCH_TRANSCRIPTION_MIN_PEAK=0.006"
         ];
 
         if (!File.Exists(appPaths.EnvExamplePath))
@@ -340,6 +398,20 @@ public sealed class DiscordBotSettingsStore
         }
 
         return float.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryGetInt32(
+        IReadOnlyDictionary<string, string> envValues,
+        out int value,
+        params string[] keys)
+    {
+        if (!TryGetString(envValues, out string rawValue, keys))
+        {
+            value = 0;
+            return false;
+        }
+
+        return int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
     }
 
 }
