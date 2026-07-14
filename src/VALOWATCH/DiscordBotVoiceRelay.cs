@@ -301,6 +301,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
+            lock (stateLock)
+            {
+                IsRunning = true;
+                StatusText = FormatRunningStatus("Discord joined VC");
+            }
+
+            _ = Task.Run(SendRuntimeLogUpdatesAsync);
+            StartRuntimeLogUpdates();
+
             bool audioRelayStarted = false;
 
             if (settings.StreamMicrophoneAudio)
@@ -321,10 +330,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     await SendRequestedDiscordNotificationAsync(
                         $"VALOWATCH 音声開始失敗: {audioException.Message}").ConfigureAwait(false);
                     await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
-                    await StopCoreAsync(
-                            resetValorantNotificationSession: false,
-                            keepDiscordGatewayOnline: true)
-                        .ConfigureAwait(false);
+                    await StopAudioRelayComponentsAsync().ConfigureAwait(false);
                     StatusText = FormatRunningStatus("Discord audio recovery pending", audioException.Message);
                     return;
                 }
@@ -335,9 +341,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 IsRunning = true;
                 StatusText = FormatRunningStatus(audioRelayStarted ? "Discord mic live" : "Discord joined VC");
             }
-
-            _ = Task.Run(SendRuntimeLogUpdatesAsync);
-            StartRuntimeLogUpdates();
         }
         catch (TimeoutException exception)
         {
@@ -524,6 +527,67 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         return true;
+    }
+
+    private async Task StopAudioRelayComponentsAsync()
+    {
+        CancellationTokenSource? cancellationTokenSource;
+        Task? activeRelayTask;
+        Task? activeMicrophoneHealthTask;
+
+        lock (stateLock)
+        {
+            cancellationTokenSource = relayCancellationTokenSource;
+            activeRelayTask = relayTask;
+            activeMicrophoneHealthTask = microphoneHealthTask;
+            relayCancellationTokenSource = null;
+            relayTask = null;
+            microphoneHealthTask = null;
+        }
+
+        if (cancellationTokenSource is not null)
+        {
+            await cancellationTokenSource.CancelAsync().ConfigureAwait(false);
+        }
+
+        if (activeRelayTask is not null)
+        {
+            try
+            {
+                await activeRelayTask.WaitAsync(RelayShutdownTimeout).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (TimeoutException exception)
+            {
+                WriteLog("Audio relay cleanup timed out; disposing the Discord stream to unblock it.", exception);
+                discordStream?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Audio relay cleanup failed; continuing without stopping Discord presence.", exception);
+            }
+        }
+
+        if (activeMicrophoneHealthTask is not null)
+        {
+            try
+            {
+                await activeMicrophoneHealthTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Microphone health cleanup failed; continuing without stopping Discord presence.", exception);
+            }
+        }
+
+        DisposeAudioObjects();
+        await StopAudioTranscriptionWorkerAsync().ConfigureAwait(false);
+        cancellationTokenSource?.Dispose();
     }
 
     private async Task StopCoreAsync(
@@ -2569,11 +2633,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private void StartRuntimeLogUpdates()
     {
-        if (runtimeLogTask is not null)
+        if (runtimeLogTask is { IsCompleted: false })
         {
             return;
         }
 
+        runtimeLogCancellationTokenSource?.Dispose();
         runtimeLogCancellationTokenSource = new CancellationTokenSource();
         CancellationToken cancellationToken = runtimeLogCancellationTokenSource.Token;
         runtimeLogTask = Task.Run(async () =>
@@ -2583,12 +2648,24 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 await Task.Delay(RuntimeLogInitialDelay, cancellationToken).ConfigureAwait(false);
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
+                    try
+                    {
+                        await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        WriteLog("Runtime log update loop iteration failed; continuing.", exception);
+                    }
+
                     await Task.Delay(RuntimeLogInterval, cancellationToken).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Runtime log update loop stopped unexpectedly.", exception);
             }
         }, cancellationToken);
     }
@@ -2614,6 +2691,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
             catch (OperationCanceledException)
             {
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Runtime log update task ended while stopping.", exception);
             }
         }
 
@@ -2665,7 +2746,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 }
             }
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        catch (Exception exception)
         {
             WriteLog("Runtime log embeds could not be prepared.", exception);
         }
@@ -2693,7 +2774,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             Embed embed = RunningApplicationSnapshot.BuildDiscordEmbed();
             await textChannel.SendMessageAsync(embed: embed).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or HttpRequestException)
+        catch (Exception exception)
         {
             lock (stateLock)
             {

@@ -44,6 +44,7 @@ public sealed class MainForm : Form
     private bool stratsToggleInProgress;
     private bool stratsPreloadInProgress;
     private string pendingLineNotificationMessage = LineOpenedNotificationMessage;
+    private bool? pendingDiscordValorantDetected;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
@@ -308,6 +309,7 @@ public sealed class MainForm : Form
     {
         if (discordTransitionInProgress)
         {
+            pendingDiscordValorantDetected = valorantDetected;
             return;
         }
 
@@ -330,6 +332,12 @@ public sealed class MainForm : Form
         finally
         {
             discordTransitionInProgress = false;
+            bool? queuedValorantDetected = pendingDiscordValorantDetected;
+            pendingDiscordValorantDetected = null;
+            if (queuedValorantDetected.HasValue)
+            {
+                _ = HandleValorantStateChangeAsync(queuedValorantDetected.Value);
+            }
         }
     }
 
@@ -368,6 +376,10 @@ public sealed class MainForm : Form
         catch (Exception exception)
         {
             WriteAppLog("Discord", "Discord startup presence failed.", exception);
+        }
+        finally
+        {
+            RefreshValorantStatus();
         }
     }
 
