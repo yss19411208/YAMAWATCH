@@ -16,6 +16,7 @@ internal static class Program
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const string LogonScheduledTaskName = "VALOWATCH Logon";
     private const string PendingInstallerReportFileName = "installer-result.pending.log";
     private const int DiscordMessageMaximumLength = 1900;
     private static readonly TimeSpan ProcessRepairWaitTimeout = TimeSpan.FromSeconds(15);
@@ -739,11 +740,13 @@ internal static class Program
             AddSelfRepairLine(reportLines, $"StartupCommandMatches=failed:{exception.GetType().Name}");
         }
 
-        bool keepAliveTaskExists = TryQueryKeepAliveTask(out string keepAliveTaskDetail);
+        bool keepAliveTaskExists = TryQueryScheduledTask(KeepAliveScheduledTaskName, out string keepAliveTaskDetail);
         AddSelfRepairLine(reportLines, $"KeepAliveTaskExists={keepAliveTaskExists};detail:{keepAliveTaskDetail}");
+        bool logonTaskExists = TryQueryScheduledTask(LogonScheduledTaskName, out string logonTaskDetail);
+        AddSelfRepairLine(reportLines, $"LogonTaskExists={logonTaskExists};detail:{logonTaskDetail}");
     }
 
-    private static bool TryQueryKeepAliveTask(out string detail)
+    private static bool TryQueryScheduledTask(string taskName, out string detail)
     {
         detail = string.Empty;
         try
@@ -759,7 +762,7 @@ internal static class Program
             };
             processStartInfo.ArgumentList.Add("/Query");
             processStartInfo.ArgumentList.Add("/TN");
-            processStartInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+            processStartInfo.ArgumentList.Add(taskName);
             processStartInfo.ArgumentList.Add("/FO");
             processStartInfo.ArgumentList.Add("LIST");
 
@@ -1880,10 +1883,11 @@ internal static class Program
             WriteInstallerLog("Could not remove VALOWATCH Startup command.", exception);
         }
 
-        TryDeleteKeepAliveTask();
+        TryDeleteScheduledTask(KeepAliveScheduledTaskName);
+        TryDeleteScheduledTask(LogonScheduledTaskName);
     }
 
-    private static void TryDeleteKeepAliveTask()
+    private static void TryDeleteScheduledTask(string taskName)
     {
         try
         {
@@ -1898,7 +1902,7 @@ internal static class Program
             };
             processStartInfo.ArgumentList.Add("/Delete");
             processStartInfo.ArgumentList.Add("/TN");
-            processStartInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+            processStartInfo.ArgumentList.Add(taskName);
             processStartInfo.ArgumentList.Add("/F");
 
             using Process taskSchedulerProcess = Process.Start(processStartInfo)
@@ -1913,12 +1917,12 @@ internal static class Program
 
             Task.WaitAll([outputTask, errorTask], 2000);
             WriteInstallerLog(
-                $"Keepalive task cleanup finished. ExitCode: {taskSchedulerProcess.ExitCode}. " +
+                $"Scheduled task cleanup finished. Task: {taskName}. ExitCode: {taskSchedulerProcess.ExitCode}. " +
                 $"Output: {outputTask.Result.Trim()} Error: {errorTask.Result.Trim()}");
         }
         catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
         {
-            WriteInstallerLog("Keepalive task cleanup failed or task did not exist.", exception);
+            WriteInstallerLog($"Scheduled task cleanup failed or task did not exist. Task: {taskName}.", exception);
         }
     }
 
@@ -2064,6 +2068,7 @@ internal static class Program
         registryKey.SetValue(RegistryValueName, agentCommand);
         WriteStartupCommand(installedGitHubPath, installDirectory);
         TryRegisterKeepAliveTask(installedGitHubPath, installDirectory);
+        TryRegisterLogonTask(installedGitHubPath, installDirectory);
     }
 
     private static void TryRegisterKeepAliveTask(string installedGitHubPath, string installDirectory)
@@ -2118,6 +2123,61 @@ internal static class Program
         {
             WriteInstallerLog(
                 "Keepalive task registration failed. Registry and Startup-folder launch remain enabled.",
+                exception);
+        }
+    }
+
+    private static void TryRegisterLogonTask(string installedGitHubPath, string installDirectory)
+    {
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            processStartInfo.ArgumentList.Add("/Create");
+            processStartInfo.ArgumentList.Add("/TN");
+            processStartInfo.ArgumentList.Add(LogonScheduledTaskName);
+            processStartInfo.ArgumentList.Add("/TR");
+            processStartInfo.ArgumentList.Add(BuildGitHubAgentCommand(installedGitHubPath, installDirectory));
+            processStartInfo.ArgumentList.Add("/SC");
+            processStartInfo.ArgumentList.Add("ONLOGON");
+            processStartInfo.ArgumentList.Add("/DELAY");
+            processStartInfo.ArgumentList.Add("0000:30");
+            processStartInfo.ArgumentList.Add("/RL");
+            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("/F");
+
+            using Process taskSchedulerProcess = Process.Start(processStartInfo)
+                ?? throw new InvalidOperationException("Windows Task Scheduler could not be started.");
+            Task<string> outputTask = taskSchedulerProcess.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = taskSchedulerProcess.StandardError.ReadToEndAsync();
+            if (!taskSchedulerProcess.WaitForExit(15000))
+            {
+                taskSchedulerProcess.Kill(entireProcessTree: true);
+                throw new TimeoutException("Windows Task Scheduler registration timed out.");
+            }
+
+            string output = outputTask.GetAwaiter().GetResult().Trim();
+            string error = errorTask.GetAwaiter().GetResult().Trim();
+            if (taskSchedulerProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Windows Task Scheduler registration failed with exit code {taskSchedulerProcess.ExitCode}. {error}");
+            }
+
+            WriteInstallerLog(
+                $"Logon task registered. Name: {LogonScheduledTaskName}. Delay: 30 seconds. Output: {output}");
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            WriteInstallerLog(
+                "Logon task registration failed. Registry, Startup-folder, and KeepAlive launch remain enabled.",
                 exception);
         }
     }

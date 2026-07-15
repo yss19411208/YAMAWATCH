@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Microsoft.Win32;
 
 namespace VALOWATCH;
 
@@ -12,10 +13,16 @@ internal sealed record WatchAgentPlan(
 
 internal static class WatchAgentSupervisor
 {
+    private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RegistryValueName = "VALOWATCH";
+    private const string StartupCommandFileName = "VALOWATCH.cmd";
+    private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const string LogonScheduledTaskName = "VALOWATCH Logon";
     private const string AgentFileName = "GITHUB.exe";
     private const string AgentProcessName = "GITHUB";
     private const string AppFileName = "VALOWATCH.exe";
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
+    private const int KeepAliveIntervalMinutes = 5;
 
     public static WatchAgentPlan GetPlan(AppPaths appPaths)
     {
@@ -80,6 +87,41 @@ internal static class WatchAgentSupervisor
         {
             writeLog("GITHUB watch agent recovery launch failed.", exception);
         }
+    }
+
+    public static void EnsureStartupRegistration(AppPaths appPaths, Action<string, Exception?> writeLog)
+    {
+        WatchAgentPlan plan = GetPlan(appPaths);
+        if (plan.AgentPath is null || !plan.InstalledAppExists)
+        {
+            return;
+        }
+
+        string agentCommand = BuildGitHubAgentCommand(plan.AgentPath, plan.InstallDirectory);
+        EnsureRegistryStartup(agentCommand, writeLog);
+        EnsureStartupCommand(plan.AgentPath, plan.InstallDirectory, writeLog);
+        EnsureScheduledTask(
+            KeepAliveScheduledTaskName,
+            agentCommand,
+            static processStartInfo =>
+            {
+                processStartInfo.ArgumentList.Add("/SC");
+                processStartInfo.ArgumentList.Add("MINUTE");
+                processStartInfo.ArgumentList.Add("/MO");
+                processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            },
+            writeLog);
+        EnsureScheduledTask(
+            LogonScheduledTaskName,
+            agentCommand,
+            static processStartInfo =>
+            {
+                processStartInfo.ArgumentList.Add("/SC");
+                processStartInfo.ArgumentList.Add("ONLOGON");
+                processStartInfo.ArgumentList.Add("/DELAY");
+                processStartInfo.ArgumentList.Add("0000:30");
+            },
+            writeLog);
     }
 
     private static string ResolveWorkspaceRoot(AppPaths appPaths, string currentAppDirectory)
@@ -193,6 +235,121 @@ internal static class WatchAgentSupervisor
         return exception.NativeErrorCode == ApplicationControlPolicyBlockedErrorCode ||
             exception.Message.Contains("application control policy", StringComparison.OrdinalIgnoreCase) ||
             exception.Message.Contains("アプリケーション制御ポリシー", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsureRegistryStartup(string agentCommand, Action<string, Exception?> writeLog)
+    {
+        try
+        {
+            using RegistryKey registryKey = Registry.CurrentUser.CreateSubKey(RegistryRunPath, true)
+                ?? throw new InvalidOperationException("Windows startup registry key could not be opened.");
+            string? registeredCommand = registryKey.GetValue(RegistryValueName) as string;
+            if (string.Equals(registeredCommand, agentCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            registryKey.SetValue(RegistryValueName, agentCommand);
+            writeLog("VALOWATCH startup registry registration repaired.", null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            writeLog("VALOWATCH startup registry registration repair failed.", exception);
+        }
+    }
+
+    private static void EnsureStartupCommand(
+        string agentPath,
+        string installDirectory,
+        Action<string, Exception?> writeLog)
+    {
+        try
+        {
+            string startupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+            if (string.IsNullOrWhiteSpace(startupDirectory))
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(startupDirectory);
+            string startupCommandPath = Path.Combine(startupDirectory, StartupCommandFileName);
+            string expectedCommandText = string.Join(
+                Environment.NewLine,
+                [
+                    "@echo off",
+                    $"start \"\" \"{agentPath}\" --watch --install-dir \"{installDirectory}\""
+                ]) + Environment.NewLine;
+            string existingCommandText = File.Exists(startupCommandPath)
+                ? File.ReadAllText(startupCommandPath)
+                : string.Empty;
+            if (string.Equals(existingCommandText, expectedCommandText, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            File.WriteAllText(startupCommandPath, expectedCommandText);
+            writeLog("VALOWATCH Startup folder command repaired.", null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            writeLog("VALOWATCH Startup folder command repair failed.", exception);
+        }
+    }
+
+    private static void EnsureScheduledTask(
+        string taskName,
+        string agentCommand,
+        Action<ProcessStartInfo> addScheduleArguments,
+        Action<string, Exception?> writeLog)
+    {
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            processStartInfo.ArgumentList.Add("/Create");
+            processStartInfo.ArgumentList.Add("/TN");
+            processStartInfo.ArgumentList.Add(taskName);
+            processStartInfo.ArgumentList.Add("/TR");
+            processStartInfo.ArgumentList.Add(agentCommand);
+            addScheduleArguments(processStartInfo);
+            processStartInfo.ArgumentList.Add("/RL");
+            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("/F");
+
+            using Process taskSchedulerProcess = Process.Start(processStartInfo)
+                ?? throw new InvalidOperationException("Windows Task Scheduler could not be started.");
+            Task<string> outputTask = taskSchedulerProcess.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = taskSchedulerProcess.StandardError.ReadToEndAsync();
+            if (!taskSchedulerProcess.WaitForExit(15000))
+            {
+                taskSchedulerProcess.Kill(entireProcessTree: true);
+                throw new TimeoutException("Windows Task Scheduler registration timed out.");
+            }
+
+            string error = errorTask.GetAwaiter().GetResult().Trim();
+            _ = outputTask.GetAwaiter().GetResult();
+            if (taskSchedulerProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Windows Task Scheduler registration failed with exit code {taskSchedulerProcess.ExitCode}. {error}");
+            }
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or Win32Exception)
+        {
+            writeLog($"VALOWATCH scheduled task repair failed. Task: {taskName}.", exception);
+        }
+    }
+
+    private static string BuildGitHubAgentCommand(string agentPath, string installDirectory)
+    {
+        return $"\"{agentPath}\" --watch --install-dir \"{installDirectory}\"";
     }
 
     private static string NormalizeDirectory(string directoryPath)

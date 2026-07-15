@@ -95,7 +95,7 @@ public sealed class MainForm : Form
 
         hidOnInitialShow = true;
         Hide();
-        StartDiscordPresenceIfNeeded();
+        RefreshValorantStatus();
     }
 
     protected override void OnHandleCreated(EventArgs eventArgs)
@@ -222,6 +222,9 @@ public sealed class MainForm : Form
 
     private void EnsureWatchAgentRunning()
     {
+        WatchAgentSupervisor.EnsureStartupRegistration(
+            appPaths,
+            (message, exception) => WriteAppLog("Update", message, exception));
         WatchAgentSupervisor.EnsureRunning(
             appPaths,
             (message, exception) => WriteAppLog("Update", message, exception));
