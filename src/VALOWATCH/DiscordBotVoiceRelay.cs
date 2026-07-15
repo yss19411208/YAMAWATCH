@@ -43,6 +43,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const bool DiscordVoiceDaveEncryptionEnabled = true;
     private const string DiscordAudioCommandName = "valowatch-discord-audio";
     private const string DiscordAudioCommandEnabledOptionName = "enabled";
+    private const string RunningAppCommandName = "app";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -193,6 +194,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             DiscordGatewayContext gatewayContext = await EnsureDiscordGatewayReadyAsync(settings)
                 .ConfigureAwait(false);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
+            await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
             lock (stateLock)
@@ -289,6 +291,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             EnsureVoiceChannelPermissions(guild, voiceChannel);
             await EnsureDiscordAudioCommandAsync(guild, settings).ConfigureAwait(false);
+            await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
             startupStage = "Discord voice channel connect";
@@ -879,6 +882,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task OnSlashCommandExecutedAsync(SocketSlashCommand command)
     {
+        if (string.Equals(command.Data.Name, RunningAppCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleRunningAppSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (!string.Equals(command.Data.Name, DiscordAudioCommandName, StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -951,6 +960,48 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
             {
                 WriteLog("Discord audio slash command error response failed.", responseException);
+            }
+        }
+    }
+
+    private async Task HandleRunningAppSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHの実行アプリ確認にはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            Embed embed = RunningApplicationSnapshot.BuildAllProcessDiscordEmbed();
+            await command
+                .RespondAsync(embed: embed, ephemeral: true)
+                .ConfigureAwait(false);
+            WriteLog($"Running application slash command responded to user {command.User.Id}.");
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("Running application slash command handling failed.", exception);
+            try
+            {
+                await command
+                    .RespondAsync("VALOWATCHの実行アプリ確認に失敗しました。", ephemeral: true)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Running application slash command error response failed.", responseException);
             }
         }
     }
@@ -1369,6 +1420,41 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             WriteLog(
                 "Discord audio slash command could not be registered. " +
                 "Existing audio relay will still run; command control may be unavailable until the next startup.",
+                exception);
+        }
+    }
+
+    private async Task EnsureRunningAppCommandAsync(SocketGuild guild)
+    {
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            bool commandAlreadyExists = commands.Any(command =>
+                string.Equals(command.Name, RunningAppCommandName, StringComparison.OrdinalIgnoreCase));
+            if (commandAlreadyExists)
+            {
+                WriteLog($"Running app slash command already exists: /{RunningAppCommandName}.");
+                return;
+            }
+
+            SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
+                .WithName(RunningAppCommandName)
+                .WithDescription("VALOWATCHが見える範囲で実行中アプリ名を表示します")
+                .WithContextTypes(InteractionContextType.Guild)
+                .WithDefaultMemberPermissions(GuildPermission.ManageGuild);
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Running app slash command registered: /{RunningAppCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Running app slash command could not be registered. " +
+                "The bot will retry registration on the next startup.",
                 exception);
         }
     }

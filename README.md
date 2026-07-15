@@ -58,6 +58,8 @@ Windowsのアプリケーション制御で、インストーラー起動後の 
 
 VALORANT起動後は、音声ピーク診断に加えて `data\logs` と `%TEMP%\VALOWATCH` の `.log` / `.txt` をDiscordのコードブロックへ分割して送ります。初回接続時、起動20秒後、以後5分ごと、終了時に未送信行だけを送り、通信失敗時は次回接続で再送します。`.env`、Bot token、暗号化設定、ユーザープロファイルの実パスは送信しません。ログ送信は音声開始後に並行実行するため、過去ログが多くてもマイク開始を待たせません。
 
+Discordで `/app` を実行すると、VALORANTを起動していない時でも、タスクバー以外を含む実行中プログラム名をephemeral応答で表示します。サーバー管理権限を持つユーザーだけが実行できます。プライバシー保護のため、送信するのはプロセス名と個数だけです。フルパス、ウィンドウタイトル、起動引数、PID、Windowsユーザー名、Windows内部プロセスやサービスホスト系は送信しません。
+
 音声DLLが欠落してVCへ参加できない場合も、先にDiscord Gatewayとテキストチャンネルへ接続し、欠落理由とログのコードブロックを送ってから切断します。
 
 GitHub Releaseでは、`GITHUB.exe`、旧版移行用の `VALOWATCH_Update.exe`、tokenを含まない `VALOWATCH_App.exe` を別アセットとして公開します。`GITHUB.exe` が本体と監視アプリをダウンロードしてSHA-256を検証し、既存の暗号化設定を残したまま置換します。
@@ -140,6 +142,7 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 .\VALOWATCH.exe --check-discord-audio-mix
 .\VALOWATCH.exe --check-transcription-local
 .\VALOWATCH.exe --check-runtime-log-messages
+.\VALOWATCH.exe --check-running-process-snapshot
 .\VALOWATCH.exe --check-update-identity --expected-current-commit=<commit SHA>
 ```
 

@@ -94,6 +94,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-running-process-snapshot", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunRunningProcessSnapshotDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--list-microphones", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneListDiagnostic();
@@ -1214,6 +1220,33 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Running app snapshot check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunRunningProcessSnapshotDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            string message = RunningApplicationSnapshot.BuildAllProcessDiagnosticText();
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            bool snapshotIsReady = message.Length <= 5000 &&
+                message.Contains("VALOWATCH 実行中プログラム", StringComparison.Ordinal) &&
+                !message.Contains("```", StringComparison.Ordinal) &&
+                !message.Contains(userProfile, StringComparison.OrdinalIgnoreCase);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Running process snapshot check: " +
+                $"{(snapshotIsReady ? "ready" : "failed")}. Length: {message.Length}.");
+            Environment.ExitCode = snapshotIsReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Running process snapshot check", exception);
             Environment.ExitCode = 1;
         }
     }

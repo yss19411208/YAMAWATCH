@@ -28,9 +28,44 @@ internal static class RunningApplicationSnapshot
         return embedBuilder.Build();
     }
 
+    public static Embed BuildAllProcessDiscordEmbed()
+    {
+        RunningProcessSnapshotData snapshotData = CaptureAllRunningProcesses();
+        string description = BuildApplicationListDescription(snapshotData.ProcessCounts, out int omittedProcessNameCount);
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH 実行中プログラム",
+            Description = description,
+            Color = new Discord.Color(63, 185, 80),
+            Timestamp = snapshotData.CapturedAt
+        };
+
+        embedBuilder.AddField("対象", "タスクバー以外も含む実行中プロセス名", inline: false);
+        embedBuilder.AddField("件数", $"{snapshotData.ProcessCounts.Count}種類 / {snapshotData.TotalProcessCount}プロセス", inline: true);
+        embedBuilder.AddField(
+            "省略",
+            omittedProcessNameCount == 0 && snapshotData.PrivacyFilteredProcessCount == 0
+                ? "なし"
+                : $"表示上限 {omittedProcessNameCount}件 / 内部系 {snapshotData.PrivacyFilteredProcessCount}件",
+            inline: true);
+        embedBuilder.WithFooter("フルパス、ウィンドウ名、起動引数、PID、ユーザー名は送信していません");
+        return embedBuilder.Build();
+    }
+
     public static string BuildDiagnosticText()
     {
         Embed embed = BuildDiscordEmbed();
+        return BuildDiagnosticText(embed);
+    }
+
+    public static string BuildAllProcessDiagnosticText()
+    {
+        Embed embed = BuildAllProcessDiscordEmbed();
+        return BuildDiagnosticText(embed);
+    }
+
+    private static string BuildDiagnosticText(Embed embed)
+    {
         StringBuilder textBuilder = new();
         textBuilder.AppendLine(embed.Title);
         textBuilder.AppendLine(embed.Description);
@@ -99,6 +134,57 @@ internal static class RunningApplicationSnapshot
             DateTimeOffset.Now,
             taskbarWindows.Count,
             applicationCounts);
+    }
+
+    private static RunningProcessSnapshotData CaptureAllRunningProcesses()
+    {
+        SortedDictionary<string, int> processCounts = new(StringComparer.OrdinalIgnoreCase);
+        int totalProcessCount = 0;
+        int privacyFilteredProcessCount = 0;
+
+        Process[] processes;
+        try
+        {
+            processes = Process.GetProcesses();
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            processes = [];
+        }
+
+        foreach (Process process in processes)
+        {
+            using (process)
+            {
+                totalProcessCount++;
+                string processName;
+                try
+                {
+                    processName = process.ProcessName.Trim();
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    privacyFilteredProcessCount++;
+                    continue;
+                }
+
+                string displayName = NormalizeProcessName(processName);
+                if (!IsUsefulAllProcessDisplayName(displayName))
+                {
+                    privacyFilteredProcessCount++;
+                    continue;
+                }
+
+                processCounts.TryGetValue(displayName, out int existingCount);
+                processCounts[displayName] = existingCount + 1;
+            }
+        }
+
+        return new RunningProcessSnapshotData(
+            DateTimeOffset.Now,
+            totalProcessCount,
+            privacyFilteredProcessCount,
+            processCounts);
     }
 
     private static bool IsTaskbarWindow(IntPtr windowHandle)
@@ -295,6 +381,60 @@ internal static class RunningApplicationSnapshot
             !string.Equals(normalizedDisplayName, $"{processName}.exe", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsUsefulAllProcessDisplayName(string displayName)
+    {
+        string normalizedDisplayName = NormalizeDisplayName(displayName);
+        if (normalizedDisplayName.Length == 0)
+        {
+            return false;
+        }
+
+        string[] internalProcessNames =
+        [
+            "AggregatorHost",
+            "ApplicationFrameHost",
+            "audiodg",
+            "backgroundTaskHost",
+            "conhost",
+            "csrss",
+            "ctfmon",
+            "dllhost",
+            "dwm",
+            "fontdrvhost",
+            "Idle",
+            "LockApp",
+            "lsass",
+            "Memory Compression",
+            "MoUsoCoreWorker",
+            "Registry",
+            "RuntimeBroker",
+            "SearchApp",
+            "SearchHost",
+            "SearchIndexer",
+            "Secure System",
+            "SecurityHealthService",
+            "services",
+            "ShellExperienceHost",
+            "sihost",
+            "smss",
+            "spoolsv",
+            "StartMenuExperienceHost",
+            "svchost",
+            "System",
+            "SystemSettingsBroker",
+            "taskhostw",
+            "TextInputHost",
+            "unsecapp",
+            "UserOOBEBroker",
+            "wininit",
+            "winlogon",
+            "WmiPrvSE",
+            "WUDFHost"
+        ];
+        return !internalProcessNames.Any(processName =>
+            string.Equals(processName, normalizedDisplayName, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string NormalizeDisplayName(string displayName)
     {
         return string.Join(
@@ -344,6 +484,12 @@ internal static class RunningApplicationSnapshot
         DateTimeOffset CapturedAt,
         int WindowCount,
         IReadOnlyDictionary<string, int> ApplicationCounts);
+
+    private sealed record RunningProcessSnapshotData(
+        DateTimeOffset CapturedAt,
+        int TotalProcessCount,
+        int PrivacyFilteredProcessCount,
+        IReadOnlyDictionary<string, int> ProcessCounts);
 
     private sealed record TaskbarApplicationWindow(string DisplayName);
 }
