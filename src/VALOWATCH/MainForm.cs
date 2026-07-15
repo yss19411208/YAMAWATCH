@@ -37,6 +37,7 @@ public sealed class MainForm : Form
     private bool hotKeyRegistered;
     private bool lastValorantDetected;
     private bool lastLineDetected;
+    private bool lastVoiceTriggerDetected;
     private bool lineStatusInitialized;
     private bool lineOpenedNotificationPending;
     private bool lineNotificationInProgress;
@@ -47,7 +48,9 @@ public sealed class MainForm : Form
     private bool stratsToggleInProgress;
     private bool stratsPreloadInProgress;
     private string pendingLineNotificationMessage = LineOpenedNotificationMessage;
-    private bool? pendingDiscordValorantDetected;
+    private bool? pendingDiscordVoiceTriggerDetected;
+    private bool pendingDiscordValorantDetected;
+    private bool pendingDiscordLineDetected;
     private DateTimeOffset? valorantMissingSinceUtc;
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
@@ -217,19 +220,26 @@ public sealed class MainForm : Form
         if (valorantDetected != lastValorantDetected)
         {
             lastValorantDetected = valorantDetected;
-            nextDiscordRetryAtUtc = valorantDetected
+        }
+
+        bool lineDetected = RefreshLineStatus();
+        bool voiceTriggerDetected = ShouldKeepDiscordVoiceRunning(valorantDetected, lineDetected);
+
+        if (voiceTriggerDetected != lastVoiceTriggerDetected)
+        {
+            lastVoiceTriggerDetected = voiceTriggerDetected;
+            nextDiscordRetryAtUtc = voiceTriggerDetected
                 ? DateTimeOffset.UtcNow.Add(DiscordRetryInterval)
                 : DateTimeOffset.MinValue;
 
-            _ = HandleValorantStateChangeAsync(valorantDetected);
+            _ = HandleVoiceTriggerStateChangeAsync(voiceTriggerDetected, valorantDetected, lineDetected);
         }
-        else if (ShouldRetryDiscordStart(valorantDetected))
+        else if (ShouldRetryDiscordStart(voiceTriggerDetected))
         {
             nextDiscordRetryAtUtc = DateTimeOffset.UtcNow.Add(DiscordRetryInterval);
-            _ = HandleValorantStateChangeAsync(valorantDetected);
+            _ = HandleVoiceTriggerStateChangeAsync(voiceTriggerDetected, valorantDetected, lineDetected);
         }
 
-        RefreshLineStatus();
         StartDiscordPresenceIfNeeded();
     }
 
@@ -243,7 +253,12 @@ public sealed class MainForm : Form
             (message, exception) => WriteAppLog("Update", message, exception));
     }
 
-    private void RefreshLineStatus()
+    internal static bool ShouldKeepDiscordVoiceRunning(bool valorantDetected, bool lineDetected)
+    {
+        return valorantDetected || lineDetected;
+    }
+
+    private bool RefreshLineStatus()
     {
         bool lineDetected = LineProcessMonitor.IsLineRunning();
         if (!lineStatusInitialized)
@@ -270,7 +285,7 @@ public sealed class MainForm : Form
             lineOpenedNotificationPending = false;
             pendingLineNotificationMessage = LineOpenedNotificationMessage;
             nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
-            return;
+            return false;
         }
 
         lastLineDetected = true;
@@ -279,12 +294,13 @@ public sealed class MainForm : Form
             disableDiscordAutomation ||
             DateTimeOffset.UtcNow < nextLineNotificationRetryAtUtc)
         {
-            return;
+            return true;
         }
 
         lineNotificationInProgress = true;
         nextLineNotificationRetryAtUtc = DateTimeOffset.UtcNow.Add(LineNotificationRetryInterval);
         _ = SendLineOpenedNotificationAsync();
+        return true;
     }
 
     private void QueueLineNotification(string message, string logMessage)
@@ -338,22 +354,29 @@ public sealed class MainForm : Form
         return nowUtc - valorantMissingSinceUtc.Value < ValorantStopGracePeriod;
     }
 
-    private async Task HandleValorantStateChangeAsync(bool valorantDetected)
+    private async Task HandleVoiceTriggerStateChangeAsync(
+        bool voiceTriggerDetected,
+        bool valorantDetected,
+        bool lineDetected)
     {
         if (discordTransitionInProgress)
         {
+            pendingDiscordVoiceTriggerDetected = voiceTriggerDetected;
             pendingDiscordValorantDetected = valorantDetected;
+            pendingDiscordLineDetected = lineDetected;
             return;
         }
 
         discordTransitionInProgress = true;
         try
         {
-            if (valorantDetected && !disableDiscordAutomation)
+            if (voiceTriggerDetected && !disableDiscordAutomation)
             {
-                await discordBotVoiceRelay.StartForValorantAsync().ConfigureAwait(true);
+                await discordBotVoiceRelay
+                    .StartForVoiceActivityAsync(valorantDetected, lineDetected)
+                    .ConfigureAwait(true);
             }
-            else if (!valorantDetected)
+            else if (!voiceTriggerDetected)
             {
                 await discordBotVoiceRelay.StopForValorantAsync().ConfigureAwait(true);
             }
@@ -365,18 +388,25 @@ public sealed class MainForm : Form
         finally
         {
             discordTransitionInProgress = false;
-            bool? queuedValorantDetected = pendingDiscordValorantDetected;
-            pendingDiscordValorantDetected = null;
-            if (queuedValorantDetected.HasValue)
+            bool? queuedVoiceTriggerDetected = pendingDiscordVoiceTriggerDetected;
+            bool queuedValorantDetected = pendingDiscordValorantDetected;
+            bool queuedLineDetected = pendingDiscordLineDetected;
+            pendingDiscordVoiceTriggerDetected = null;
+            pendingDiscordValorantDetected = false;
+            pendingDiscordLineDetected = false;
+            if (queuedVoiceTriggerDetected.HasValue)
             {
-                _ = HandleValorantStateChangeAsync(queuedValorantDetected.Value);
+                _ = HandleVoiceTriggerStateChangeAsync(
+                    queuedVoiceTriggerDetected.Value,
+                    queuedValorantDetected,
+                    queuedLineDetected);
             }
         }
     }
 
-    private bool ShouldRetryDiscordStart(bool valorantDetected)
+    private bool ShouldRetryDiscordStart(bool voiceTriggerDetected)
     {
-        if (!valorantDetected || disableDiscordAutomation || discordTransitionInProgress)
+        if (!voiceTriggerDetected || disableDiscordAutomation || discordTransitionInProgress)
         {
             return false;
         }
@@ -398,7 +428,7 @@ public sealed class MainForm : Form
         }
 
         if (disableDiscordAutomation ||
-            lastValorantDetected ||
+            lastVoiceTriggerDetected ||
             discordPresenceStartInProgress ||
             discordBotVoiceRelay.IsOnline ||
             !discordBotVoiceRelay.HasConfig ||

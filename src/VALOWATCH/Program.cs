@@ -100,6 +100,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-line-voice-trigger", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunLineVoiceTriggerDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-watch-agent-supervisor", StringComparison.OrdinalIgnoreCase)))
         {
             RunWatchAgentSupervisorDiagnostic();
@@ -1253,6 +1259,48 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Running process snapshot check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunLineVoiceTriggerDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            bool valorantOnlyKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: true,
+                lineDetected: false);
+            bool lineOnlyKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: false,
+                lineDetected: true);
+            bool bothClosedStopsVoice = !MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: false,
+                lineDetected: false);
+            bool bothOpenKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: true,
+                lineDetected: true);
+            bool ready = valorantOnlyKeepsVoice &&
+                lineOnlyKeepsVoice &&
+                bothClosedStopsVoice &&
+                bothOpenKeepsVoice;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] LINE voice trigger check: " +
+                $"{(ready ? "ready" : "failed")}. " +
+                $"ValorantOnly: {valorantOnlyKeepsVoice}. " +
+                $"LineOnly: {lineOnlyKeepsVoice}. " +
+                $"BothClosedStops: {bothClosedStopsVoice}. " +
+                $"BothOpen: {bothOpenKeepsVoice}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "LINE voice trigger check", exception);
             Environment.ExitCode = 1;
         }
     }

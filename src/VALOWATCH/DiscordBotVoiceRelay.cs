@@ -156,10 +156,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     public async Task StartForValorantAsync()
     {
+        await StartForVoiceActivityAsync(valorantDetected: true, lineDetected: false).ConfigureAwait(false);
+    }
+
+    public async Task StartForVoiceActivityAsync(bool valorantDetected, bool lineDetected)
+    {
         await lifecycleSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            await StartForValorantCoreAsync().ConfigureAwait(false);
+            await StartForVoiceActivityCoreAsync(valorantDetected, lineDetected).ConfigureAwait(false);
         }
         finally
         {
@@ -220,7 +225,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task StartForValorantCoreAsync()
+    private async Task StartForVoiceActivityCoreAsync(bool valorantDetected, bool lineDetected)
     {
         lock (stateLock)
         {
@@ -233,7 +238,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             StatusText = settingsStore.HasConfig ? "Discord connecting" : "Discord config missing";
         }
 
-        WriteLog("VALORANT trigger received. Starting Discord automation.");
+        string triggerLabel = valorantDetected
+            ? "VALORANT"
+            : lineDetected
+                ? "LINE"
+                : "voice activity";
+        WriteLog($"{triggerLabel} trigger received. Starting Discord automation.");
 
         DiscordBotSettings? settings = LoadUsableSettings(out string configStatusText);
         if (settings is null)
@@ -300,7 +310,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .WaitAsync(DiscordVoiceConnectTimeout)
                 .ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: true. SelfMute: false.");
-            await SendValorantOpenedNotificationIfNeededAsync(settings).ConfigureAwait(false);
+            if (valorantDetected)
+            {
+                await SendValorantOpenedNotificationIfNeededAsync(settings).ConfigureAwait(false);
+            }
+
             await SendVersionNotificationIfNeededAsync().ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
