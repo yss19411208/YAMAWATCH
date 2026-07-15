@@ -54,6 +54,8 @@ release\VALOWATCH_Reinstall.exe 既存環境を一度削除して入れ直す復
 
 再インストール結果は、個人フォルダーを置換した小さな診断ログとして `data\logs\installer-result.pending.log` に保留します。`installer\.env` にDiscord bot tokenと `DISCORD_TEXT_CHANNEL_ID` がある場合は、インストーラー自身もDiscordへ直接結果を送ります。直接送信に失敗した場合でもpendingログを残し、VALOWATCHがDiscordへ接続できた時に再送します。通信できない場合は送信位置を進めず、次回接続時に再送します。GitHub書き込みtoken、Discord token、`.env` の内容は診断ログへ含めません。
 
+Windowsのアプリケーション制御で、インストーラー起動後の `GITHUB.exe` または `VALOWATCH.exe` 起動がブロックされた場合は、`WindowsApplicationControlBlocked=true` とブロックされた実行ファイル名、Win32エラー番号をDiscord通知とpendingログへ残します。`VALOWATCH_Reinstall.exe` 自体がWindowsに起動前ブロックされた場合は、プログラムの処理が開始されないためDiscord通知は送れません。
+
 VALORANT起動後は、音声ピーク診断に加えて `data\logs` と `%TEMP%\VALOWATCH` の `.log` / `.txt` をDiscordのコードブロックへ分割して送ります。初回接続時、起動20秒後、以後5分ごと、終了時に未送信行だけを送り、通信失敗時は次回接続で再送します。`.env`、Bot token、暗号化設定、ユーザープロファイルの実パスは送信しません。ログ送信は音声開始後に並行実行するため、過去ログが多くてもマイク開始を待たせません。
 
 音声DLLが欠落してVCへ参加できない場合も、先にDiscord Gatewayとテキストチャンネルへ接続し、欠落理由とログのコードブロックを送ってから切断します。

@@ -628,8 +628,13 @@ internal static class Program
                 }
                 catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
                 {
-                    repairIssues.Add($"GITHUB start failed: {exception.GetType().Name}");
-                    AddSelfRepairLine(reportLines, $"GitHubAgentRepairStart=failed:{exception.GetType().Name}");
+                    string startFailure = DescribeProcessStartFailure(exception);
+                    repairIssues.Add($"GITHUB start failed: {startFailure}");
+                    AddSelfRepairLine(reportLines, $"GitHubAgentRepairStart=failed:{startFailure}");
+                    if (IsWindowsApplicationControlBlock(exception))
+                    {
+                        AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=GITHUB.exe");
+                    }
                 }
 
                 githubRunning = WaitForProcessFromPath(
@@ -799,8 +804,14 @@ internal static class Program
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
-            repairIssues.Add($"VALOWATCH fallback start failed: {exception.GetType().Name}");
-            AddSelfRepairLine(reportLines, $"VALOWATCHFallbackStart=failed:{exception.GetType().Name}");
+            string startFailure = DescribeProcessStartFailure(exception);
+            repairIssues.Add($"VALOWATCH fallback start failed: {startFailure}");
+            AddSelfRepairLine(reportLines, $"VALOWATCHFallbackStart=failed:{startFailure}");
+            if (IsWindowsApplicationControlBlock(exception))
+            {
+                AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=VALOWATCH.exe");
+            }
+
             return false;
         }
 
@@ -877,6 +888,67 @@ internal static class Program
         WriteInstallerLog($"Self repair: {sanitizedLine}");
     }
 
+    private static string DescribeProcessStartFailure(Exception exception)
+    {
+        if (TryGetWin32Exception(exception, out System.ComponentModel.Win32Exception? win32Exception) &&
+            win32Exception is not null)
+        {
+            string classification = IsWindowsApplicationControlBlock(win32Exception)
+                ? "WindowsApplicationControlBlocked"
+                : "Win32ProcessStartFailure";
+            return $"{classification};NativeErrorCode={win32Exception.NativeErrorCode};Message={TrimForLog(win32Exception.Message, 240)}";
+        }
+
+        return $"{exception.GetType().Name};Message={TrimForLog(exception.Message, 240)}";
+    }
+
+    private static string DescribeInstallerFailure(Exception? exception)
+    {
+        if (exception is null)
+        {
+            return string.Empty;
+        }
+
+        if (TryGetWin32Exception(exception, out _))
+        {
+            return DescribeProcessStartFailure(exception);
+        }
+
+        return $"{exception.GetType().Name};Message={TrimForLog(exception.Message, 240)}";
+    }
+
+    private static bool IsWindowsApplicationControlBlock(Exception? exception)
+    {
+        return TryGetWin32Exception(exception, out System.ComponentModel.Win32Exception? win32Exception) &&
+            win32Exception is not null &&
+            IsWindowsApplicationControlBlockCode(win32Exception.NativeErrorCode);
+    }
+
+    private static bool IsWindowsApplicationControlBlockCode(int nativeErrorCode)
+    {
+        return nativeErrorCode is 4551 or 1260;
+    }
+
+    private static bool TryGetWin32Exception(
+        Exception? exception,
+        out System.ComponentModel.Win32Exception? win32Exception)
+    {
+        Exception? currentException = exception;
+        while (currentException is not null)
+        {
+            if (currentException is System.ComponentModel.Win32Exception currentWin32Exception)
+            {
+                win32Exception = currentWin32Exception;
+                return true;
+            }
+
+            currentException = currentException.InnerException;
+        }
+
+        win32Exception = null;
+        return false;
+    }
+
     private static void TryWriteAndSendInstallerReport(
         string installDirectory,
         bool succeeded,
@@ -918,6 +990,8 @@ internal static class Program
                 $"StartAfterInstall={startAfterInstall}",
                 $"StartupRegistered={registerStartup}",
                 $"FailureType={exception?.GetType().Name ?? string.Empty}",
+                $"WindowsApplicationControlBlocked={IsWindowsApplicationControlBlock(exception)}",
+                $"FailureDetail={DescribeInstallerFailure(exception)}",
                 string.Empty
             ];
             if (additionalReportLines.Count > 0)
