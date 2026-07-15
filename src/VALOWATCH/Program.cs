@@ -100,6 +100,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-watch-agent-supervisor", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunWatchAgentSupervisorDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--list-microphones", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneListDiagnostic();
@@ -1049,7 +1055,7 @@ static class Program
                 0.85F,
                 0F,
                 new DiagnosticToneWaveProvider(880F, 0.18F),
-                0.45F);
+                DiscordBotSettings.DefaultLineAudioVolume);
             int mixedBytesRead = mixedProvider.Read(mixedFrameBuffer, 0, mixedFrameBuffer.Length);
             float mixedPeak = DiscordBotVoiceRelay.CalculateAudioPeak(
                 mixedProvider.WaveFormat,
@@ -1063,7 +1069,7 @@ static class Program
                 0.85F,
                 0F,
                 new DiagnosticToneWaveProvider(880F, 0.16F),
-                0.45F,
+                DiscordBotSettings.DefaultLineAudioVolume,
                 new DiagnosticToneWaveProvider(660F, 0.16F),
                 0.45F);
             int discordMixedBytesRead = discordMixedProvider.Read(
@@ -1247,6 +1253,32 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Running process snapshot check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunWatchAgentSupervisorDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            WatchAgentPlan plan = WatchAgentSupervisor.GetPlan(appPaths);
+            bool supervisorReady = plan.AgentPath is not null && plan.InstalledAppExists;
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] GITHUB watch agent supervisor check: " +
+                $"{(supervisorReady ? "ready" : "failed")}. " +
+                $"WorkspaceRoot: {plan.WorkspaceRoot}. InstallDirectory: {plan.InstallDirectory}. " +
+                $"AgentPath: {plan.AgentPath ?? "(none)"}. InstalledAppExists: {plan.InstalledAppExists}. " +
+                $"AgentAlreadyRunning: {plan.AgentAlreadyRunning}.");
+            Environment.ExitCode = supervisorReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "GITHUB watch agent supervisor check", exception);
             Environment.ExitCode = 1;
         }
     }

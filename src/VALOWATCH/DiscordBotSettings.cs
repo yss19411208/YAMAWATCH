@@ -2,6 +2,10 @@ namespace VALOWATCH;
 
 public sealed class DiscordBotSettings
 {
+    public const float DefaultLineAudioVolume = 0.65F;
+
+    public const float LegacyDefaultLineAudioVolume = 0.45F;
+
     public bool Enabled { get; set; }
 
     public string BotToken { get; set; } = string.Empty;
@@ -26,7 +30,7 @@ public sealed class DiscordBotSettings
 
     public string[] LineAudioProcessNames { get; set; } = ["LINE", "Line", "line"];
 
-    public float LineAudioVolume { get; set; } = 0.45F;
+    public float LineAudioVolume { get; set; } = DefaultLineAudioVolume;
 
     public bool StreamDiscordAudioWhenRunning { get; set; }
 

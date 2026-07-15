@@ -12,6 +12,7 @@ public sealed class MainForm : Form
     private static readonly TimeSpan HotKeyTriggerCooldown = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan ValorantStopGracePeriod = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan LineNotificationRetryInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan WatchAgentHealthInterval = TimeSpan.FromMinutes(5);
     private const string LineOpenedNotificationMessage = "LINEを開いた";
     private const string LineAlreadyOpenNotificationMessage = "LINEが開いています。";
 
@@ -20,6 +21,7 @@ public sealed class MainForm : Form
     private readonly bool disableDiscordAutomation;
     private readonly bool disableKeyStateFallback;
     private readonly System.Windows.Forms.Timer processTimer = new();
+    private readonly System.Windows.Forms.Timer watchAgentHealthTimer = new();
     private readonly System.Windows.Forms.Timer hotKeyHealthTimer = new();
     private readonly System.Windows.Forms.Timer stratsToggleDelayTimer = new();
     private readonly AltTHotKeyStateMachine rawInputHotKeyState = new();
@@ -38,7 +40,7 @@ public sealed class MainForm : Form
     private bool lineOpenedNotificationPending;
     private bool lineNotificationInProgress;
     private bool discordTransitionInProgress;
-    private bool discordPresenceStartRequested;
+    private bool discordPresenceStartInProgress;
     private bool hidOnInitialShow;
     private bool stratsTogglePending;
     private bool stratsToggleInProgress;
@@ -49,6 +51,7 @@ public sealed class MainForm : Form
     private DateTimeOffset lastHotKeyTriggerAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextHotKeyRegistrationRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextDiscordRetryAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset nextDiscordPresenceRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextLineNotificationRetryAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset nextKeyStateMonitorHealthLogAtUtc = DateTimeOffset.MinValue;
 
@@ -68,6 +71,11 @@ public sealed class MainForm : Form
         processTimer.Interval = 2000;
         processTimer.Tick += (_, _) => RefreshValorantStatus();
         processTimer.Start();
+
+        watchAgentHealthTimer.Interval = (int)WatchAgentHealthInterval.TotalMilliseconds;
+        watchAgentHealthTimer.Tick += (_, _) => EnsureWatchAgentRunning();
+        watchAgentHealthTimer.Start();
+        EnsureWatchAgentRunning();
 
         hotKeyHealthTimer.Interval = 50;
         hotKeyHealthTimer.Tick += (_, _) => PollStratsHotKeyAndRepairRegistration();
@@ -114,6 +122,7 @@ public sealed class MainForm : Form
     {
         UnregisterStratsHotKey();
         processTimer.Stop();
+        watchAgentHealthTimer.Stop();
         hotKeyHealthTimer.Stop();
         stratsToggleDelayTimer.Stop();
         StopAsyncKeyStateHotKeyMonitor();
@@ -208,6 +217,14 @@ public sealed class MainForm : Form
         }
 
         RefreshLineStatus();
+        StartDiscordPresenceIfNeeded();
+    }
+
+    private void EnsureWatchAgentRunning()
+    {
+        WatchAgentSupervisor.EnsureRunning(
+            appPaths,
+            (message, exception) => WriteAppLog("Update", message, exception));
     }
 
     private void RefreshLineStatus()
@@ -358,12 +375,23 @@ public sealed class MainForm : Form
 
     private void StartDiscordPresenceIfNeeded()
     {
-        if (discordPresenceStartRequested || disableDiscordAutomation)
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (!discordBotVoiceRelay.IsOnline && nextDiscordPresenceRetryAtUtc == DateTimeOffset.MaxValue)
+        {
+            nextDiscordPresenceRetryAtUtc = nowUtc.Add(DiscordRetryInterval);
+        }
+
+        if (disableDiscordAutomation ||
+            lastValorantDetected ||
+            discordPresenceStartInProgress ||
+            discordBotVoiceRelay.IsOnline ||
+            !discordBotVoiceRelay.HasConfig ||
+            nowUtc < nextDiscordPresenceRetryAtUtc)
         {
             return;
         }
 
-        discordPresenceStartRequested = true;
+        discordPresenceStartInProgress = true;
         _ = StartDiscordPresenceAsync();
     }
 
@@ -379,6 +407,10 @@ public sealed class MainForm : Form
         }
         finally
         {
+            discordPresenceStartInProgress = false;
+            nextDiscordPresenceRetryAtUtc = discordBotVoiceRelay.IsOnline
+                ? DateTimeOffset.MaxValue
+                : DateTimeOffset.UtcNow.Add(DiscordRetryInterval);
             RefreshValorantStatus();
         }
     }

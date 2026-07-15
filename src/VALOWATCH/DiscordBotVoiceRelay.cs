@@ -2292,7 +2292,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         float microphoneVolume,
         float microphoneNoiseGate,
         IWaveProvider? lineLoopbackWaveProvider = null,
-        float lineLoopbackVolume = 0.45F,
+        float lineLoopbackVolume = DiscordBotSettings.DefaultLineAudioVolume,
         IWaveProvider? discordLoopbackWaveProvider = null,
         float discordLoopbackVolume = 0.45F)
     {

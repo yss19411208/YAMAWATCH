@@ -1551,7 +1551,7 @@ internal static class Program
             "DISCORD_MIC_NOISE_GATE=0",
             "DISCORD_STREAM_LINE_AUDIO=true",
             "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
-            "DISCORD_LINE_AUDIO_VOLUME=0.45",
+            "DISCORD_LINE_AUDIO_VOLUME=0.65",
             "VALOWATCH_UPDATE_CHECK_ENABLED=true",
             "VALOWATCH_UPDATE_REPOSITORY=yss19411208/YAMAWATCH",
             "VALOWATCH_UPDATE_CURRENT_VERSION=0.1.2",

@@ -36,6 +36,7 @@ public sealed class DiscordBotSettingsStore
 
         DiscordBotSettings settings = LoadJsonSettings() ?? new DiscordBotSettings();
         ApplyEnvSettings(settings);
+        settings.LineAudioVolume = NormalizeLineAudioVolume(settings.LineAudioVolume);
 
         if (!settings.Enabled)
         {
@@ -88,7 +89,7 @@ public sealed class DiscordBotSettingsStore
             MicrophoneNoiseGate = 0F,
             StreamLineAudioWhenRunning = true,
             LineAudioProcessNames = ["LINE", "Line", "line"],
-            LineAudioVolume = 0.45F,
+            LineAudioVolume = DiscordBotSettings.DefaultLineAudioVolume,
             StreamDiscordAudioWhenRunning = false,
             DiscordAudioProcessNames = ["Discord", "DiscordCanary", "DiscordPTB"],
             DiscordAudioVolume = 0.45F,
@@ -213,7 +214,7 @@ public sealed class DiscordBotSettingsStore
 
         if (TryGetSingle(envValues, out float lineAudioVolume, "DISCORD_LINE_AUDIO_VOLUME", "LINE_AUDIO_VOLUME"))
         {
-            settings.LineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
+            settings.LineAudioVolume = NormalizeLineAudioVolume(lineAudioVolume);
         }
 
         if (TryGetBoolean(
@@ -298,7 +299,7 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_MIC_NOISE_GATE=0",
             "DISCORD_STREAM_LINE_AUDIO=true",
             "DISCORD_LINE_PROCESS_NAMES=LINE,Line,line",
-            "DISCORD_LINE_AUDIO_VOLUME=0.45",
+            $"DISCORD_LINE_AUDIO_VOLUME={DiscordBotSettings.DefaultLineAudioVolume.ToString("0.##", CultureInfo.InvariantCulture)}",
             "DISCORD_STREAM_DISCORD_AUDIO=false",
             "DISCORD_AUDIO_PROCESS_NAMES=Discord,DiscordCanary,DiscordPTB",
             "DISCORD_AUDIO_VOLUME=0.45",
@@ -338,6 +339,17 @@ public sealed class DiscordBotSettingsStore
         {
             writer.WriteLine(missingLine);
         }
+    }
+
+    private static float NormalizeLineAudioVolume(float lineAudioVolume)
+    {
+        float clampedLineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
+        if (Math.Abs(clampedLineAudioVolume - DiscordBotSettings.LegacyDefaultLineAudioVolume) < 0.0001F)
+        {
+            return DiscordBotSettings.DefaultLineAudioVolume;
+        }
+
+        return clampedLineAudioVolume;
     }
 
     private static bool TryGetString(
