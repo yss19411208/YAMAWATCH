@@ -85,8 +85,6 @@ internal static class Program
             return;
         }
 
-        EnsureValowatchStackRunning(resolvedPaths, "start agent startup");
-
         DiscordSocketClient client = new(new DiscordSocketConfig
         {
             GatewayIntents = GatewayIntents.Guilds,
@@ -109,7 +107,7 @@ internal static class Program
 
         await client.LoginAsync(TokenType.Bot, settings.BotToken).ConfigureAwait(false);
         await client.StartAsync().ConfigureAwait(false);
-        WriteLog(resolvedPaths, "VALOWATCH Start agent connected to Discord.");
+        WriteLog(resolvedPaths, "VALOWATCH Start agent connected to Discord and is waiting for /start.");
 
         try
         {
@@ -150,7 +148,7 @@ internal static class Program
             WriteLog(resolvedPaths, "Start agent slash command registered: /start.");
         }
 
-        EnsureValowatchStackRunning(resolvedPaths, "Discord ready");
+        WriteLog(resolvedPaths, "Start agent Discord ready; no app launch is performed until /start is executed.");
     }
 
     private static async Task OnSlashCommandExecutedAsync(

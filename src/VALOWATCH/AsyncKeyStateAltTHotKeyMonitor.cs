@@ -77,7 +77,7 @@ internal sealed class AsyncKeyStateAltTHotKeyMonitor : IDisposable
             }
 
             chordWasDown = chordIsDown;
-            cancellationHandle.WaitOne(10);
+            cancellationHandle.WaitOne(25);
         }
     }
 }

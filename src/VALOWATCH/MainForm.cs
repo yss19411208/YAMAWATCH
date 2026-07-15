@@ -7,6 +7,7 @@ public sealed class MainForm : Form
     private const int StratsHotKeyId = 9101;
     private const int WmAltTHookPressed = NativeMethods.WmApp + 0x51;
     private const int WmAltTKeyStatePressed = NativeMethods.WmApp + 0x52;
+    private static readonly bool EnableAntiCheatSensitiveKeyboardFallbacks = false;
     private static readonly TimeSpan DiscordRetryInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan HotKeyRegistrationRetryInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan HotKeyTriggerCooldown = TimeSpan.FromMilliseconds(500);
@@ -103,9 +104,17 @@ public sealed class MainForm : Form
         base.OnHandleCreated(eventArgs);
         hotKeyMessageTargetHandle = Handle;
         RegisterStratsHotKey();
-        RegisterRawKeyboardInput();
-        RegisterLowLevelKeyboardHook();
-        StartAsyncKeyStateHotKeyMonitor();
+        if (EnableAntiCheatSensitiveKeyboardFallbacks)
+        {
+            RegisterRawKeyboardInput();
+            RegisterLowLevelKeyboardHook();
+        }
+        else
+        {
+            WriteAppLog("Overlay", "Raw Input and low-level keyboard hook are disabled for game stability.");
+        }
+
+        WriteAppLog("Overlay", "Dedicated Alt + T key-state fallback will start only while VALORANT is running.");
     }
 
     protected override void OnHandleDestroyed(EventArgs eventArgs)
@@ -191,6 +200,20 @@ public sealed class MainForm : Form
             stratsOverlayForm.HideOverlayKeepingPage();
         }
 
+        if (!valorantDetected && stratsOverlayForm is not null)
+        {
+            DisposeStratsOverlay();
+        }
+
+        if (valorantDetected)
+        {
+            StartAsyncKeyStateHotKeyMonitor();
+        }
+        else
+        {
+            StopAsyncKeyStateHotKeyMonitor();
+        }
+
         if (valorantDetected != lastValorantDetected)
         {
             lastValorantDetected = valorantDetected;
@@ -198,22 +221,12 @@ public sealed class MainForm : Form
                 ? DateTimeOffset.UtcNow.Add(DiscordRetryInterval)
                 : DateTimeOffset.MinValue;
 
-            if (valorantDetected)
-            {
-                PreloadStratsOverlayIfNeeded();
-            }
-
             _ = HandleValorantStateChangeAsync(valorantDetected);
         }
         else if (ShouldRetryDiscordStart(valorantDetected))
         {
             nextDiscordRetryAtUtc = DateTimeOffset.UtcNow.Add(DiscordRetryInterval);
             _ = HandleValorantStateChangeAsync(valorantDetected);
-        }
-
-        if (valorantDetected)
-        {
-            PreloadStratsOverlayIfNeeded();
         }
 
         RefreshLineStatus();
@@ -466,7 +479,9 @@ public sealed class MainForm : Form
 
     private void CheckAsyncKeyStateMonitorHealth()
     {
-        if (disableKeyStateFallback || DateTimeOffset.UtcNow < nextKeyStateMonitorHealthLogAtUtc)
+        if (disableKeyStateFallback ||
+            !lastValorantDetected ||
+            DateTimeOffset.UtcNow < nextKeyStateMonitorHealthLogAtUtc)
         {
             return;
         }
