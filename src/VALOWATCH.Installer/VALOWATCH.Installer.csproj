@@ -12,6 +12,7 @@
   <ItemGroup>
     <EmbeddedResource Include="..\..\exe\VALOWATCH.exe" LogicalName="VALOWATCH.exe" />
     <EmbeddedResource Include="..\..\github\GITHUB.exe" LogicalName="GITHUB.exe" Condition="Exists('..\..\github\GITHUB.exe')" />
+    <EmbeddedResource Include="..\..\start\VALOWATCH_Start.exe" LogicalName="VALOWATCH_Start.exe" Condition="Exists('..\..\start\VALOWATCH_Start.exe')" />
     <EmbeddedResource Include="..\..\exe\libdave.dll" LogicalName="Native/libdave.dll" Condition="Exists('..\..\exe\libdave.dll')" />
     <EmbeddedResource Include="..\..\exe\libsodium.dll" LogicalName="Native/libsodium.dll" Condition="Exists('..\..\exe\libsodium.dll')" />
     <EmbeddedResource Include="..\..\exe\opus.dll" LogicalName="Native/opus.dll" Condition="Exists('..\..\exe\opus.dll')" />

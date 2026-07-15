@@ -12,8 +12,10 @@ internal static class Program
     private const string Repository = "yss19411208/YAMAWATCH";
     private const string AppAssetName = "VALOWATCH_App.exe";
     private const string AgentAssetName = "GITHUB.exe";
+    private const string StartAgentAssetName = "VALOWATCH_Start.exe";
     private const string InstalledAppName = "VALOWATCH.exe";
     private const string AgentFileName = "GITHUB.exe";
+    private const string StartAgentFileName = "VALOWATCH_Start.exe";
     private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
@@ -197,6 +199,7 @@ internal static class Program
                 if (Volatile.Read(ref appReplacementInProgress) == 0)
                 {
                     EnsureInstalledAppRunning(installDirectory);
+                    EnsureStartAgentRunningIfPresent(installDirectory);
                 }
 
                 if (activeUpdateTask is { IsCompleted: true })
@@ -238,6 +241,8 @@ internal static class Program
             {
                 return 10;
             }
+
+            await EnsureStartAgentInstalledAndRunningAsync(installDirectory).ConfigureAwait(false);
 
             return await RunUpdateAsync(
                 installDirectory,
@@ -384,6 +389,94 @@ internal static class Program
             WindowStyle = ProcessWindowStyle.Hidden
         });
         WriteLog($"GITHUB restarted VALOWATCH: {installedAppPath}");
+    }
+
+    private static async Task EnsureStartAgentInstalledAndRunningAsync(string installDirectory)
+    {
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        string installedStartAgentPath = Path.Combine(workspaceRoot, StartAgentFileName);
+        using HttpClient httpClient = CreateHttpClient();
+        ReleaseAppAsset startAgentAsset = await ExecuteWithRetryAsync(
+            "VALOWATCH Start agent release lookup",
+            cancellationToken => GetLatestReleaseAssetAsync(httpClient, StartAgentAssetName, cancellationToken)).ConfigureAwait(false);
+
+        if (!FileMatchesRelease(installedStartAgentPath, startAgentAsset.ExpectedSha256, out string currentStatus))
+        {
+            string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "start-agent");
+            Directory.CreateDirectory(updateDirectory);
+            string downloadedStartAgentPath = Path.Combine(
+                updateDirectory,
+                $"VALOWATCH_Start_{SanitizeFileName(startAgentAsset.TagName)}.exe");
+            await ExecuteWithRetryAsync(
+                "VALOWATCH Start agent download",
+                cancellationToken => DownloadAndValidateAppAsync(
+                    httpClient,
+                    startAgentAsset,
+                    downloadedStartAgentPath,
+                    cancellationToken)).ConfigureAwait(false);
+            StopProcessesFromPath("VALOWATCH_Start", installedStartAgentPath);
+            string temporaryPath = installedStartAgentPath + $".{Environment.ProcessId}.new";
+            File.Copy(downloadedStartAgentPath, temporaryPath, overwrite: true);
+            File.Move(temporaryPath, installedStartAgentPath, overwrite: true);
+            WriteLog($"VALOWATCH Start agent installed. Previous: {currentStatus}");
+        }
+
+        EnsureStartAgentRunningIfPresent(installDirectory);
+    }
+
+    private static void EnsureStartAgentRunningIfPresent(string installDirectory)
+    {
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        string installedStartAgentPath = Path.Combine(workspaceRoot, StartAgentFileName);
+        if (!File.Exists(installedStartAgentPath) ||
+            IsProcessRunningFromPath("VALOWATCH_Start", installedStartAgentPath))
+        {
+            return;
+        }
+
+        ProcessStartInfo processStartInfo = new()
+        {
+            FileName = installedStartAgentPath,
+            UseShellExecute = true,
+            WorkingDirectory = workspaceRoot,
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
+        processStartInfo.ArgumentList.Add("--install-dir");
+        processStartInfo.ArgumentList.Add(installDirectory);
+        Process.Start(processStartInfo);
+        WriteLog($"GITHUB started VALOWATCH Start agent: {installedStartAgentPath}");
+    }
+
+    private static void StopProcessesFromPath(string processName, string expectedPath)
+    {
+        if (!File.Exists(expectedPath))
+        {
+            return;
+        }
+
+        string normalizedExpectedPath = Path.GetFullPath(expectedPath);
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                try
+                {
+                    string? processPath = process.MainModule?.FileName;
+                    if (!string.IsNullOrWhiteSpace(processPath) &&
+                        Path.GetFullPath(processPath).Equals(normalizedExpectedPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        process.Kill(entireProcessTree: true);
+                        process.WaitForExit(5000);
+                    }
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+                {
+                    WriteLog($"Could not stop process {processName} for replacement.", exception);
+                }
+            }
+        }
     }
 
     private static string InstallOrRefreshAgent(string installDirectory)

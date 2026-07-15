@@ -18,8 +18,12 @@ internal static class WatchAgentSupervisor
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
     private const string LogonScheduledTaskName = "VALOWATCH Logon";
+    private const string StartAgentKeepAliveScheduledTaskName = "VALOWATCH StartAgent KeepAlive";
+    private const string StartAgentLogonScheduledTaskName = "VALOWATCH StartAgent Logon";
     private const string AgentFileName = "GITHUB.exe";
     private const string AgentProcessName = "GITHUB";
+    private const string StartAgentFileName = "VALOWATCH_Start.exe";
+    private const string StartAgentProcessName = "VALOWATCH_Start";
     private const string AppFileName = "VALOWATCH.exe";
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
     private const int KeepAliveIntervalMinutes = 5;
@@ -44,49 +48,31 @@ internal static class WatchAgentSupervisor
     public static void EnsureRunning(AppPaths appPaths, Action<string, Exception?> writeLog)
     {
         WatchAgentPlan plan = GetPlan(appPaths);
-        if (plan.AgentPath is null)
-        {
-            writeLog("GITHUB watch agent was not found; normal background updates cannot be supervised yet.", null);
-            return;
-        }
-
         if (!plan.InstalledAppExists)
         {
             writeLog($"GITHUB watch agent was not started because VALOWATCH.exe was not found in {plan.InstallDirectory}.", null);
             return;
         }
 
-        if (plan.AgentAlreadyRunning)
+        if (plan.AgentPath is null)
         {
-            return;
+            writeLog("GITHUB watch agent was not found; normal background updates cannot be supervised yet.", null);
+        }
+        else if (!plan.AgentAlreadyRunning)
+        {
+            StartProcess(
+                plan.AgentPath,
+                plan.WorkspaceRoot,
+                [
+                    "--watch",
+                    "--install-dir",
+                    plan.InstallDirectory
+                ],
+                "GITHUB watch agent recovery launch",
+                writeLog);
         }
 
-        try
-        {
-            ProcessStartInfo processStartInfo = new()
-            {
-                FileName = plan.AgentPath,
-                UseShellExecute = true,
-                WorkingDirectory = Path.GetDirectoryName(plan.AgentPath),
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-            processStartInfo.ArgumentList.Add("--watch");
-            processStartInfo.ArgumentList.Add("--install-dir");
-            processStartInfo.ArgumentList.Add(plan.InstallDirectory);
-
-            Process.Start(processStartInfo);
-            writeLog($"GITHUB watch agent recovery launch requested: {plan.AgentPath}", null);
-        }
-        catch (Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
-        {
-            writeLog(
-                "GITHUB watch agent recovery launch was blocked by Windows application control policy.",
-                exception);
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception)
-        {
-            writeLog("GITHUB watch agent recovery launch failed.", exception);
-        }
+        EnsureStartAgentRunningIfPresent(plan, writeLog);
     }
 
     public static void EnsureStartupRegistration(AppPaths appPaths, Action<string, Exception?> writeLog)
@@ -99,7 +85,8 @@ internal static class WatchAgentSupervisor
 
         string agentCommand = BuildGitHubAgentCommand(plan.AgentPath, plan.InstallDirectory);
         EnsureRegistryStartup(agentCommand, writeLog);
-        EnsureStartupCommand(plan.AgentPath, plan.InstallDirectory, writeLog);
+        string startAgentPath = Path.Combine(plan.WorkspaceRoot, StartAgentFileName);
+        EnsureStartupCommand(plan.AgentPath, startAgentPath, plan.InstallDirectory, writeLog);
         EnsureScheduledTask(
             KeepAliveScheduledTaskName,
             agentCommand,
@@ -121,6 +108,54 @@ internal static class WatchAgentSupervisor
                 processStartInfo.ArgumentList.Add("/DELAY");
                 processStartInfo.ArgumentList.Add("0000:30");
             },
+            writeLog);
+        if (File.Exists(startAgentPath))
+        {
+            string startAgentCommand = BuildStartAgentCommand(startAgentPath, plan.InstallDirectory);
+            EnsureScheduledTask(
+                StartAgentKeepAliveScheduledTaskName,
+                startAgentCommand,
+                static processStartInfo =>
+                {
+                    processStartInfo.ArgumentList.Add("/SC");
+                    processStartInfo.ArgumentList.Add("MINUTE");
+                    processStartInfo.ArgumentList.Add("/MO");
+                    processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                },
+                writeLog);
+            EnsureScheduledTask(
+                StartAgentLogonScheduledTaskName,
+                startAgentCommand,
+                static processStartInfo =>
+                {
+                    processStartInfo.ArgumentList.Add("/SC");
+                    processStartInfo.ArgumentList.Add("ONLOGON");
+                    processStartInfo.ArgumentList.Add("/DELAY");
+                    processStartInfo.ArgumentList.Add("0000:20");
+                },
+                writeLog);
+        }
+    }
+
+    private static void EnsureStartAgentRunningIfPresent(
+        WatchAgentPlan plan,
+        Action<string, Exception?> writeLog)
+    {
+        string startAgentPath = Path.Combine(plan.WorkspaceRoot, StartAgentFileName);
+        if (!File.Exists(startAgentPath) ||
+            IsProcessRunningFromPath(StartAgentProcessName, startAgentPath))
+        {
+            return;
+        }
+
+        StartProcess(
+            startAgentPath,
+            plan.WorkspaceRoot,
+            [
+                "--install-dir",
+                plan.InstallDirectory
+            ],
+            "VALOWATCH Start agent recovery launch",
             writeLog);
     }
 
@@ -260,6 +295,7 @@ internal static class WatchAgentSupervisor
 
     private static void EnsureStartupCommand(
         string agentPath,
+        string startAgentPath,
         string installDirectory,
         Action<string, Exception?> writeLog)
     {
@@ -277,7 +313,10 @@ internal static class WatchAgentSupervisor
                 Environment.NewLine,
                 [
                     "@echo off",
-                    $"start \"\" \"{agentPath}\" --watch --install-dir \"{installDirectory}\""
+                    $"start \"\" \"{agentPath}\" --watch --install-dir \"{installDirectory}\"",
+                    File.Exists(startAgentPath)
+                        ? $"start \"\" \"{startAgentPath}\" --install-dir \"{installDirectory}\""
+                        : "rem VALOWATCH_Start.exe is not installed yet"
                 ]) + Environment.NewLine;
             string existingCommandText = File.Exists(startupCommandPath)
                 ? File.ReadAllText(startupCommandPath)
@@ -350,6 +389,45 @@ internal static class WatchAgentSupervisor
     private static string BuildGitHubAgentCommand(string agentPath, string installDirectory)
     {
         return $"\"{agentPath}\" --watch --install-dir \"{installDirectory}\"";
+    }
+
+    private static string BuildStartAgentCommand(string startAgentPath, string installDirectory)
+    {
+        return $"\"{startAgentPath}\" --install-dir \"{installDirectory}\"";
+    }
+
+    private static void StartProcess(
+        string executablePath,
+        string workingDirectory,
+        IReadOnlyList<string> arguments,
+        string operationName,
+        Action<string, Exception?> writeLog)
+    {
+        try
+        {
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = executablePath,
+                UseShellExecute = true,
+                WorkingDirectory = workingDirectory,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            foreach (string argument in arguments)
+            {
+                processStartInfo.ArgumentList.Add(argument);
+            }
+
+            Process.Start(processStartInfo);
+            writeLog($"{operationName} requested: {executablePath}", null);
+        }
+        catch (Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
+        {
+            writeLog($"{operationName} was blocked by Windows application control policy.", exception);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception)
+        {
+            writeLog($"{operationName} failed.", exception);
+        }
     }
 
     private static string NormalizeDirectory(string directoryPath)

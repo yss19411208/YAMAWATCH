@@ -84,10 +84,20 @@ jobs:
             "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
             -o .\updater
 
+          dotnet publish .\src\VALOWATCH.StartAgent\VALOWATCH.StartAgent.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
+            -o .\start
+
           New-Item -ItemType Directory -Path release -Force | Out-Null
           Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination .\release\VALOWATCH_App.exe -Force
           Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
           Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\GITHUB.exe -Force
+          Copy-Item -LiteralPath .\start\VALOWATCH_Start.exe -Destination .\release\VALOWATCH_Start.exe -Force
 
       - name: Publish GitHub release
         shell: pwsh
@@ -105,6 +115,7 @@ jobs:
             .\release\VALOWATCH_App.exe `
             .\release\VALOWATCH_Update.exe `
             .\release\GITHUB.exe `
+            .\release\VALOWATCH_Start.exe `
             --repo "${{ github.repository }}" `
             --target "${{ github.sha }}" `
             --title "VALOWATCH update ${{ github.sha }}" `

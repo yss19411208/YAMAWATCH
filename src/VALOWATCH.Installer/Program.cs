@@ -13,10 +13,14 @@ internal static class Program
     private const string RegistryValueName = "VALOWATCH";
     private const string EmbeddedExecutableResourceName = "VALOWATCH.exe";
     private const string EmbeddedGitHubResourceName = "GITHUB.exe";
+    private const string EmbeddedStartAgentResourceName = "VALOWATCH_Start.exe";
+    private const string StartAgentFileName = "VALOWATCH_Start.exe";
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
     private const string LogonScheduledTaskName = "VALOWATCH Logon";
+    private const string StartAgentKeepAliveScheduledTaskName = "VALOWATCH StartAgent KeepAlive";
+    private const string StartAgentLogonScheduledTaskName = "VALOWATCH StartAgent Logon";
     private const string PendingInstallerReportFileName = "installer-result.pending.log";
     private const int DiscordMessageMaximumLength = 1900;
     private static readonly TimeSpan ProcessRepairWaitTimeout = TimeSpan.FromSeconds(15);
@@ -501,6 +505,7 @@ internal static class Program
         string installedExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
         string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
         string installedGitHubPath = Path.Combine(workspaceRoot, "GITHUB.exe");
+        string installedStartAgentPath = Path.Combine(workspaceRoot, StartAgentFileName);
         bool replacesExistingInstallation = File.Exists(installedExecutablePath);
         SelfRepairResult selfRepairResult = new(false, "not run", []);
 
@@ -521,6 +526,7 @@ internal static class Program
         progress.Report(new InstallProgress(69, "Discord 音声 DLL を展開しています。"));
         ExtractNativeDependencies(installDirectory);
         ExtractEmbeddedFile(EmbeddedGitHubResourceName, installedGitHubPath);
+        ExtractEmbeddedFile(EmbeddedStartAgentResourceName, installedStartAgentPath);
         RemoveObsoleteCaptureTools(installDirectory);
 
         progress.Report(new InstallProgress(70, "Discord bot 設定を配置しています。"));
@@ -529,7 +535,7 @@ internal static class Program
         if (registerStartup)
         {
             progress.Report(new InstallProgress(92, "Windows 起動時の自動起動を登録しています。"));
-            RegisterStartup(installedGitHubPath, installDirectory);
+            RegisterStartup(installedGitHubPath, installedStartAgentPath, installDirectory);
         }
         else
         {
@@ -545,6 +551,7 @@ internal static class Program
         {
             progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
             StartGitHubAgent(installedGitHubPath, installDirectory);
+            StartStartAgent(installedStartAgentPath, installDirectory);
         }
         else
         {
@@ -555,6 +562,7 @@ internal static class Program
             installDirectory,
             installedExecutablePath,
             installedGitHubPath,
+            installedStartAgentPath,
             registerStartup,
             startAfterInstall);
         if (selfRepairResult.HasBlockingFailure)
@@ -588,6 +596,7 @@ internal static class Program
         string installDirectory,
         string installedExecutablePath,
         string installedGitHubPath,
+        string installedStartAgentPath,
         bool registerStartup,
         bool startAfterInstall)
     {
@@ -598,6 +607,7 @@ internal static class Program
         AddSelfRepairLine(reportLines, $"InstallDirectory={installDirectory}");
         AddFileCheck(reportLines, repairIssues, "VALOWATCH.exe", installedExecutablePath, required: true);
         AddFileCheck(reportLines, repairIssues, "GITHUB.exe", installedGitHubPath, required: true);
+        AddFileCheck(reportLines, repairIssues, StartAgentFileName, installedStartAgentPath, required: true);
         foreach ((_, string nativeDependencyFileName) in NativeDependencyResources)
         {
             AddFileCheck(
@@ -614,7 +624,12 @@ internal static class Program
 
         if (registerStartup)
         {
-            VerifyStartupRegistration(reportLines, repairIssues, installedGitHubPath, installDirectory);
+            VerifyStartupRegistration(
+                reportLines,
+                repairIssues,
+                installedGitHubPath,
+                installedStartAgentPath,
+                installDirectory);
         }
         else
         {
@@ -628,6 +643,11 @@ internal static class Program
                 expectedExecutablePath: installedGitHubPath,
                 timeout: ProcessRepairWaitTimeout);
             AddSelfRepairLine(reportLines, $"GitHubAgentRunningInitial={githubRunning}");
+            bool startAgentRunning = WaitForProcessFromPath(
+                processName: "VALOWATCH_Start",
+                expectedExecutablePath: installedStartAgentPath,
+                timeout: ProcessRepairWaitTimeout);
+            AddSelfRepairLine(reportLines, $"StartAgentRunningInitial={startAgentRunning}");
 
             if (!githubRunning)
             {
@@ -652,6 +672,31 @@ internal static class Program
                     expectedExecutablePath: installedGitHubPath,
                     timeout: ProcessRepairWaitTimeout);
                 AddSelfRepairLine(reportLines, $"GitHubAgentRunningAfterRepair={githubRunning}");
+            }
+
+            if (!startAgentRunning)
+            {
+                try
+                {
+                    StartStartAgent(installedStartAgentPath, installDirectory);
+                    AddSelfRepairLine(reportLines, "StartAgentRepairStart=attempted");
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+                {
+                    string startFailure = DescribeProcessStartFailure(exception);
+                    repairIssues.Add($"Start agent start failed: {startFailure}");
+                    AddSelfRepairLine(reportLines, $"StartAgentRepairStart=failed:{startFailure}");
+                    if (IsWindowsApplicationControlBlock(exception))
+                    {
+                        AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=VALOWATCH_Start.exe");
+                    }
+                }
+
+                startAgentRunning = WaitForProcessFromPath(
+                    processName: "VALOWATCH_Start",
+                    expectedExecutablePath: installedStartAgentPath,
+                    timeout: ProcessRepairWaitTimeout);
+                AddSelfRepairLine(reportLines, $"StartAgentRunningAfterRepair={startAgentRunning}");
             }
 
             if (!githubRunning)
@@ -699,6 +744,7 @@ internal static class Program
         List<string> reportLines,
         List<string> repairIssues,
         string installedGitHubPath,
+        string installedStartAgentPath,
         string installDirectory)
     {
         string expectedCommand = BuildGitHubAgentCommand(installedGitHubPath, installDirectory);
@@ -727,6 +773,7 @@ internal static class Program
                 ? File.ReadAllText(startupCommandPath, Encoding.UTF8)
                 : string.Empty;
             bool startupCommandMatches = startupCommandText.Contains(installedGitHubPath, StringComparison.OrdinalIgnoreCase) &&
+                startupCommandText.Contains(installedStartAgentPath, StringComparison.OrdinalIgnoreCase) &&
                 startupCommandText.Contains(installDirectory, StringComparison.OrdinalIgnoreCase);
             AddSelfRepairLine(reportLines, $"StartupCommandMatches={startupCommandMatches}");
             if (!startupCommandMatches)
@@ -744,6 +791,10 @@ internal static class Program
         AddSelfRepairLine(reportLines, $"KeepAliveTaskExists={keepAliveTaskExists};detail:{keepAliveTaskDetail}");
         bool logonTaskExists = TryQueryScheduledTask(LogonScheduledTaskName, out string logonTaskDetail);
         AddSelfRepairLine(reportLines, $"LogonTaskExists={logonTaskExists};detail:{logonTaskDetail}");
+        bool startAgentKeepAliveTaskExists = TryQueryScheduledTask(StartAgentKeepAliveScheduledTaskName, out string startAgentKeepAliveTaskDetail);
+        AddSelfRepairLine(reportLines, $"StartAgentKeepAliveTaskExists={startAgentKeepAliveTaskExists};detail:{startAgentKeepAliveTaskDetail}");
+        bool startAgentLogonTaskExists = TryQueryScheduledTask(StartAgentLogonScheduledTaskName, out string startAgentLogonTaskDetail);
+        AddSelfRepairLine(reportLines, $"StartAgentLogonTaskExists={startAgentLogonTaskExists};detail:{startAgentLogonTaskDetail}");
     }
 
     private static bool TryQueryScheduledTask(string taskName, out string detail)
@@ -1885,6 +1936,8 @@ internal static class Program
 
         TryDeleteScheduledTask(KeepAliveScheduledTaskName);
         TryDeleteScheduledTask(LogonScheduledTaskName);
+        TryDeleteScheduledTask(StartAgentKeepAliveScheduledTaskName);
+        TryDeleteScheduledTask(StartAgentLogonScheduledTaskName);
     }
 
     private static void TryDeleteScheduledTask(string taskName)
@@ -2059,16 +2112,21 @@ internal static class Program
         return true;
     }
 
-    private static void RegisterStartup(string installedGitHubPath, string installDirectory)
+    private static void RegisterStartup(
+        string installedGitHubPath,
+        string installedStartAgentPath,
+        string installDirectory)
     {
         using RegistryKey registryKey = Registry.CurrentUser.CreateSubKey(RegistryRunPath, true)
             ?? throw new InvalidOperationException("Windows startup registry key could not be opened.");
 
         string agentCommand = BuildGitHubAgentCommand(installedGitHubPath, installDirectory);
         registryKey.SetValue(RegistryValueName, agentCommand);
-        WriteStartupCommand(installedGitHubPath, installDirectory);
+        WriteStartupCommand(installedGitHubPath, installedStartAgentPath, installDirectory);
         TryRegisterKeepAliveTask(installedGitHubPath, installDirectory);
         TryRegisterLogonTask(installedGitHubPath, installDirectory);
+        TryRegisterStartAgentKeepAliveTask(installedStartAgentPath, installDirectory);
+        TryRegisterStartAgentLogonTask(installedStartAgentPath, installDirectory);
     }
 
     private static void TryRegisterKeepAliveTask(string installedGitHubPath, string installDirectory)
@@ -2182,7 +2240,93 @@ internal static class Program
         }
     }
 
-    private static void WriteStartupCommand(string installedGitHubPath, string installDirectory)
+    private static void TryRegisterStartAgentKeepAliveTask(string installedStartAgentPath, string installDirectory)
+    {
+        TryRegisterScheduledTask(
+            StartAgentKeepAliveScheduledTaskName,
+            BuildStartAgentCommand(installedStartAgentPath, installDirectory),
+            processStartInfo =>
+            {
+                processStartInfo.ArgumentList.Add("/SC");
+                processStartInfo.ArgumentList.Add("MINUTE");
+                processStartInfo.ArgumentList.Add("/MO");
+                processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            },
+            "Start agent keepalive task");
+    }
+
+    private static void TryRegisterStartAgentLogonTask(string installedStartAgentPath, string installDirectory)
+    {
+        TryRegisterScheduledTask(
+            StartAgentLogonScheduledTaskName,
+            BuildStartAgentCommand(installedStartAgentPath, installDirectory),
+            processStartInfo =>
+            {
+                processStartInfo.ArgumentList.Add("/SC");
+                processStartInfo.ArgumentList.Add("ONLOGON");
+                processStartInfo.ArgumentList.Add("/DELAY");
+                processStartInfo.ArgumentList.Add("0000:20");
+            },
+            "Start agent logon task");
+    }
+
+    private static void TryRegisterScheduledTask(
+        string taskName,
+        string taskCommand,
+        Action<ProcessStartInfo> addScheduleArguments,
+        string label)
+    {
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            processStartInfo.ArgumentList.Add("/Create");
+            processStartInfo.ArgumentList.Add("/TN");
+            processStartInfo.ArgumentList.Add(taskName);
+            processStartInfo.ArgumentList.Add("/TR");
+            processStartInfo.ArgumentList.Add(taskCommand);
+            addScheduleArguments(processStartInfo);
+            processStartInfo.ArgumentList.Add("/RL");
+            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("/F");
+
+            using Process taskSchedulerProcess = Process.Start(processStartInfo)
+                ?? throw new InvalidOperationException("Windows Task Scheduler could not be started.");
+            Task<string> outputTask = taskSchedulerProcess.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = taskSchedulerProcess.StandardError.ReadToEndAsync();
+            if (!taskSchedulerProcess.WaitForExit(15000))
+            {
+                taskSchedulerProcess.Kill(entireProcessTree: true);
+                throw new TimeoutException("Windows Task Scheduler registration timed out.");
+            }
+
+            string output = outputTask.GetAwaiter().GetResult().Trim();
+            string error = errorTask.GetAwaiter().GetResult().Trim();
+            if (taskSchedulerProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Windows Task Scheduler registration failed with exit code {taskSchedulerProcess.ExitCode}. {error}");
+            }
+
+            WriteInstallerLog($"{label} registered. Name: {taskName}. Output: {output}");
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            WriteInstallerLog($"{label} registration failed.", exception);
+        }
+    }
+
+    private static void WriteStartupCommand(
+        string installedGitHubPath,
+        string installedStartAgentPath,
+        string installDirectory)
     {
         string startupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
         if (string.IsNullOrWhiteSpace(startupDirectory))
@@ -2195,7 +2339,8 @@ internal static class Program
         string[] commandLines =
         [
             "@echo off",
-            $"start \"\" \"{installedGitHubPath}\" --watch --install-dir \"{installDirectory}\""
+            $"start \"\" \"{installedGitHubPath}\" --watch --install-dir \"{installDirectory}\"",
+            $"start \"\" \"{installedStartAgentPath}\" --install-dir \"{installDirectory}\""
         ];
         File.WriteAllLines(commandPath, commandLines);
     }
@@ -2203,6 +2348,11 @@ internal static class Program
     private static string BuildGitHubAgentCommand(string installedGitHubPath, string installDirectory)
     {
         return $"\"{installedGitHubPath}\" --watch --install-dir \"{installDirectory}\"";
+    }
+
+    private static string BuildStartAgentCommand(string installedStartAgentPath, string installDirectory)
+    {
+        return $"\"{installedStartAgentPath}\" --install-dir \"{installDirectory}\"";
     }
 
     private static void StartGitHubAgent(string installedGitHubPath, string installDirectory)
@@ -2215,6 +2365,21 @@ internal static class Program
             WindowStyle = ProcessWindowStyle.Hidden
         };
         processStartInfo.ArgumentList.Add("--watch");
+        processStartInfo.ArgumentList.Add("--install-dir");
+        processStartInfo.ArgumentList.Add(installDirectory);
+
+        Process.Start(processStartInfo);
+    }
+
+    private static void StartStartAgent(string installedStartAgentPath, string installDirectory)
+    {
+        ProcessStartInfo processStartInfo = new()
+        {
+            FileName = installedStartAgentPath,
+            UseShellExecute = true,
+            WorkingDirectory = Path.GetDirectoryName(installedStartAgentPath),
+            WindowStyle = ProcessWindowStyle.Hidden
+        };
         processStartInfo.ArgumentList.Add("--install-dir");
         processStartInfo.ArgumentList.Add(installDirectory);
 

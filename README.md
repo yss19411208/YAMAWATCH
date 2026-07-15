@@ -22,6 +22,8 @@ VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord 
 - 本体とは別の `GITHUB.exe` が常駐し、5分ごとにGitHub Releasesを確認します。
 - `VALOWATCH.exe` が異常終了しても、独立した `GITHUB.exe` が5秒間隔で検知して再起動します。
 - `GITHUB.exe` 自身もReleaseのSHA-256が異なる場合は、検証済みの新しい監視プロセスへ自己置換します。
+- 本体や更新監視が落ちた場合に備え、別プロセスの `VALOWATCH_Start.exe` がDiscordの `/start` を受け取り、`GITHUB.exe` と `VALOWATCH.exe` だけを起動します。
+- `/start` は設定済みサーバー内で、サーバー管理権限またはManage Server権限を持つユーザーだけが使えます。
 - Windowsログオン時の自動起動と、5分間隔の監視プロセス生存確認タスクを登録します。
 
 ## 削除した機能
@@ -62,13 +64,14 @@ Discordで `/app` を実行すると、VALORANTを起動していない時でも
 
 音声DLLが欠落してVCへ参加できない場合も、先にDiscord Gatewayとテキストチャンネルへ接続し、欠落理由とログのコードブロックを送ってから切断します。
 
-GitHub Releaseでは、`GITHUB.exe`、旧版移行用の `VALOWATCH_Update.exe`、tokenを含まない `VALOWATCH_App.exe` を別アセットとして公開します。`GITHUB.exe` が本体と監視アプリをダウンロードしてSHA-256を検証し、既存の暗号化設定を残したまま置換します。
+GitHub Releaseでは、`GITHUB.exe`、`VALOWATCH_Start.exe`、旧版移行用の `VALOWATCH_Update.exe`、tokenを含まない `VALOWATCH_App.exe` を別アセットとして公開します。`GITHUB.exe` が本体、監視アプリ、Discord起動受付アプリをダウンロードしてSHA-256を検証し、既存の暗号化設定を残したまま置換します。
 
 既定では次へ本体を配置します。
 
 ```text
 C:\Users\<Windowsユーザー名>\Documents\VALOWATCH\app\VALOWATCH.exe
 C:\Users\<Windowsユーザー名>\Documents\VALOWATCH\GITHUB.exe
+C:\Users\<Windowsユーザー名>\Documents\VALOWATCH\VALOWATCH_Start.exe
 ```
 
 インストール直後に起動し、次回以降は自動起動します。PCログイン後、VALORANTを開いていなくてもbotはオンラインになります。VALORANTを開いたまま更新できますが、更新中はbotが短時間VCから抜けて再接続します。
@@ -127,7 +130,7 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 
 公開更新版は `GITHUB.exe` と `VALOWATCH_App.exe` に分離しています。旧版との互換用に同じ監視プログラムを `VALOWATCH_Update.exe` 名でも公開します。監視アプリは通信断時に `.download` ファイルから再開し、Windows PE形式とGitHub ReleaseのSHA-256 digestが一致したファイルだけを実行します。更新に失敗しても現在の本体と5秒生存監視を継続します。
 
-`GITHUB.exe` は設置済み本体と自分自身のSHA-256を最新Releaseと比較します。同じファイルは再配置せず、異なるファイルだけを更新するため更新ループを防ぎます。GitHub通信は `VALOWATCH.exe` では行いません。
+`GITHUB.exe` は設置済み本体、自分自身、`VALOWATCH_Start.exe` のSHA-256を最新Releaseと比較します。同じファイルは再配置せず、異なるファイルだけを更新するため更新ループを防ぎます。GitHub通信は `VALOWATCH.exe` では行いません。
 
 診断結果は `data\logs\valowatch.log` に保存します。
 
@@ -144,6 +147,7 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 .\VALOWATCH.exe --check-runtime-log-messages
 .\VALOWATCH.exe --check-running-process-snapshot
 .\VALOWATCH.exe --check-update-identity --expected-current-commit=<commit SHA>
+.\VALOWATCH_Start.exe --check-start-agent
 ```
 
 更新用EXEの同一本体判定は `VALOWATCH_Update.exe --check-installed-app-hash --install-dir <appフォルダー> --expected-sha256 <SHA-256>` でネット接続なしに検証できます。
