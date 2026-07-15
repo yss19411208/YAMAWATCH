@@ -24,7 +24,7 @@ VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord 
 - `GITHUB.exe` 自身もReleaseのSHA-256が異なる場合は、検証済みの新しい監視プロセスへ自己置換します。
 - 本体や更新監視が落ちた場合に備え、別プロセスの `VALOWATCH_Start.exe` がDiscordの `/start` を受け取り、`GITHUB.exe` と `VALOWATCH.exe` だけを起動します。
 - `/start` は設定済みサーバー内で、サーバー管理権限またはManage Server権限を持つユーザーだけが使えます。
-- Windowsログオン時の自動起動と、5分間隔の監視プロセス生存確認タスクを登録します。
+- Windowsログオン時の自動起動はユーザー権限で動く `HKCU Run` とスタートアップフォルダに登録し、5分間隔の監視プロセス生存確認だけをタスクスケジューラへ登録します。
 
 ## 削除した機能
 

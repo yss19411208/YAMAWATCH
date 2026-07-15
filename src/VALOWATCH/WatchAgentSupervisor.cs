@@ -98,17 +98,6 @@ internal static class WatchAgentSupervisor
                 processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
             },
             writeLog);
-        EnsureScheduledTask(
-            LogonScheduledTaskName,
-            agentCommand,
-            static processStartInfo =>
-            {
-                processStartInfo.ArgumentList.Add("/SC");
-                processStartInfo.ArgumentList.Add("ONLOGON");
-                processStartInfo.ArgumentList.Add("/DELAY");
-                processStartInfo.ArgumentList.Add("0000:30");
-            },
-            writeLog);
         if (File.Exists(startAgentPath))
         {
             string startAgentCommand = BuildStartAgentCommand(startAgentPath, plan.InstallDirectory);
@@ -121,17 +110,6 @@ internal static class WatchAgentSupervisor
                     processStartInfo.ArgumentList.Add("MINUTE");
                     processStartInfo.ArgumentList.Add("/MO");
                     processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                },
-                writeLog);
-            EnsureScheduledTask(
-                StartAgentLogonScheduledTaskName,
-                startAgentCommand,
-                static processStartInfo =>
-                {
-                    processStartInfo.ArgumentList.Add("/SC");
-                    processStartInfo.ArgumentList.Add("ONLOGON");
-                    processStartInfo.ArgumentList.Add("/DELAY");
-                    processStartInfo.ArgumentList.Add("0000:20");
                 },
                 writeLog);
         }

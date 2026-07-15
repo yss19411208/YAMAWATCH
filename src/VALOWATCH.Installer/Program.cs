@@ -789,12 +789,9 @@ internal static class Program
 
         bool keepAliveTaskExists = TryQueryScheduledTask(KeepAliveScheduledTaskName, out string keepAliveTaskDetail);
         AddSelfRepairLine(reportLines, $"KeepAliveTaskExists={keepAliveTaskExists};detail:{keepAliveTaskDetail}");
-        bool logonTaskExists = TryQueryScheduledTask(LogonScheduledTaskName, out string logonTaskDetail);
-        AddSelfRepairLine(reportLines, $"LogonTaskExists={logonTaskExists};detail:{logonTaskDetail}");
         bool startAgentKeepAliveTaskExists = TryQueryScheduledTask(StartAgentKeepAliveScheduledTaskName, out string startAgentKeepAliveTaskDetail);
         AddSelfRepairLine(reportLines, $"StartAgentKeepAliveTaskExists={startAgentKeepAliveTaskExists};detail:{startAgentKeepAliveTaskDetail}");
-        bool startAgentLogonTaskExists = TryQueryScheduledTask(StartAgentLogonScheduledTaskName, out string startAgentLogonTaskDetail);
-        AddSelfRepairLine(reportLines, $"StartAgentLogonTaskExists={startAgentLogonTaskExists};detail:{startAgentLogonTaskDetail}");
+        AddSelfRepairLine(reportLines, "LogonScheduledTasks=skipped;reason:HKCU Run and Startup folder are used for logon startup.");
     }
 
     private static bool TryQueryScheduledTask(string taskName, out string detail)
@@ -2124,9 +2121,7 @@ internal static class Program
         registryKey.SetValue(RegistryValueName, agentCommand);
         WriteStartupCommand(installedGitHubPath, installedStartAgentPath, installDirectory);
         TryRegisterKeepAliveTask(installedGitHubPath, installDirectory);
-        TryRegisterLogonTask(installedGitHubPath, installDirectory);
         TryRegisterStartAgentKeepAliveTask(installedStartAgentPath, installDirectory);
-        TryRegisterStartAgentLogonTask(installedStartAgentPath, installDirectory);
     }
 
     private static void TryRegisterKeepAliveTask(string installedGitHubPath, string installDirectory)
