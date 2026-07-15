@@ -441,6 +441,11 @@ internal static class Program
 
         try
         {
+            if (options.CleanReinstall)
+            {
+                installDirectory = ResolveCleanReinstallInstallDirectory(installDirectory);
+            }
+
             RunInstallation(
                 installDirectory,
                 progress,
@@ -480,10 +485,14 @@ internal static class Program
         bool cleanReinstall)
     {
         progress.Report(new InstallProgress(2, "インストール先を準備しています。"));
-        installDirectory = NormalizeInstallDirectoryPath(installDirectory);
         if (cleanReinstall)
         {
-            ValidateCleanReinstallDirectory(installDirectory);
+            installDirectory = ResolveCleanReinstallInstallDirectory(installDirectory);
+            progress.Report(new InstallProgress(4, "標準フォルダーへ再配置します。"));
+        }
+        else
+        {
+            installDirectory = NormalizeInstallDirectoryPath(installDirectory);
         }
 
         ValidateInstallDirectorySelection(installDirectory);
@@ -959,7 +968,7 @@ internal static class Program
     {
         try
         {
-            string normalizedInstallDirectory = ValidateCleanReinstallDirectory(installDirectory);
+            string normalizedInstallDirectory = ResolveCleanReinstallReportDirectory(installDirectory);
             string workspaceRoot = GetWorkspaceRootForInstallDirectory(normalizedInstallDirectory);
             string logDirectory = Path.Combine(workspaceRoot, "data", "logs");
             Directory.CreateDirectory(logDirectory);
@@ -1925,10 +1934,105 @@ internal static class Program
         WriteInstallerLog($"Clean reinstall removed old app directory: {normalizedInstallDirectory}");
     }
 
+    private static string ResolveCleanReinstallInstallDirectory(string requestedInstallDirectory)
+    {
+        string requestedDirectory = requestedInstallDirectory.Trim();
+        string standardInstallDirectory = ResolveStandardCleanReinstallDirectory();
+        if (TryValidateCleanReinstallDirectory(
+            requestedDirectory,
+            out string validatedRequestedDirectory,
+            out string requestedRejectReason))
+        {
+            if (string.Equals(validatedRequestedDirectory, standardInstallDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                return validatedRequestedDirectory;
+            }
+
+            WriteInstallerLog(
+                "Clean reinstall install directory differed from the standard folder and was redirected. " +
+                $"Requested: {SanitizeInstallerReportText(validatedRequestedDirectory)}. " +
+                $"Standard: {SanitizeInstallerReportText(standardInstallDirectory)}");
+            return standardInstallDirectory;
+        }
+
+        WriteInstallerLog(
+            "Clean reinstall install directory was redirected to the standard folder. " +
+            $"Requested: {SanitizeInstallerReportText(requestedDirectory)}. " +
+            $"Reason: {requestedRejectReason}. " +
+            $"Standard: {SanitizeInstallerReportText(standardInstallDirectory)}");
+        return standardInstallDirectory;
+    }
+
+    private static string ResolveCleanReinstallReportDirectory(string requestedInstallDirectory)
+    {
+        string requestedDirectory = requestedInstallDirectory.Trim();
+        string standardInstallDirectory = ResolveStandardCleanReinstallDirectory();
+        if (TryValidateCleanReinstallDirectory(
+            requestedDirectory,
+            out string validatedRequestedDirectory,
+            out _))
+        {
+            return string.Equals(validatedRequestedDirectory, standardInstallDirectory, StringComparison.OrdinalIgnoreCase)
+                ? validatedRequestedDirectory
+                : standardInstallDirectory;
+        }
+
+        return standardInstallDirectory;
+    }
+
+    private static string ResolveStandardCleanReinstallDirectory()
+    {
+        string standardInstallDirectory = GetDefaultInstallDirectory();
+        if (TryValidateCleanReinstallDirectory(
+            standardInstallDirectory,
+            out string validatedStandardDirectory,
+            out string standardRejectReason))
+        {
+            return validatedStandardDirectory;
+        }
+
+        throw new InvalidOperationException(
+            $"標準の再インストール先を使用できません: {standardInstallDirectory}. {standardRejectReason}");
+    }
+
     private static string ValidateCleanReinstallDirectory(string installDirectory)
     {
-        string normalizedInstallDirectory = Path.GetFullPath(installDirectory)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (TryValidateCleanReinstallDirectory(
+            installDirectory,
+            out string normalizedInstallDirectory,
+            out string rejectReason))
+        {
+            return normalizedInstallDirectory;
+        }
+
+        throw new InvalidOperationException(
+            $"安全のため、このフォルダーはクリーン再インストールできません: {installDirectory}. {rejectReason}");
+    }
+
+    private static bool TryValidateCleanReinstallDirectory(
+        string installDirectory,
+        out string normalizedInstallDirectory,
+        out string rejectReason)
+    {
+        normalizedInstallDirectory = string.Empty;
+        rejectReason = string.Empty;
+        if (string.IsNullOrWhiteSpace(installDirectory))
+        {
+            rejectReason = "install directory is empty";
+            return false;
+        }
+
+        try
+        {
+            normalizedInstallDirectory = Path.GetFullPath(installDirectory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            rejectReason = $"install directory path is invalid: {exception.GetType().Name}";
+            return false;
+        }
+
         DirectoryInfo installDirectoryInfo = new(normalizedInstallDirectory);
         DirectoryInfo? workspaceDirectoryInfo = installDirectoryInfo.Parent;
         bool pathLooksLikeInstalledApp = installDirectoryInfo.Name.Equals("app", StringComparison.OrdinalIgnoreCase) &&
@@ -1936,13 +2040,19 @@ internal static class Program
         bool sourceRepositoryDetected = workspaceDirectoryInfo is not null &&
             (File.Exists(Path.Combine(workspaceDirectoryInfo.FullName, "VALOWATCH.slnx")) ||
                 Directory.Exists(Path.Combine(workspaceDirectoryInfo.FullName, "src")));
-        if (!pathLooksLikeInstalledApp || sourceRepositoryDetected)
+        if (!pathLooksLikeInstalledApp)
         {
-            throw new InvalidOperationException(
-                $"安全のため、このフォルダーはクリーン再インストールできません: {normalizedInstallDirectory}");
+            rejectReason = "install directory is not a VALOWATCH app folder";
+            return false;
         }
 
-        return normalizedInstallDirectory;
+        if (sourceRepositoryDetected)
+        {
+            rejectReason = "install directory points at the source repository";
+            return false;
+        }
+
+        return true;
     }
 
     private static void RegisterStartup(string installedGitHubPath, string installDirectory)

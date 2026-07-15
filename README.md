@@ -48,7 +48,7 @@ release\VALOWATCH_Update.exe    旧版から独立監視方式へ移行する互
 release\VALOWATCH_Reinstall.exe 既存環境を一度削除して入れ直す復旧用
 ```
 
-今回のように、友達のPCですでにVALOWATCHが入っているもののAlt+Tなどが動かない場合は、`VALOWATCH_Reinstall.exe` だけを渡します。実行すると旧app、旧監視プロセス、自動起動、5分生存確認を解除してから再配置します。`installer\.env` と `data` は保持します。再配置後は、埋め込んだ本体、`GITHUB.exe`、音声DLL、`.env`、自動起動登録、5分生存確認タスク、常駐プロセスを自己診断し、`GITHUB.exe` が起動していなければ再起動を試します。それでも起動しない場合は `VALOWATCH.exe` 本体のフォールバック起動を試します。
+今回のように、友達のPCですでにVALOWATCHが入っているもののAlt+Tなどが動かない場合は、`VALOWATCH_Reinstall.exe` だけを渡します。実行すると旧app、旧監視プロセス、自動起動、5分生存確認を解除してから再配置します。既存の場所が標準フォルダーと違う場合でも、標準の `Documents\VALOWATCH\app` を新しく作ってそこへ再配置し、自動起動もその場所へ向け直します。`installer\.env` と `data` は保持します。再配置後は、埋め込んだ本体、`GITHUB.exe`、音声DLL、`.env`、自動起動登録、5分生存確認タスク、常駐プロセスを自己診断し、`GITHUB.exe` が起動していなければ再起動を試します。それでも起動しない場合は `VALOWATCH.exe` 本体のフォールバック起動を試します。
 
 `VALOWATCH_Reinstall.exe` はダブルクリック直後に無表示で処理を開始します。インストール画面、確認画面、追加ボタン操作はありません。開発ソースが同居するこのPCでは、ソースを保護するため実行本体を `data\installed\VALOWATCH\app` へ自動配置します。
 
