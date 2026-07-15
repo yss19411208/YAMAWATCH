@@ -295,10 +295,14 @@ internal static class RuntimeLogMessageCollector
             "Microphone capture selected.",
             "LINE process-only loopback provider started.",
             "LINE process-only loopback started.",
+            "LINE process-only loopback became audible.",
+            "LINE process loopback status.",
+            "LINE process loopback remained silent; trying another candidate.",
             "Microphone audio relay started.",
             "Microphone relay start buffer ready.",
             "Microphone input became audible.",
             "Discord audio relay started sending audible PCM.",
+            "Discord process loopback status.",
             "GITHUB agent is already current.",
             "Dedicated update skipped because the installed app is already current.",
             "GITHUB background update check completed. ExitCode: 0.",
@@ -308,7 +312,9 @@ internal static class RuntimeLogMessageCollector
             "GITHUB watch agent started.",
             "GITHUB watch agent launch requested:",
             "GITHUB agent replacement completed:",
-            "GITHUB is exiting so the validated replacement can be installed."
+            "GITHUB is exiting so the validated replacement can be installed.",
+            "VALOWATCH Start agent launch was blocked by Windows application control policy; retrying after",
+            "VALOWATCH app launch was blocked by Windows application control policy; update checks will continue"
         ];
         if (routineMarkers.Any(marker =>
                 line.Contains(marker, StringComparison.OrdinalIgnoreCase)))

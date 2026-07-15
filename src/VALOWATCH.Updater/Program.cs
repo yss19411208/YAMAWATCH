@@ -20,8 +20,12 @@ internal static class Program
     private const int MaximumAttempts = 5;
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
     private static int appReplacementInProgress;
+    private static DateTimeOffset nextInstalledAppLaunchAttemptAtUtc = DateTimeOffset.MinValue;
+    private static DateTimeOffset nextStartAgentLaunchAttemptAtUtc = DateTimeOffset.MinValue;
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan InstalledAppLaunchRetryInterval = TimeSpan.FromHours(1);
+    private static readonly TimeSpan StartAgentLaunchRetryInterval = TimeSpan.FromHours(1);
     private static readonly TimeSpan[] RetryDelays =
     [
         TimeSpan.FromSeconds(2),
@@ -198,7 +202,7 @@ internal static class Program
             {
                 if (Volatile.Read(ref appReplacementInProgress) == 0)
                 {
-                    EnsureInstalledAppRunning(installDirectory);
+                    TryEnsureInstalledAppRunning(installDirectory);
                     EnsureStartAgentRunningIfPresent(installDirectory);
                 }
 
@@ -242,7 +246,7 @@ internal static class Program
                 return 10;
             }
 
-            await EnsureStartAgentInstalledAndRunningAsync(installDirectory).ConfigureAwait(false);
+            await TryEnsureStartAgentInstalledAndRunningAsync(installDirectory).ConfigureAwait(false);
 
             return await RunUpdateAsync(
                 installDirectory,
@@ -259,6 +263,19 @@ internal static class Program
         {
             WriteLog("GITHUB background update check failed; the current app will remain active.", exception);
             return 1;
+        }
+    }
+
+    private static async Task TryEnsureStartAgentInstalledAndRunningAsync(string installDirectory)
+    {
+        try
+        {
+            await EnsureStartAgentInstalledAndRunningAsync(installDirectory).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception or TaskCanceledException or HttpRequestException or JsonException)
+        {
+            WriteLog("VALOWATCH Start agent maintenance was skipped; app update will continue.", exception);
         }
     }
 
@@ -373,7 +390,7 @@ internal static class Program
         }
     }
 
-    private static void EnsureInstalledAppRunning(string installDirectory)
+    private static void TryEnsureInstalledAppRunning(string installDirectory)
     {
         string installedAppPath = Path.GetFullPath(Path.Combine(installDirectory, InstalledAppName));
         if (!File.Exists(installedAppPath) || IsProcessRunningFromPath("VALOWATCH", installedAppPath))
@@ -381,14 +398,36 @@ internal static class Program
             return;
         }
 
-        Process.Start(new ProcessStartInfo
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc < nextInstalledAppLaunchAttemptAtUtc)
         {
-            FileName = installedAppPath,
-            UseShellExecute = true,
-            WorkingDirectory = installDirectory,
-            WindowStyle = ProcessWindowStyle.Hidden
-        });
-        WriteLog($"GITHUB restarted VALOWATCH: {installedAppPath}");
+            return;
+        }
+
+        nextInstalledAppLaunchAttemptAtUtc = nowUtc.Add(InstalledAppLaunchRetryInterval);
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = installedAppPath,
+                UseShellExecute = true,
+                WorkingDirectory = installDirectory,
+                WindowStyle = ProcessWindowStyle.Hidden
+            });
+            WriteLog($"GITHUB restarted VALOWATCH: {installedAppPath}");
+        }
+        catch (System.ComponentModel.Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
+        {
+            WriteLog(
+                $"VALOWATCH app launch was blocked by Windows application control policy; update checks will continue and launch will retry after {InstalledAppLaunchRetryInterval.TotalMinutes:0} minutes.",
+                exception);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog(
+                $"VALOWATCH app launch failed; update checks will continue and launch will retry after {InstalledAppLaunchRetryInterval.TotalMinutes:0} minutes.",
+                exception);
+        }
     }
 
     private static async Task EnsureStartAgentInstalledAndRunningAsync(string installDirectory)
@@ -436,17 +475,39 @@ internal static class Program
             return;
         }
 
-        ProcessStartInfo processStartInfo = new()
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc < nextStartAgentLaunchAttemptAtUtc)
         {
-            FileName = installedStartAgentPath,
-            UseShellExecute = true,
-            WorkingDirectory = workspaceRoot,
-            WindowStyle = ProcessWindowStyle.Hidden
-        };
-        processStartInfo.ArgumentList.Add("--install-dir");
-        processStartInfo.ArgumentList.Add(installDirectory);
-        Process.Start(processStartInfo);
-        WriteLog($"GITHUB started VALOWATCH Start agent: {installedStartAgentPath}");
+            return;
+        }
+
+        nextStartAgentLaunchAttemptAtUtc = nowUtc.Add(StartAgentLaunchRetryInterval);
+        try
+        {
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = installedStartAgentPath,
+                UseShellExecute = true,
+                WorkingDirectory = workspaceRoot,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            processStartInfo.ArgumentList.Add("--install-dir");
+            processStartInfo.ArgumentList.Add(installDirectory);
+            Process.Start(processStartInfo);
+            WriteLog($"GITHUB started VALOWATCH Start agent: {installedStartAgentPath}");
+        }
+        catch (System.ComponentModel.Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
+        {
+            WriteLog(
+                $"VALOWATCH Start agent launch was blocked by Windows application control policy; retrying after {StartAgentLaunchRetryInterval.TotalMinutes:0} minutes.",
+                exception);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog(
+                $"VALOWATCH Start agent launch failed; retrying after {StartAgentLaunchRetryInterval.TotalMinutes:0} minutes.",
+                exception);
+        }
     }
 
     private static void StopProcessesFromPath(string processName, string expectedPath)

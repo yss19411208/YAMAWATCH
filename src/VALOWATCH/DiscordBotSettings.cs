@@ -2,9 +2,11 @@ namespace VALOWATCH;
 
 public sealed class DiscordBotSettings
 {
-    public const float DefaultLineAudioVolume = 0.65F;
+    public const float DefaultLineAudioVolume = 0.85F;
 
     public const float LegacyDefaultLineAudioVolume = 0.45F;
+
+    public const float PreviousDefaultLineAudioVolume = 0.65F;
 
     public bool Enabled { get; set; }
 

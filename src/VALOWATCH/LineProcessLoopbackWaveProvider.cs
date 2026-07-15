@@ -6,6 +6,9 @@ namespace VALOWATCH;
 internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposable
 {
     private static readonly TimeSpan ProcessRefreshInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan SilentCandidateSwitchInterval = TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan HealthLogInterval = TimeSpan.FromSeconds(30);
+    private const float AudiblePeakThreshold = 0.003F;
 
     private readonly string[] processNames;
     private readonly string sourceLabel;
@@ -17,6 +20,14 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
     private int activeProcessId;
     private bool disposed;
     private int refreshInProgress;
+    private DateTimeOffset activeCaptureStartedAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastAudibleCaptureAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastHealthLogAtUtc = DateTimeOffset.MinValue;
+    private long capturedCallbackCount;
+    private long capturedByteCount;
+    private long capturedAudibleCallbackCount;
+    private float capturedPeak;
+    private bool loggedFirstAudibleCapture;
 
     public LineProcessLoopbackWaveProvider(
         IEnumerable<string> processNames,
@@ -65,6 +76,20 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         return bufferedWaveProvider.Read(buffer, offset, count);
     }
 
+    public string GetStatusSummary()
+    {
+        lock (sync)
+        {
+            return
+                $"{sourceLabel}LoopbackCapturing: {activeCapture is not null}. " +
+                $"{sourceLabel}Pid: {activeProcessId}. " +
+                $"{sourceLabel}Callbacks: {capturedCallbackCount}. " +
+                $"{sourceLabel}AudibleCallbacks: {capturedAudibleCallbackCount}. " +
+                $"{sourceLabel}Peak: {capturedPeak:0.0000}. " +
+                $"{sourceLabel}BufferedMs: {bufferedWaveProvider.BufferedDuration.TotalMilliseconds:0}.";
+        }
+    }
+
     public void Dispose()
     {
         disposed = true;
@@ -100,14 +125,16 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             return;
         }
 
-        TargetProcess? targetProcess = FindTargetProcess();
-        if (targetProcess is null)
+        IReadOnlyList<TargetProcess> targetProcesses = FindTargetProcesses();
+        if (targetProcesses.Count == 0)
         {
             StopActiveCapture($"{sourceLabel} process is not running. Waiting for {sourceLabel} audio.");
             CurrentSourceDescription = $"{sourceLabel} process loopback waiting";
             return;
         }
 
+        TargetProcess? nextTargetProcess = null;
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
         lock (sync)
         {
             if (disposed)
@@ -115,14 +142,32 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
                 return;
             }
 
-            if (activeCapture is not null && activeProcessId == targetProcess.ProcessId)
+            TargetProcess? currentTargetProcess = targetProcesses
+                .FirstOrDefault(targetProcess => targetProcess.ProcessId == activeProcessId);
+            if (activeCapture is not null && currentTargetProcess is not null)
             {
-                return;
+                DateTimeOffset lastSignalUtc = lastAudibleCaptureAtUtc == DateTimeOffset.MinValue
+                    ? activeCaptureStartedAtUtc
+                    : lastAudibleCaptureAtUtc;
+                bool remainedSilent = nowUtc - lastSignalUtc >= SilentCandidateSwitchInterval;
+                if (!remainedSilent || targetProcesses.Count == 1)
+                {
+                    MaybeWriteHealthLogUnsafe(nowUtc);
+                    return;
+                }
+
+                nextTargetProcess = SelectNextTargetProcess(targetProcesses, activeProcessId);
+                writeLog(
+                    $"{sourceLabel} process loopback remained silent; trying another candidate. " +
+                    $"CurrentPid: {activeProcessId}. NextPid: {nextTargetProcess.ProcessId}. " +
+                    $"CandidateCount: {targetProcesses.Count}.",
+                    null);
             }
         }
 
-        StopActiveCapture($"Switching {sourceLabel} process loopback to PID {targetProcess.ProcessId}.");
-        StartCaptureForProcess(targetProcess);
+        TargetProcess selectedTargetProcess = nextTargetProcess ?? targetProcesses[0];
+        StopActiveCapture($"Switching {sourceLabel} process loopback to PID {selectedTargetProcess.ProcessId}.");
+        StartCaptureForProcess(selectedTargetProcess);
     }
 
     private void StartCaptureForProcess(TargetProcess targetProcess)
@@ -148,6 +193,8 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
                 activeCapture = capture;
                 activeProcessId = targetProcess.ProcessId;
                 CurrentSourceDescription = targetProcess.Description;
+                ResetCaptureStatsUnsafe();
+                activeCaptureStartedAtUtc = DateTimeOffset.UtcNow;
             }
         }
 
@@ -196,6 +243,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             activeProcessId = 0;
             CurrentSourceDescription = $"{sourceLabel} process loopback waiting";
             bufferedWaveProvider.ClearBuffer();
+            ResetCaptureStatsUnsafe();
         }
 
         captureToStop.DataAvailable -= OnCaptureDataAvailable;
@@ -233,6 +281,35 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         }
 
         bufferedWaveProvider.AddSamples(eventArgs.Buffer, 0, eventArgs.BytesRecorded);
+        float peak = DiscordBotVoiceRelay.CalculateAudioPeak(
+            ProcessLoopbackCapture.CaptureWaveFormat,
+            eventArgs.Buffer,
+            0,
+            eventArgs.BytesRecorded);
+        bool shouldLogFirstAudible = false;
+        int logProcessId = 0;
+        lock (sync)
+        {
+            capturedCallbackCount++;
+            capturedByteCount += eventArgs.BytesRecorded;
+            capturedPeak = Math.Max(capturedPeak, peak);
+            if (peak >= AudiblePeakThreshold)
+            {
+                capturedAudibleCallbackCount++;
+                lastAudibleCaptureAtUtc = DateTimeOffset.UtcNow;
+                if (!loggedFirstAudibleCapture)
+                {
+                    loggedFirstAudibleCapture = true;
+                    shouldLogFirstAudible = true;
+                    logProcessId = activeProcessId;
+                }
+            }
+        }
+
+        if (shouldLogFirstAudible)
+        {
+            writeLog($"{sourceLabel} process-only loopback became audible. PID: {logProcessId}. Peak: {peak:0.0000}.", null);
+        }
     }
 
     private void OnCaptureRecordingStopped(object? sender, StoppedEventArgs eventArgs)
@@ -266,11 +343,12 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             activeCapture = null;
             activeProcessId = 0;
             CurrentSourceDescription = $"{sourceLabel} process loopback waiting";
+            ResetCaptureStatsUnsafe();
             return true;
         }
     }
 
-    private TargetProcess? FindTargetProcess()
+    private IReadOnlyList<TargetProcess> FindTargetProcesses()
     {
         Dictionary<int, ProcessCandidate> candidatesById = [];
 
@@ -306,17 +384,92 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             }
         }
 
-        ProcessCandidate? selectedCandidate = candidatesById.Values
-            .OrderBy(static candidate => candidate.SortKey)
-            .FirstOrDefault();
-        if (selectedCandidate is null)
+        if (ShouldDiscoverRelatedLineProcesses())
         {
-            return null;
+            foreach (Process process in Process.GetProcesses())
+            {
+                using (process)
+                {
+                    if (!LooksLikeRelatedLineProcess(process.ProcessName))
+                    {
+                        continue;
+                    }
+
+                    ProcessCandidate? candidate = TryCreateCandidate(process, processNames.Length);
+                    if (candidate is null)
+                    {
+                        continue;
+                    }
+
+                    if (!candidatesById.TryGetValue(candidate.ProcessId, out ProcessCandidate? previousCandidate) ||
+                        candidate.SortKey.CompareTo(previousCandidate.SortKey) < 0)
+                    {
+                        candidatesById[candidate.ProcessId] = candidate;
+                    }
+                }
+            }
         }
 
-        return new TargetProcess(
-            selectedCandidate.ProcessId,
-            $"Process: {selectedCandidate.ProcessName}. PID: {selectedCandidate.ProcessId}. Names: {string.Join(", ", processNames)}");
+        return candidatesById.Values
+            .OrderBy(static candidate => candidate.SortKey)
+            .Select(candidate => new TargetProcess(
+                candidate.ProcessId,
+                $"Process: {candidate.ProcessName}. PID: {candidate.ProcessId}. Names: {string.Join(", ", processNames)}"))
+            .ToArray();
+    }
+
+    private TargetProcess SelectNextTargetProcess(IReadOnlyList<TargetProcess> targetProcesses, int currentProcessId)
+    {
+        int currentIndex = -1;
+        for (int processIndex = 0; processIndex < targetProcesses.Count; processIndex++)
+        {
+            if (targetProcesses[processIndex].ProcessId == currentProcessId)
+            {
+                currentIndex = processIndex;
+                break;
+            }
+        }
+
+        if (currentIndex < 0)
+        {
+            return targetProcesses[0];
+        }
+
+        return targetProcesses[(currentIndex + 1) % targetProcesses.Count];
+    }
+
+    private void MaybeWriteHealthLogUnsafe(DateTimeOffset nowUtc)
+    {
+        if (nowUtc - lastHealthLogAtUtc < HealthLogInterval)
+        {
+            return;
+        }
+
+        lastHealthLogAtUtc = nowUtc;
+        writeLog($"{sourceLabel} process loopback status. {GetStatusSummary()} Source: {CurrentSourceDescription}.", null);
+    }
+
+    private void ResetCaptureStatsUnsafe()
+    {
+        capturedCallbackCount = 0;
+        capturedByteCount = 0;
+        capturedAudibleCallbackCount = 0;
+        capturedPeak = 0F;
+        loggedFirstAudibleCapture = false;
+        lastAudibleCaptureAtUtc = DateTimeOffset.MinValue;
+        activeCaptureStartedAtUtc = DateTimeOffset.MinValue;
+        lastHealthLogAtUtc = DateTimeOffset.MinValue;
+    }
+
+    private bool ShouldDiscoverRelatedLineProcesses()
+    {
+        return string.Equals(sourceLabel, "LINE", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeRelatedLineProcess(string processName)
+    {
+        string normalizedProcessName = NormalizeProcessName(processName);
+        return normalizedProcessName.StartsWith("line", StringComparison.OrdinalIgnoreCase);
     }
 
     private static ProcessCandidate? TryCreateCandidate(Process process, int nameOrder)

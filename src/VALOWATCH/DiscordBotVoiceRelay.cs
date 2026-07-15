@@ -2553,6 +2553,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         DateTimeOffset now = DateTimeOffset.Now;
         string? statsLine = null;
+        string lineLoopbackStats = lineProcessLoopbackProvider?.GetStatusSummary() ?? "LINELoopbackCapturing: False.";
+        string discordLoopbackStats = discordProcessLoopbackProvider?.GetStatusSummary() ?? "DiscordLoopbackCapturing: False.";
 
         lock (audioStatsLock)
         {
@@ -2567,7 +2569,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     $"CandidateAttemptPeak: {microphoneAttemptPeak:0.0000}. CandidateLocked: {microphoneSignalLocked}. " +
                     $"WrittenFrames: {writtenFrameCount}. WrittenAudibleFrames: {writtenAudibleFrameCount}. " +
                     $"WrittenSilenceFrames: {writtenSilenceFrameCount}. WrittenShortFrames: {writtenShortFrameCount}. " +
-                    $"WrittenPeak: {writtenPeak:0.0000}.";
+                    $"WrittenPeak: {writtenPeak:0.0000}. " +
+                    $"{lineLoopbackStats} {discordLoopbackStats}";
             }
         }
 
