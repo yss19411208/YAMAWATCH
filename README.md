@@ -48,11 +48,11 @@ release\VALOWATCH_Update.exe    旧版から独立監視方式へ移行する互
 release\VALOWATCH_Reinstall.exe 既存環境を一度削除して入れ直す復旧用
 ```
 
-今回のように、友達のPCですでにVALOWATCHが入っているもののAlt+Tなどが動かない場合は、`VALOWATCH_Reinstall.exe` だけを渡します。実行すると旧app、旧監視プロセス、自動起動、5分生存確認を解除してから再配置します。`installer\.env` と `data` は保持します。
+今回のように、友達のPCですでにVALOWATCHが入っているもののAlt+Tなどが動かない場合は、`VALOWATCH_Reinstall.exe` だけを渡します。実行すると旧app、旧監視プロセス、自動起動、5分生存確認を解除してから再配置します。`installer\.env` と `data` は保持します。再配置後は、埋め込んだ本体、`GITHUB.exe`、音声DLL、`.env`、自動起動登録、5分生存確認タスク、常駐プロセスを自己診断し、`GITHUB.exe` が起動していなければ再起動を試します。それでも起動しない場合は `VALOWATCH.exe` 本体のフォールバック起動を試します。
 
 `VALOWATCH_Reinstall.exe` はダブルクリック直後に無表示で処理を開始します。インストール画面、確認画面、追加ボタン操作はありません。開発ソースが同居するこのPCでは、ソースを保護するため実行本体を `data\installed\VALOWATCH\app` へ自動配置します。
 
-再インストール結果は、個人フォルダーを置換した小さな診断ログとして `data\logs\installer-result.pending.log` に保留します。VALOWATCHがDiscordへ接続できた時に `DISCORD_TEXT_CHANNEL_ID` へコードブロックで送ります。通信できない場合は送信位置を進めず、次回接続時に再送します。GitHub書き込みtokenや `.env` の内容は診断ログへ含めません。
+再インストール結果は、個人フォルダーを置換した小さな診断ログとして `data\logs\installer-result.pending.log` に保留します。`installer\.env` にDiscord bot tokenと `DISCORD_TEXT_CHANNEL_ID` がある場合は、インストーラー自身もDiscordへ直接結果を送ります。直接送信に失敗した場合でもpendingログを残し、VALOWATCHがDiscordへ接続できた時に再送します。通信できない場合は送信位置を進めず、次回接続時に再送します。GitHub書き込みtoken、Discord token、`.env` の内容は診断ログへ含めません。
 
 VALORANT起動後は、音声ピーク診断に加えて `data\logs` と `%TEMP%\VALOWATCH` の `.log` / `.txt` をDiscordのコードブロックへ分割して送ります。初回接続時、起動20秒後、以後5分ごと、終了時に未送信行だけを送り、通信失敗時は次回接続で再送します。`.env`、Bot token、暗号化設定、ユーザープロファイルの実パスは送信しません。ログ送信は音声開始後に並行実行するため、過去ログが多くてもマイク開始を待たせません。
 

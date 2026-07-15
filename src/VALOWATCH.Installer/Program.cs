@@ -1,6 +1,8 @@
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Win32;
 
 namespace VALOWATCH.Installer;
@@ -15,6 +17,9 @@ internal static class Program
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
     private const string PendingInstallerReportFileName = "installer-result.pending.log";
+    private const int DiscordMessageMaximumLength = 1900;
+    private static readonly TimeSpan ProcessRepairWaitTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan DiscordReportTimeout = TimeSpan.FromSeconds(15);
     private const int KeepAliveIntervalMinutes = 5;
     private const int InstallerReportMaximumLogLines = 200;
     private static readonly object InstallerSessionLogLock = new();
@@ -35,6 +40,15 @@ internal static class Program
         bool StopAllValowatchProcesses,
         bool MarkUpdateCompleted,
         bool CleanReinstall);
+
+    private sealed record SelfRepairResult(
+        bool HasBlockingFailure,
+        string Summary,
+        IReadOnlyList<string> ReportLines);
+
+    private sealed record DirectDiscordReportSettings(
+        string BotToken,
+        ulong TextChannelId);
 
     [STAThread]
     private static void Main(string[] args)
@@ -443,12 +457,13 @@ internal static class Program
             WriteInstallerLog("Silent installation failed.", exception);
             if (options.CleanReinstall)
             {
-                TryWritePendingInstallerReport(
+                TryWriteAndSendInstallerReport(
                     installDirectory,
                     succeeded: false,
                     options.StartAfterInstall,
                     options.RegisterStartup,
-                    exception);
+                    exception,
+                    additionalReportLines: []);
             }
 
             return 1;
@@ -477,6 +492,7 @@ internal static class Program
         string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
         string installedGitHubPath = Path.Combine(workspaceRoot, "GITHUB.exe");
         bool replacesExistingInstallation = File.Exists(installedExecutablePath);
+        SelfRepairResult selfRepairResult = new(false, "not run", []);
 
         progress.Report(new InstallProgress(8, "起動中の VALOWATCH をすべて停止しています。"));
         StopRunningInstalledApp(installedExecutablePath, stopAllValowatchProcesses);
@@ -515,17 +531,6 @@ internal static class Program
             WriteUpdateCompletedMarker(installDirectory);
         }
 
-        if (cleanReinstall)
-        {
-            WriteInstallerLog("Clean reinstallation completed and is ready to start VALOWATCH.");
-            TryWritePendingInstallerReport(
-                installDirectory,
-                succeeded: true,
-                startAfterInstall,
-                registerStartup,
-                exception: null);
-        }
-
         if (startAfterInstall)
         {
             progress.Report(new InstallProgress(98, "VALOWATCH を起動しています。"));
@@ -534,6 +539,29 @@ internal static class Program
         else
         {
             progress.Report(new InstallProgress(98, "VALOWATCH の起動をスキップしています。"));
+        }
+
+        selfRepairResult = RunSelfRepairChecks(
+            installDirectory,
+            installedExecutablePath,
+            installedGitHubPath,
+            registerStartup,
+            startAfterInstall);
+        if (selfRepairResult.HasBlockingFailure)
+        {
+            throw new InvalidOperationException($"VALOWATCH self repair failed: {selfRepairResult.Summary}");
+        }
+
+        if (cleanReinstall)
+        {
+            WriteInstallerLog("Clean reinstallation completed and self repair checks passed.");
+            TryWriteAndSendInstallerReport(
+                installDirectory,
+                succeeded: true,
+                startAfterInstall,
+                registerStartup,
+                exception: null,
+                selfRepairResult.ReportLines);
         }
     }
 
@@ -546,12 +574,316 @@ internal static class Program
         WriteInstallerLog($"Update completion marker written: {markerPath}");
     }
 
-    private static void TryWritePendingInstallerReport(
+    private static SelfRepairResult RunSelfRepairChecks(
+        string installDirectory,
+        string installedExecutablePath,
+        string installedGitHubPath,
+        bool registerStartup,
+        bool startAfterInstall)
+    {
+        List<string> reportLines = [];
+        List<string> repairIssues = [];
+        bool hasBlockingFailure = false;
+
+        AddSelfRepairLine(reportLines, $"InstallDirectory={installDirectory}");
+        AddFileCheck(reportLines, repairIssues, "VALOWATCH.exe", installedExecutablePath, required: true);
+        AddFileCheck(reportLines, repairIssues, "GITHUB.exe", installedGitHubPath, required: true);
+        foreach ((_, string nativeDependencyFileName) in NativeDependencyResources)
+        {
+            AddFileCheck(
+                reportLines,
+                repairIssues,
+                nativeDependencyFileName,
+                Path.Combine(installDirectory, nativeDependencyFileName),
+                required: true);
+        }
+
+        string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
+        string envPath = Path.Combine(workspaceRoot, "installer", ".env");
+        AddFileCheck(reportLines, repairIssues, "installer/.env", envPath, required: false);
+
+        if (registerStartup)
+        {
+            VerifyStartupRegistration(reportLines, repairIssues, installedGitHubPath, installDirectory);
+        }
+        else
+        {
+            AddSelfRepairLine(reportLines, "StartupRegistration=skipped");
+        }
+
+        if (startAfterInstall)
+        {
+            bool githubRunning = WaitForProcessFromPath(
+                processName: "GITHUB",
+                expectedExecutablePath: installedGitHubPath,
+                timeout: ProcessRepairWaitTimeout);
+            AddSelfRepairLine(reportLines, $"GitHubAgentRunningInitial={githubRunning}");
+
+            if (!githubRunning)
+            {
+                try
+                {
+                    StartGitHubAgent(installedGitHubPath, installDirectory);
+                    AddSelfRepairLine(reportLines, "GitHubAgentRepairStart=attempted");
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+                {
+                    repairIssues.Add($"GITHUB start failed: {exception.GetType().Name}");
+                    AddSelfRepairLine(reportLines, $"GitHubAgentRepairStart=failed:{exception.GetType().Name}");
+                }
+
+                githubRunning = WaitForProcessFromPath(
+                    processName: "GITHUB",
+                    expectedExecutablePath: installedGitHubPath,
+                    timeout: ProcessRepairWaitTimeout);
+                AddSelfRepairLine(reportLines, $"GitHubAgentRunningAfterRepair={githubRunning}");
+            }
+
+            if (!githubRunning)
+            {
+                bool fallbackRunning = TryStartInstalledAppFallback(
+                    installedExecutablePath,
+                    installDirectory,
+                    reportLines,
+                    repairIssues);
+                AddSelfRepairLine(reportLines, $"VALOWATCHFallbackRunning={fallbackRunning}");
+                hasBlockingFailure = !fallbackRunning;
+            }
+        }
+        else
+        {
+            AddSelfRepairLine(reportLines, "ProcessStartCheck=skipped");
+        }
+
+        string summary = repairIssues.Count == 0
+            ? "ready"
+            : string.Join("; ", repairIssues.Take(8));
+        reportLines.Insert(0, $"BlockingFailure={hasBlockingFailure}");
+        reportLines.Insert(0, $"Summary={summary}");
+        AddSelfRepairLine(reportLines, $"ResultSummary={summary}");
+        return new SelfRepairResult(hasBlockingFailure, summary, reportLines);
+    }
+
+    private static void AddFileCheck(
+        List<string> reportLines,
+        List<string> repairIssues,
+        string label,
+        string filePath,
+        bool required)
+    {
+        FileInfo fileInfo = new(filePath);
+        bool exists = fileInfo.Exists && fileInfo.Length > 0;
+        AddSelfRepairLine(reportLines, $"{label}=exists:{exists};bytes:{(exists ? fileInfo.Length : 0)};path:{filePath}");
+        if (required && !exists)
+        {
+            repairIssues.Add($"{label} missing");
+        }
+    }
+
+    private static void VerifyStartupRegistration(
+        List<string> reportLines,
+        List<string> repairIssues,
+        string installedGitHubPath,
+        string installDirectory)
+    {
+        string expectedCommand = BuildGitHubAgentCommand(installedGitHubPath, installDirectory);
+        try
+        {
+            using RegistryKey? registryKey = Registry.CurrentUser.OpenSubKey(RegistryRunPath, writable: false);
+            string? registeredCommand = registryKey?.GetValue(RegistryValueName) as string;
+            bool registryMatches = string.Equals(registeredCommand, expectedCommand, StringComparison.OrdinalIgnoreCase);
+            AddSelfRepairLine(reportLines, $"StartupRegistryMatches={registryMatches}");
+            if (!registryMatches)
+            {
+                repairIssues.Add("startup registry mismatch");
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            repairIssues.Add($"startup registry unreadable: {exception.GetType().Name}");
+            AddSelfRepairLine(reportLines, $"StartupRegistryMatches=failed:{exception.GetType().Name}");
+        }
+
+        try
+        {
+            string startupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+            string startupCommandPath = Path.Combine(startupDirectory, StartupCommandFileName);
+            string startupCommandText = File.Exists(startupCommandPath)
+                ? File.ReadAllText(startupCommandPath, Encoding.UTF8)
+                : string.Empty;
+            bool startupCommandMatches = startupCommandText.Contains(installedGitHubPath, StringComparison.OrdinalIgnoreCase) &&
+                startupCommandText.Contains(installDirectory, StringComparison.OrdinalIgnoreCase);
+            AddSelfRepairLine(reportLines, $"StartupCommandMatches={startupCommandMatches}");
+            if (!startupCommandMatches)
+            {
+                repairIssues.Add("startup command mismatch");
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            repairIssues.Add($"startup command unreadable: {exception.GetType().Name}");
+            AddSelfRepairLine(reportLines, $"StartupCommandMatches=failed:{exception.GetType().Name}");
+        }
+
+        bool keepAliveTaskExists = TryQueryKeepAliveTask(out string keepAliveTaskDetail);
+        AddSelfRepairLine(reportLines, $"KeepAliveTaskExists={keepAliveTaskExists};detail:{keepAliveTaskDetail}");
+    }
+
+    private static bool TryQueryKeepAliveTask(out string detail)
+    {
+        detail = string.Empty;
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            processStartInfo.ArgumentList.Add("/Query");
+            processStartInfo.ArgumentList.Add("/TN");
+            processStartInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+            processStartInfo.ArgumentList.Add("/FO");
+            processStartInfo.ArgumentList.Add("LIST");
+
+            using Process taskSchedulerProcess = Process.Start(processStartInfo)
+                ?? throw new InvalidOperationException("Windows Task Scheduler query could not be started.");
+            Task<string> outputTask = taskSchedulerProcess.StandardOutput.ReadToEndAsync();
+            Task<string> errorTask = taskSchedulerProcess.StandardError.ReadToEndAsync();
+            if (!taskSchedulerProcess.WaitForExit(10000))
+            {
+                taskSchedulerProcess.Kill(entireProcessTree: true);
+                throw new TimeoutException("Windows Task Scheduler query timed out.");
+            }
+
+            string output = outputTask.GetAwaiter().GetResult().Trim();
+            string error = errorTask.GetAwaiter().GetResult().Trim();
+            detail = SanitizeInstallerReportText(taskSchedulerProcess.ExitCode == 0 ? output : error);
+            detail = detail
+                .Replace("\r", " ", StringComparison.Ordinal)
+                .Replace("\n", " ", StringComparison.Ordinal);
+            if (detail.Length > 240)
+            {
+                detail = detail[..240];
+            }
+
+            return taskSchedulerProcess.ExitCode == 0;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            detail = exception.GetType().Name;
+            return false;
+        }
+    }
+
+    private static bool TryStartInstalledAppFallback(
+        string installedExecutablePath,
+        string installDirectory,
+        List<string> reportLines,
+        List<string> repairIssues)
+    {
+        try
+        {
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = installedExecutablePath,
+                UseShellExecute = true,
+                WorkingDirectory = installDirectory,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            Process.Start(processStartInfo);
+            AddSelfRepairLine(reportLines, "VALOWATCHFallbackStart=attempted");
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            repairIssues.Add($"VALOWATCH fallback start failed: {exception.GetType().Name}");
+            AddSelfRepairLine(reportLines, $"VALOWATCHFallbackStart=failed:{exception.GetType().Name}");
+            return false;
+        }
+
+        bool appRunning = WaitForProcessFromPath(
+            processName: "VALOWATCH",
+            expectedExecutablePath: installedExecutablePath,
+            timeout: ProcessRepairWaitTimeout);
+        if (!appRunning)
+        {
+            repairIssues.Add("VALOWATCH fallback not running");
+        }
+
+        return appRunning;
+    }
+
+    private static bool WaitForProcessFromPath(string processName, string expectedExecutablePath, TimeSpan timeout)
+    {
+        DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(timeout);
+        while (DateTimeOffset.UtcNow <= deadline)
+        {
+            if (IsProcessRunningFromPath(processName, expectedExecutablePath))
+            {
+                return true;
+            }
+
+            Task.Delay(500).GetAwaiter().GetResult();
+        }
+
+        return false;
+    }
+
+    private static bool IsProcessRunningFromPath(string processName, string expectedExecutablePath)
+    {
+        string normalizedExpectedPath = NormalizeExecutablePath(expectedExecutablePath);
+        foreach (Process candidateProcess in Process.GetProcessesByName(processName))
+        {
+            using (candidateProcess)
+            {
+                if (IsProcessFromExecutablePath(candidateProcess, normalizedExpectedPath))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsProcessFromExecutablePath(Process candidateProcess, string normalizedExpectedPath)
+    {
+        try
+        {
+            string? processFileName = candidateProcess.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(processFileName))
+            {
+                return false;
+            }
+
+            return string.Equals(
+                NormalizeExecutablePath(processFileName),
+                normalizedExpectedPath,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
+    }
+
+    private static void AddSelfRepairLine(List<string> reportLines, string line)
+    {
+        string sanitizedLine = SanitizeInstallerReportText(line);
+        reportLines.Add(sanitizedLine);
+        WriteInstallerLog($"Self repair: {sanitizedLine}");
+    }
+
+    private static void TryWriteAndSendInstallerReport(
         string installDirectory,
         bool succeeded,
         bool startAfterInstall,
         bool registerStartup,
-        Exception? exception)
+        Exception? exception,
+        IReadOnlyList<string> additionalReportLines)
     {
         try
         {
@@ -586,19 +918,236 @@ internal static class Program
                 $"StartAfterInstall={startAfterInstall}",
                 $"StartupRegistered={registerStartup}",
                 $"FailureType={exception?.GetType().Name ?? string.Empty}",
-                string.Empty,
-                "Session log:"
+                string.Empty
             ];
+            if (additionalReportLines.Count > 0)
+            {
+                reportLines.Add("Self repair:");
+                reportLines.AddRange(additionalReportLines.Select(SanitizeInstallerReportText));
+                reportLines.Add(string.Empty);
+            }
+
+            reportLines.Add("Session log:");
             reportLines.AddRange(sessionLogLines);
 
             File.WriteAllLines(temporaryReportPath, reportLines, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
             File.Move(temporaryReportPath, reportPath, overwrite: true);
             WriteInstallerLog($"Pending Discord installer report written: {reportPath}");
+            TrySendInstallerReportDirectly(normalizedInstallDirectory, reportLines, succeeded);
         }
         catch (Exception reportException) when (reportException is ArgumentException or IOException or NotSupportedException or UnauthorizedAccessException or InvalidOperationException)
         {
             WriteInstallerLog("Pending Discord installer report could not be written.", reportException);
         }
+    }
+
+    private static void TrySendInstallerReportDirectly(
+        string installDirectory,
+        IReadOnlyList<string> reportLines,
+        bool succeeded)
+    {
+        try
+        {
+            if (!TryLoadDirectDiscordReportSettings(
+                installDirectory,
+                out DirectDiscordReportSettings? reportSettings,
+                out string settingsStatus))
+            {
+                WriteInstallerLog($"Direct Discord installer report skipped: {settingsStatus}");
+                return;
+            }
+
+            DirectDiscordReportSettings activeReportSettings = reportSettings
+                ?? throw new InvalidOperationException("Discord report settings were not loaded.");
+            IReadOnlyList<string> messageChunks = BuildDiscordReportMessages(reportLines, succeeded);
+            using HttpClient httpClient = new()
+            {
+                Timeout = DiscordReportTimeout
+            };
+            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bot", activeReportSettings.BotToken);
+
+            foreach (string messageChunk in messageChunks)
+            {
+                string jsonPayload = JsonSerializer.Serialize(new
+                {
+                    content = messageChunk,
+                    allowed_mentions = new
+                    {
+                        parse = Array.Empty<string>()
+                    }
+                });
+                using StringContent content = new(jsonPayload, Encoding.UTF8, "application/json");
+                using HttpResponseMessage response = httpClient
+                    .PostAsync($"https://discord.com/api/v10/channels/{activeReportSettings.TextChannelId}/messages", content)
+                    .GetAwaiter()
+                    .GetResult();
+                if (!response.IsSuccessStatusCode)
+                {
+                    string responseText = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                    throw new InvalidOperationException(
+                        $"Discord returned {(int)response.StatusCode} {response.ReasonPhrase}. {TrimForLog(responseText, 400)}");
+                }
+
+                Task.Delay(350).GetAwaiter().GetResult();
+            }
+
+            WriteInstallerLog($"Direct Discord installer report sent. Chunks: {messageChunks.Count}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or JsonException)
+        {
+            WriteInstallerLog(
+                "Direct Discord installer report could not be sent; pending report remains for VALOWATCH.",
+                exception);
+        }
+    }
+
+    private static bool TryLoadDirectDiscordReportSettings(
+        string installDirectory,
+        out DirectDiscordReportSettings? reportSettings,
+        out string status)
+    {
+        reportSettings = null;
+        Dictionary<string, string> envValues = LoadInstallerEnvValues(installDirectory);
+        if (envValues.Count == 0)
+        {
+            status = "installer .env was not found or empty";
+            return false;
+        }
+
+        if (TryGetEnvValue(envValues, out string discordEnabledText, "DISCORD_BOT_ENABLED") &&
+            IsFalseEnvValue(discordEnabledText))
+        {
+            status = "DISCORD_BOT_ENABLED is false";
+            return false;
+        }
+
+        if (!TryGetEnvValue(envValues, out string botToken, "DISCORD_BOT_TOKEN", "DISCORD_TOKEN", "BOT_TOKEN") ||
+            IsPlaceholderDiscordToken(botToken))
+        {
+            status = "Discord bot token is missing";
+            return false;
+        }
+
+        if (!TryGetEnvValue(envValues, out string channelIdText, "DISCORD_TEXT_CHANNEL_ID", "DISCORD_STATUS_CHANNEL_ID", "TEXT_CHANNEL_ID", "STATUS_CHANNEL_ID") ||
+            !ulong.TryParse(channelIdText, out ulong textChannelId) ||
+            textChannelId == 0)
+        {
+            status = "Discord text channel id is missing";
+            return false;
+        }
+
+        reportSettings = new DirectDiscordReportSettings(botToken, textChannelId);
+        status = "ready";
+        return true;
+    }
+
+    private static Dictionary<string, string> LoadInstallerEnvValues(string installDirectory)
+    {
+        Dictionary<string, string> mergedValues = new(StringComparer.OrdinalIgnoreCase);
+        string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
+        string installedEnvPath = Path.Combine(workspaceRoot, "installer", ".env");
+        string sideBySideEnvPath = Path.Combine(AppContext.BaseDirectory, ".env");
+
+        foreach (string? envText in new[]
+        {
+            ReadEmbeddedEnvText(),
+            TryReadTextFile(sideBySideEnvPath),
+            TryReadTextFile(installedEnvPath)
+        })
+        {
+            if (string.IsNullOrWhiteSpace(envText))
+            {
+                continue;
+            }
+
+            (_, Dictionary<string, string> envAssignments) = ReadEnvAssignments(envText);
+            foreach ((string key, string value) in envAssignments)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    mergedValues[key] = value;
+                }
+                else if (!mergedValues.ContainsKey(key))
+                {
+                    mergedValues[key] = value;
+                }
+            }
+        }
+
+        return mergedValues;
+    }
+
+    private static bool TryGetEnvValue(
+        IReadOnlyDictionary<string, string> envValues,
+        out string value,
+        params string[] keys)
+    {
+        foreach (string key in keys)
+        {
+            if (envValues.TryGetValue(key, out string? rawValue) && !string.IsNullOrWhiteSpace(rawValue))
+            {
+                value = rawValue.Trim().Trim('"');
+                return true;
+            }
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool IsFalseEnvValue(string value)
+    {
+        return value.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("0", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("no", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPlaceholderDiscordToken(string value)
+    {
+        return string.IsNullOrWhiteSpace(value) ||
+            value.Contains("PASTE_", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("TOKEN_HERE", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IReadOnlyList<string> BuildDiscordReportMessages(IReadOnlyList<string> reportLines, bool succeeded)
+    {
+        string title = succeeded
+            ? "**VALOWATCH 再インストール完了**"
+            : "**VALOWATCH 再インストール失敗**";
+        List<string> messages = [];
+        StringBuilder currentMessage = new(title);
+        currentMessage.AppendLine();
+
+        foreach (string reportLine in reportLines.Select(SanitizeInstallerReportText))
+        {
+            string line = reportLine.Length > 480
+                ? reportLine[..480] + "..."
+                : reportLine;
+            if (currentMessage.Length + line.Length + Environment.NewLine.Length > DiscordMessageMaximumLength)
+            {
+                messages.Add(currentMessage.ToString().TrimEnd());
+                currentMessage.Clear();
+                currentMessage.AppendLine(title);
+            }
+
+            currentMessage.AppendLine(line);
+        }
+
+        if (currentMessage.Length > 0)
+        {
+            messages.Add(currentMessage.ToString().TrimEnd());
+        }
+
+        return messages;
+    }
+
+    private static string TrimForLog(string value, int maximumLength)
+    {
+        string sanitizedValue = SanitizeInstallerReportText(value);
+        return sanitizedValue.Length <= maximumLength
+            ? sanitizedValue
+            : sanitizedValue[..maximumLength] + "...";
     }
 
     private static string SanitizeInstallerReportText(string value)
