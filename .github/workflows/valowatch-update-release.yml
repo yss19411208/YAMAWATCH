@@ -42,21 +42,28 @@ jobs:
       - name: Download offline transcription model
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Path .\models -Force | Out-Null
           $modelZipPath = ".\models\vosk-model-small-ja-0.22.zip"
-          Invoke-WebRequest `
-            -Uri "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip" `
-            -OutFile $modelZipPath
-
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $modelZip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $modelZipPath))
           try {
-            if ($modelZip.Entries.Count -le 0) {
-              throw "Vosk model zip is empty."
+            Invoke-WebRequest `
+              -Uri "https://alphacephei.com/vosk/models/vosk-model-small-ja-0.22.zip" `
+              -OutFile $modelZipPath
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $modelZip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $modelZipPath))
+            try {
+              if ($modelZip.Entries.Count -le 0) {
+                throw "Vosk model zip is empty."
+              }
+            }
+            finally {
+              $modelZip.Dispose()
             }
           }
-          finally {
-            $modelZip.Dispose()
+          catch {
+            Write-Warning "Offline transcription model download failed. The update release will continue without an embedded Vosk model. Existing installed data models can still be used. $($_.Exception.Message)"
+            Remove-Item -LiteralPath $modelZipPath -Force -ErrorAction SilentlyContinue
           }
 
       - name: Publish VALOWATCH app
