@@ -168,6 +168,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-self-diagnostics-command", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunSelfDiagnosticsCommandDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-identity", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateIdentityDiagnostic(args);
@@ -454,6 +460,40 @@ static class Program
             catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
             {
             }
+        }
+    }
+
+    private static void RunSelfDiagnosticsCommandDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(5));
+            IReadOnlyList<Embed> embeds = ValowatchSelfDiagnostics
+                .BuildDiscordEmbedsAsync(appPaths, includeUpdateDownload: false, timeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            bool ready = embeds.Count >= 3 &&
+                embeds.Any(embed => embed.Title?.Contains("自己診断", StringComparison.Ordinal) == true) &&
+                embeds.Any(embed => string.Equals(embed.Title, "VALOWATCH フォルダー状況", StringComparison.Ordinal)) &&
+                embeds.Any(embed => string.Equals(embed.Title, "VALOWATCH Root直下", StringComparison.Ordinal)) &&
+                embeds.All(embed =>
+                    string.IsNullOrEmpty(embed.Description) ||
+                    embed.Description.Length <= 4096);
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Self diagnostics slash command check: " +
+                $"{(ready ? "ready" : "failed")}. Embeds: {embeds.Count}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Self diagnostics slash command check", exception);
+            Environment.ExitCode = 1;
         }
     }
 

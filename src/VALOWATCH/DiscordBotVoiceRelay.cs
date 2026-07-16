@@ -45,6 +45,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string DiscordAudioCommandName = "valowatch-discord-audio";
     private const string DiscordAudioCommandEnabledOptionName = "enabled";
     private const string RunningAppCommandName = "app";
+    private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
+    private const string SelfDiagnosticsDownloadOptionName = "download";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -206,6 +208,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ConfigureDiscordUserVoiceTracking(settings, gatewayContext.Guild);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Guild).ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
@@ -309,6 +312,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             EnsureVoiceChannelPermissions(guild, voiceChannel);
             await EnsureDiscordAudioCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
+            await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
             startupStage = DiscordVoiceChannelConnectStartupStage;
@@ -997,6 +1001,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
+        if (string.Equals(command.Data.Name, SelfDiagnosticsCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleSelfDiagnosticsSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (!string.Equals(command.Data.Name, DiscordAudioCommandName, StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -1111,6 +1121,75 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
             {
                 WriteLog("Running application slash command error response failed.", responseException);
+            }
+        }
+    }
+
+    private async Task HandleSelfDiagnosticsSlashCommandAsync(SocketSlashCommand command)
+    {
+        bool deferred = false;
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHの自己診断にはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            bool includeUpdateDownload = command.Data.Options
+                .FirstOrDefault(option => string.Equals(
+                    option.Name,
+                    SelfDiagnosticsDownloadOptionName,
+                    StringComparison.OrdinalIgnoreCase))
+                ?.Value is bool downloadOption && downloadOption;
+
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
+            using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(includeUpdateDownload ? 8 : 5));
+            IReadOnlyList<Embed> embeds = await ValowatchSelfDiagnostics
+                .BuildDiscordEmbedsAsync(appPaths, includeUpdateDownload, timeout.Token)
+                .ConfigureAwait(false);
+
+            foreach (Embed embed in embeds)
+            {
+                await command.FollowupAsync(embed: embed, ephemeral: true).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromMilliseconds(100), CancellationToken.None).ConfigureAwait(false);
+            }
+
+            WriteLog($"Self diagnostics slash command responded to user {command.User.Id}. IncludeDownload: {includeUpdateDownload}.");
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or InvalidOperationException or IOException or UnauthorizedAccessException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("Self diagnostics slash command handling failed.", exception);
+            try
+            {
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync("VALOWATCHの自己診断に失敗しました。ログを確認してください。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync("VALOWATCHの自己診断に失敗しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Self diagnostics slash command error response failed.", responseException);
             }
         }
     }
@@ -1579,6 +1658,46 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             WriteLog(
                 "Running app slash command could not be registered. " +
+                "The bot will retry registration on the next startup.",
+                exception);
+        }
+    }
+
+    private async Task EnsureSelfDiagnosticsCommandAsync(SocketGuild guild)
+    {
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            bool commandAlreadyExists = commands.Any(command =>
+                string.Equals(command.Name, SelfDiagnosticsCommandName, StringComparison.OrdinalIgnoreCase));
+            if (commandAlreadyExists)
+            {
+                WriteLog($"Self diagnostics slash command already exists: /{SelfDiagnosticsCommandName}.");
+                return;
+            }
+
+            SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
+                .WithName(SelfDiagnosticsCommandName)
+                .WithDescription("VALOWATCHの自己診断とフォルダー状況を表示します")
+                .WithContextTypes(InteractionContextType.Guild)
+                .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+                .AddOption(
+                    SelfDiagnosticsDownloadOptionName,
+                    ApplicationCommandOptionType.Boolean,
+                    "更新ファイルの実ダウンロード診断も実行します",
+                    isRequired: false);
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Self diagnostics slash command registered: /{SelfDiagnosticsCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Self diagnostics slash command could not be registered. " +
                 "The bot will retry registration on the next startup.",
                 exception);
         }
