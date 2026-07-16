@@ -262,7 +262,7 @@ internal static class Program
     {
         try
         {
-            if (await TryStartAgentReplacementAsync(installDirectory).ConfigureAwait(false))
+            if (await TryStartAgentReplacementOrContinueAsync(installDirectory).ConfigureAwait(false))
             {
                 return 10;
             }
@@ -284,6 +284,21 @@ internal static class Program
         {
             WriteLog("GITHUB background update check failed; the current app will remain active.", exception);
             return 1;
+        }
+    }
+
+    private static async Task<bool> TryStartAgentReplacementOrContinueAsync(string installDirectory)
+    {
+        try
+        {
+            return await TryStartAgentReplacementAsync(installDirectory).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidOperationException or
+                System.ComponentModel.Win32Exception or TaskCanceledException or HttpRequestException or JsonException)
+        {
+            WriteLog("GITHUB agent maintenance was skipped; app update will continue.", exception);
+            return false;
         }
     }
 
@@ -752,6 +767,46 @@ internal static class Program
         }
 
         DownloadTarget downloadTarget = PrepareDownloadTarget(destinationPath, appAsset.ExpectedSize);
+        const int maximumDownloadPathAttempts = 3;
+        for (int attempt = 1; attempt <= maximumDownloadPathAttempts; attempt++)
+        {
+            try
+            {
+                return await DownloadValidateAndMoveAsync(
+                        httpClient,
+                        appAsset,
+                        destinationPath,
+                        downloadTarget,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (
+                IsDownloadPathAccessException(exception) &&
+                attempt < maximumDownloadPathAttempts)
+            {
+                TryDeleteFile(downloadTarget.PartialPath, "failed partial download");
+                string fallbackPartialPath = attempt == 1
+                    ? CreateFallbackPartialPath(destinationPath)
+                    : CreateEmergencyPartialPath(destinationPath);
+                WriteLog(
+                    "Download path became unavailable; retrying with another partial path. " +
+                    $"Attempt: {attempt}/{maximumDownloadPathAttempts}. " +
+                    $"FailedPartial: {downloadTarget.PartialPath}. Fallback: {fallbackPartialPath}. " +
+                    SummarizeException(exception));
+                downloadTarget = new DownloadTarget(fallbackPartialPath, 0);
+            }
+        }
+
+        throw new InvalidOperationException("Download path recovery attempts were exhausted.");
+    }
+
+    private static async Task<string> DownloadValidateAndMoveAsync(
+        HttpClient httpClient,
+        ReleaseAppAsset appAsset,
+        string destinationPath,
+        DownloadTarget downloadTarget,
+        CancellationToken cancellationToken)
+    {
         string partialPath = downloadTarget.PartialPath;
         long existingLength = downloadTarget.ExistingLength;
         if (existingLength >= appAsset.ExpectedSize)
@@ -810,6 +865,11 @@ internal static class Program
         string readyPath = MoveValidatedDownload(partialPath, destinationPath);
         WriteLog(validationStatus);
         return readyPath;
+    }
+
+    private static bool IsDownloadPathAccessException(Exception exception)
+    {
+        return exception is IOException or UnauthorizedAccessException or NotSupportedException;
     }
 
     private static DownloadTarget PrepareDownloadTarget(string destinationPath, long expectedSize)
@@ -908,8 +968,21 @@ internal static class Program
                 "Validated download could not replace the preferred path; using fallback ready path. " +
                 $"Preferred: {destinationPath}. Fallback: {fallbackDestinationPath}. " +
                 SummarizeException(exception));
-            File.Move(partialPath, fallbackDestinationPath, overwrite: true);
-            return fallbackDestinationPath;
+            try
+            {
+                File.Move(partialPath, fallbackDestinationPath, overwrite: true);
+                return fallbackDestinationPath;
+            }
+            catch (Exception fallbackException) when (IsDownloadPathAccessException(fallbackException))
+            {
+                string emergencyDestinationPath = CreateEmergencyReadyPath(destinationPath);
+                WriteLog(
+                    "Validated download could not be stored in the update directory; using emergency ready path. " +
+                    $"Fallback: {fallbackDestinationPath}. Emergency: {emergencyDestinationPath}. " +
+                    SummarizeException(fallbackException));
+                File.Move(partialPath, emergencyDestinationPath, overwrite: true);
+                return emergencyDestinationPath;
+            }
         }
     }
 
@@ -937,6 +1010,15 @@ internal static class Program
         return destinationPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.download";
     }
 
+    private static string CreateEmergencyPartialPath(string destinationPath)
+    {
+        string emergencyDirectory = CreateEmergencyDownloadDirectory(destinationPath);
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
+        return Path.Combine(
+            emergencyDirectory,
+            $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.download");
+    }
+
     private static string CreateFallbackReadyPath(string destinationPath)
     {
         string directory = Path.GetDirectoryName(destinationPath) ?? AppContext.BaseDirectory;
@@ -944,6 +1026,27 @@ internal static class Program
         return Path.Combine(
             directory,
             $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.ready.exe");
+    }
+
+    private static string CreateEmergencyReadyPath(string destinationPath)
+    {
+        string emergencyDirectory = CreateEmergencyDownloadDirectory(destinationPath);
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
+        return Path.Combine(
+            emergencyDirectory,
+            $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.ready.exe");
+    }
+
+    private static string CreateEmergencyDownloadDirectory(string destinationPath)
+    {
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
+        string emergencyDirectory = Path.Combine(
+            Path.GetTempPath(),
+            "VALOWATCH",
+            "updates",
+            SanitizeFileName(fileNameWithoutExtension));
+        Directory.CreateDirectory(emergencyDirectory);
+        return emergencyDirectory;
     }
 
     private static bool ValidateDownloadedApp(
@@ -1200,10 +1303,17 @@ internal static class Program
                 downloadTarget.ExistingLength == 0 &&
                 Path.GetFullPath(downloadTarget.PartialPath)
                     .StartsWith(Path.GetFullPath(diagnosticRoot), StringComparison.OrdinalIgnoreCase);
+            string emergencyPartialPath = CreateEmergencyPartialPath(destinationPath);
+            string expectedEmergencyRoot = Path.Combine(Path.GetTempPath(), "VALOWATCH", "updates");
+            bool emergencyFallbackReady =
+                Path.GetFullPath(emergencyPartialPath)
+                    .StartsWith(Path.GetFullPath(expectedEmergencyRoot), StringComparison.OrdinalIgnoreCase) &&
+                emergencyPartialPath.EndsWith(".download", StringComparison.OrdinalIgnoreCase);
             WriteLog(
-                $"Download path recovery diagnostic: {(usedFallbackPartial ? "ready" : "failed")}. " +
-                $"Default: {defaultPartialPath}. Chosen: {downloadTarget.PartialPath}.");
-            return usedFallbackPartial ? 0 : 1;
+                $"Download path recovery diagnostic: {(usedFallbackPartial && emergencyFallbackReady ? "ready" : "failed")}. " +
+                $"Default: {defaultPartialPath}. Chosen: {downloadTarget.PartialPath}. " +
+                $"Emergency: {emergencyPartialPath}.");
+            return usedFallbackPartial && emergencyFallbackReady ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
