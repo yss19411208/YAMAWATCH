@@ -481,7 +481,7 @@ internal static class Program
     {
         string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
             ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
-        string installedStartAgentPath = Path.Combine(workspaceRoot, StartAgentFileName);
+        string installedStartAgentPath = Path.Combine(Path.GetFullPath(installDirectory), StartAgentFileName);
         using HttpClient httpClient = CreateHttpClient();
         ReleaseAppAsset startAgentAsset = await ExecuteWithRetryAsync(
             "VALOWATCH Start agent release lookup",
@@ -513,9 +513,7 @@ internal static class Program
 
     private static void EnsureStartAgentRunningIfPresent(string installDirectory)
     {
-        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
-            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
-        string installedStartAgentPath = Path.Combine(workspaceRoot, StartAgentFileName);
+        string installedStartAgentPath = Path.Combine(Path.GetFullPath(installDirectory), StartAgentFileName);
         if (!File.Exists(installedStartAgentPath) ||
             IsProcessRunningFromPath("VALOWATCH_Start", installedStartAgentPath))
         {
@@ -535,7 +533,7 @@ internal static class Program
             {
                 FileName = installedStartAgentPath,
                 UseShellExecute = true,
-                WorkingDirectory = workspaceRoot,
+                WorkingDirectory = installDirectory,
                 WindowStyle = ProcessWindowStyle.Hidden
             };
             processStartInfo.ArgumentList.Add("--install-dir");
