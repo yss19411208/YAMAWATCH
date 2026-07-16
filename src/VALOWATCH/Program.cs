@@ -270,7 +270,11 @@ static class Program
                     "2026-07-12T00:00:03+09:00 [Discord] Discord.Net Warning: Dave encrypt stream: Failed to encrypt dave audio: MissingKeyRatchet",
                     "2026-07-12T00:00:03+09:00 GITHUB agent release lookup attempt 1/5 failed. Retrying in 2 seconds. Exception: HttpRequestException: api.github.com",
                     " ---> System.Net.Sockets.SocketException (11001): そのようなホストは不明です。",
-                    "2026-07-12T00:00:04+09:00 GITHUB agent is already current. SHA-256 matches release: 1234."
+                    "2026-07-12T00:00:04+09:00 GITHUB agent is already current. SHA-256 matches release: 1234.",
+                    "2026-07-12T00:00:05+09:00 VALOWATCH Start agent maintenance was skipped; app update will continue. Exception: UnauthorizedAccessException: Access to the path 'VALOWATCH_Start.exe.download' is denied.",
+                    "2026-07-12T00:00:06+09:00 Embedded agent resource repair is attempting extraction because the installed agent is missing or unreadable.",
+                    "2026-07-12T00:00:07+09:00 Embedded agent resource could not be installed: UpdateAgent/GITHUB.exe Exception: IOException: remained unreadable after validation attempts.",
+                    "2026-07-12T00:00:08+09:00 LocalAppData update directory could not be used; falling back to Temp. Exception: UnauthorizedAccessException: denied."
                 ]);
             File.WriteAllLines(Path.Combine(dataLogsDirectory, "primary.log"), primaryLogLines);
             File.WriteAllText(
@@ -394,6 +398,13 @@ static class Program
             AddDiagnosticCheck(
                 !initialText.Contains("GITHUB agent is already current", StringComparison.Ordinal),
                 "routine updater success mirrored",
+                failedChecks);
+            AddDiagnosticCheck(
+                !initialText.Contains("Start agent maintenance was skipped", StringComparison.Ordinal) &&
+                    !initialText.Contains("Embedded agent resource repair", StringComparison.Ordinal) &&
+                    !initialText.Contains("Embedded agent resource could not be installed", StringComparison.Ordinal) &&
+                    !initialText.Contains("LocalAppData update directory could not be used", StringComparison.Ordinal),
+                "routine agent maintenance warning mirrored",
                 failedChecks);
             AddDiagnosticCheck(
                 incrementalText.Contains("incremental important failure line", StringComparison.Ordinal),

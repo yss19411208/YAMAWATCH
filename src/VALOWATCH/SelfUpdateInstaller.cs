@@ -266,17 +266,6 @@ internal static class SelfUpdateInstaller
             return;
         }
 
-        byte[] resourceSha256 = ComputeSha256(resourceStream);
-        if (resourceStream.CanSeek)
-        {
-            resourceStream.Position = 0;
-        }
-        else
-        {
-            WriteLog($"Embedded agent resource stream is not seekable and will be skipped: {resourceName}");
-            return;
-        }
-
         string existingAgentStatus;
         if (!File.Exists(targetPath))
         {
@@ -287,16 +276,10 @@ internal static class SelfUpdateInstaller
             $"existing agent resource {resourceName}",
             out existingAgentStatus))
         {
-            byte[] existingSha256 = ComputeSha256(targetPath);
-            if (CryptographicOperations.FixedTimeEquals(resourceSha256, existingSha256))
-            {
-                WriteLog(
-                    "Embedded agent resource rewrite skipped because the installed agent already matches the embedded resource. " +
-                    $"Target: {targetPath}. SHA-256: {Convert.ToHexString(existingSha256)}.");
-                return;
-            }
-
-            existingAgentStatus += $" Existing SHA-256 differs from embedded resource. Existing: {Convert.ToHexString(existingSha256)}. Embedded: {Convert.ToHexString(resourceSha256)}.";
+            WriteLog(
+                "Embedded agent resource rewrite skipped because the installed agent is already executable. " +
+                $"Target: {targetPath}. {existingAgentStatus}");
+            return;
         }
 
         string temporaryPath = targetPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.new";
@@ -461,11 +444,6 @@ internal static class SelfUpdateInstaller
     {
         using FileStream fileStream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         return SHA256.HashData(fileStream);
-    }
-
-    private static byte[] ComputeSha256(Stream stream)
-    {
-        return SHA256.HashData(stream);
     }
 
     private static void ValidateExecutableFile(string filePath, string label)

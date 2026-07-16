@@ -248,6 +248,14 @@ internal static class RuntimeLogMessageCollector
             "latest release lookup attempt",
             "GITHUB agent download attempt",
             "app download attempt",
+            "VALOWATCH Start agent maintenance was skipped; app update will continue.",
+            "GITHUB agent maintenance was skipped; app update will continue.",
+            "Embedded agent resource repair is attempting extraction",
+            "Embedded agent resource could not be installed",
+            "Embedded agent resource was placed but final validation is still blocked",
+            "Embedded agent resource rewrite skipped because the installed agent is already executable",
+            "LocalAppData update directory could not be used; falling back to Temp.",
+            "External LocalAppData update directory could not be used; falling back to Temp.",
             "--- End of stack trace from previous location ---",
             "--- End of inner exception stack trace ---"
         ];
