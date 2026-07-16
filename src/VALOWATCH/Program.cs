@@ -74,6 +74,18 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-embedded-agent-resources", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunEmbeddedAgentResourceDiagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-embedded-agent-repair", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunEmbeddedAgentRepairDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-microphone", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneDiagnostic();
@@ -861,6 +873,70 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Self-update rollback check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(diagnosticRoot))
+                {
+                    Directory.Delete(diagnosticRoot, recursive: true);
+                }
+            }
+            catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static void RunEmbeddedAgentResourceDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            bool resourcesReady = SelfUpdateInstaller.RunEmbeddedAgentResourceDiagnostic(out string status);
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Embedded agent resource check: " +
+                $"{(resourcesReady ? "ready" : "failed")}. {status}");
+            Environment.ExitCode = resourcesReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Embedded agent resource check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunEmbeddedAgentRepairDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string diagnosticRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"VALOWATCH-embedded-agent-repair-{Guid.NewGuid():N}");
+
+        try
+        {
+            bool repairReady = SelfUpdateInstaller.RunEmbeddedAgentRepairDiagnostic(
+                diagnosticRoot,
+                out string status);
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Embedded agent repair check: " +
+                $"{(repairReady ? "ready" : "failed")}. {status}");
+            Environment.ExitCode = repairReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Embedded agent repair check", exception);
             Environment.ExitCode = 1;
         }
         finally

@@ -39,6 +39,11 @@ internal static class Program
         TimeSpan.FromSeconds(30),
         TimeSpan.FromSeconds(60)
     ];
+    private static readonly string[] CompatibilityBootstrapAgentSha256 =
+    [
+        // Used only for one-shot bootstrap releases where old agents must skip self-update first.
+        "b7844afad9fdcd32d255c9eae6ee8e8e129509567f256205238b87c5fab6ee25"
+    ];
 
     [STAThread]
     private static async Task<int> Main(string[] args)
@@ -65,6 +70,14 @@ internal static class Program
             StringComparison.OrdinalIgnoreCase)))
         {
             return RunDownloadPathRecoveryDiagnostic();
+        }
+
+        if (args.Any(argument => string.Equals(
+            argument,
+            "--check-compat-agent-bootstrap",
+            StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunCompatibilityBootstrapDiagnostic();
         }
 
         string installDirectory;
@@ -301,6 +314,14 @@ internal static class Program
             return false;
         }
 
+        if (IsCompatibilityBootstrapAgentAsset(agentAsset.ExpectedSha256))
+        {
+            WriteLog(
+                "GITHUB agent replacement was skipped because the latest release asset is a compatibility bootstrap asset. " +
+                $"Current: {currentStatus}. ReleaseSha256: {agentAsset.ExpectedSha256}.");
+            return false;
+        }
+
         string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
             ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
         string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "github-agent");
@@ -337,6 +358,24 @@ internal static class Program
         replacementProcess.Dispose();
         WriteLog($"Validated GITHUB replacement was started. Current: {currentStatus}");
         return true;
+    }
+
+    private static bool IsCompatibilityBootstrapAgentAsset(string expectedSha256)
+    {
+        return CompatibilityBootstrapAgentSha256.Contains(expectedSha256, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static int RunCompatibilityBootstrapDiagnostic()
+    {
+        bool knownCompatibilityAsset = IsCompatibilityBootstrapAgentAsset(
+            "b7844afad9fdcd32d255c9eae6ee8e8e129509567f256205238b87c5fab6ee25");
+        bool unknownAsset = IsCompatibilityBootstrapAgentAsset(
+            "0000000000000000000000000000000000000000000000000000000000000000");
+        bool ready = knownCompatibilityAsset && !unknownAsset;
+        WriteLog(
+            $"Compatibility bootstrap diagnostic: {(ready ? "ready" : "failed")}. " +
+            $"KnownAsset: {knownCompatibilityAsset}. UnknownAsset: {unknownAsset}.");
+        return ready ? 0 : 1;
     }
 
     private static int RunAgentReplacement(IReadOnlyList<string> args)

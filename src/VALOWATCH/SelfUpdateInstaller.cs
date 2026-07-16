@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace VALOWATCH;
@@ -13,6 +14,11 @@ internal static class SelfUpdateInstaller
         ("UpdateNative/libdave.dll", "libdave.dll"),
         ("UpdateNative/libsodium.dll", "libsodium.dll"),
         ("UpdateNative/opus.dll", "opus.dll")
+    ];
+    private static readonly (string ResourceName, string FileName, string ProcessName)[] AgentResources =
+    [
+        ("UpdateAgent/GITHUB.exe", "GITHUB.exe", "GITHUB"),
+        ("UpdateAgent/VALOWATCH_Start.exe", "VALOWATCH_Start.exe", "VALOWATCH_Start")
     ];
 
     public static bool IsUpdateInvocation(IReadOnlyList<string> args)
@@ -34,6 +40,7 @@ internal static class SelfUpdateInstaller
             StopInstalledApp(targetExecutablePath);
             replacementResult = ReplaceExecutable(targetExecutablePath);
             ExtractNativeResources(installDirectory);
+            RepairEmbeddedAgentResources(installDirectory);
             RemoveObsoleteCaptureTools(installDirectory);
             WriteUpdateCompletedMarker(installDirectory);
             StartInstalledApp(targetExecutablePath);
@@ -205,6 +212,146 @@ internal static class SelfUpdateInstaller
         }
     }
 
+    private static void RepairEmbeddedAgentResources(string installDirectory)
+    {
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        foreach ((string resourceName, string fileName, string processName) in AgentResources)
+        {
+            TryExtractEmbeddedAgentResource(
+                resourceName,
+                Path.Combine(workspaceRoot, fileName),
+                processName);
+        }
+    }
+
+    private static void TryExtractEmbeddedAgentResource(
+        string resourceName,
+        string targetPath,
+        string processName)
+    {
+        using Stream? resourceStream = typeof(SelfUpdateInstaller).Assembly.GetManifestResourceStream(resourceName);
+        if (resourceStream is null)
+        {
+            WriteLog($"Embedded agent resource was not found and will be skipped: {resourceName}");
+            return;
+        }
+
+        string temporaryPath = targetPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.new";
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory);
+            using (FileStream targetStream = new(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                resourceStream.CopyTo(targetStream);
+            }
+
+            ValidateExecutableFile(temporaryPath, $"embedded agent resource {resourceName}");
+            if (File.Exists(targetPath) && FilesHaveSameSha256(temporaryPath, targetPath))
+            {
+                File.Delete(temporaryPath);
+                WriteLog($"Embedded agent resource is already installed: {targetPath}");
+                return;
+            }
+
+            StopProcessFromPath(processName, targetPath);
+            MoveFileWithRetry(temporaryPath, targetPath, $"embedded agent resource {resourceName}");
+            ValidateExecutableFile(targetPath, $"installed agent resource {resourceName}");
+            WriteLog($"Embedded agent resource installed: {targetPath}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog($"Embedded agent resource could not be installed: {resourceName}", exception);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    WriteLog($"Temporary embedded agent file could not be removed: {temporaryPath}", exception);
+                }
+            }
+        }
+    }
+
+    private static void StopProcessFromPath(string processName, string targetExecutablePath)
+    {
+        if (!File.Exists(targetExecutablePath))
+        {
+            return;
+        }
+
+        string normalizedTargetPath = Path.GetFullPath(targetExecutablePath);
+        foreach (Process candidateProcess in Process.GetProcessesByName(processName))
+        {
+            using (candidateProcess)
+            {
+                if (candidateProcess.Id == Environment.ProcessId || !ProcessMatchesPath(candidateProcess, normalizedTargetPath))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    candidateProcess.CloseMainWindow();
+                    if (!candidateProcess.WaitForExit(3000))
+                    {
+                        candidateProcess.Kill(entireProcessTree: true);
+                        candidateProcess.WaitForExit(5000);
+                    }
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                {
+                    WriteLog($"Could not stop agent process {candidateProcess.Id}.", exception);
+                }
+            }
+        }
+    }
+
+    private static void MoveFileWithRetry(string sourcePath, string targetPath, string label)
+    {
+        Exception? lastReplacementException = null;
+        for (int replacementAttempt = 1; replacementAttempt <= 20; replacementAttempt++)
+        {
+            try
+            {
+                File.Move(sourcePath, targetPath, overwrite: true);
+                return;
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException)
+            {
+                lastReplacementException = exception;
+                if (replacementAttempt >= 20)
+                {
+                    break;
+                }
+
+                Thread.Sleep(TimeSpan.FromMilliseconds(500));
+            }
+        }
+
+        throw new IOException($"{label} remained locked after 20 replacement attempts.", lastReplacementException);
+    }
+
+    private static bool FilesHaveSameSha256(string firstPath, string secondPath)
+    {
+        byte[] firstHash = ComputeSha256(firstPath);
+        byte[] secondHash = ComputeSha256(secondPath);
+        return CryptographicOperations.FixedTimeEquals(firstHash, secondHash);
+    }
+
+    private static byte[] ComputeSha256(string filePath)
+    {
+        using FileStream fileStream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        return SHA256.HashData(fileStream);
+    }
+
     private static void ValidateExecutableFile(string filePath, string label)
     {
         FileInfo fileInfo = new(filePath);
@@ -341,6 +488,56 @@ internal static class SelfUpdateInstaller
                 IsExecutableFile(Environment.ProcessPath);
             status = $"RollbackRestored: {restored}. CurrentProcessExecutable: {currentProcessLooksExecutable}.";
             return restored && currentProcessLooksExecutable;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            status = exception.Message;
+            return false;
+        }
+    }
+
+    internal static bool RunEmbeddedAgentResourceDiagnostic(out string status)
+    {
+        try
+        {
+            List<string> statuses = [];
+            bool allResourcesReady = true;
+            foreach ((string resourceName, string fileName, _) in AgentResources)
+            {
+                using Stream? resourceStream = typeof(SelfUpdateInstaller).Assembly.GetManifestResourceStream(resourceName);
+                bool resourceReady = resourceStream is not null &&
+                    resourceStream.Length > 2 &&
+                    resourceStream.ReadByte() == 'M' &&
+                    resourceStream.ReadByte() == 'Z';
+                statuses.Add($"{fileName}: {resourceReady}");
+                allResourcesReady &= resourceReady;
+            }
+
+            status = string.Join(". ", statuses) + ".";
+            return allResourcesReady;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            status = exception.Message;
+            return false;
+        }
+    }
+
+    internal static bool RunEmbeddedAgentRepairDiagnostic(string diagnosticRoot, out string status)
+    {
+        try
+        {
+            string installDirectory = Path.Combine(diagnosticRoot, "app");
+            string workspaceRoot = diagnosticRoot;
+            Directory.CreateDirectory(installDirectory);
+            RepairEmbeddedAgentResources(installDirectory);
+
+            string agentPath = Path.Combine(workspaceRoot, "GITHUB.exe");
+            string startAgentPath = Path.Combine(workspaceRoot, "VALOWATCH_Start.exe");
+            bool agentReady = IsExecutableFile(agentPath);
+            bool startAgentReady = IsExecutableFile(startAgentPath);
+            status = $"GITHUB.exe: {agentReady}. VALOWATCH_Start.exe: {startAgentReady}.";
+            return agentReady && startAgentReady;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {

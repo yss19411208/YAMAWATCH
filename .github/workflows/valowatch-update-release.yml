@@ -66,20 +66,7 @@ jobs:
             Remove-Item -LiteralPath $modelZipPath -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Publish VALOWATCH app
-        shell: pwsh
-        run: |
-          dotnet publish .\src\VALOWATCH\VALOWATCH.csproj `
-            -c Release `
-            -r win-x64 `
-            --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:EnableCompressionInSingleFile=true `
-            "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
-            -p:IncludeSourceRevisionInInformationalVersion=false `
-            -o .\exe
-
-      - name: Prepare release asset
+      - name: Publish VALOWATCH agents for embedding
         shell: pwsh
         run: |
           dotnet publish .\src\VALOWATCH.Updater\VALOWATCH.Updater.csproj `
@@ -100,10 +87,29 @@ jobs:
             "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
             -o .\start
 
+          New-Item -ItemType Directory -Path github -Force | Out-Null
+          Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\github\GITHUB.exe -Force
+
+      - name: Publish VALOWATCH app
+        shell: pwsh
+        run: |
+          dotnet publish .\src\VALOWATCH\VALOWATCH.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
+            -p:IncludeSourceRevisionInInformationalVersion=false `
+            -o .\exe
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
           Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination .\release\VALOWATCH_App.exe -Force
           Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
-          Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\GITHUB.exe -Force
+          Copy-Item -LiteralPath .\github\GITHUB.exe -Destination .\release\GITHUB.exe -Force
           Copy-Item -LiteralPath .\start\VALOWATCH_Start.exe -Destination .\release\VALOWATCH_Start.exe -Force
 
       - name: Publish GitHub release

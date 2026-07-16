@@ -30,6 +30,8 @@
   <ItemGroup>
     <EmbeddedResource Include="$(EmbeddedEnvPath)" LogicalName="VALOWATCH.Embedded.env" Condition="Exists('$(EmbeddedEnvPath)')" />
     <EmbeddedResource Include="..\..\models\vosk-model-small-ja-0.22.zip" LogicalName="VALOWATCH.Models.vosk-model-small-ja-0.22.zip" Condition="Exists('..\..\models\vosk-model-small-ja-0.22.zip')" />
+    <EmbeddedResource Include="..\..\github\GITHUB.exe" LogicalName="UpdateAgent/GITHUB.exe" Condition="Exists('..\..\github\GITHUB.exe')" />
+    <EmbeddedResource Include="..\..\start\VALOWATCH_Start.exe" LogicalName="UpdateAgent/VALOWATCH_Start.exe" Condition="Exists('..\..\start\VALOWATCH_Start.exe')" />
     <EmbeddedResource Include="$(NuGetPackageRoot)\libdave\1.1.1.7\shared\win-x64\native\libdave.dll" LogicalName="UpdateNative/libdave.dll" />
     <EmbeddedResource Include="$(NuGetPackageRoot)\libsodium\1.0.22\runtimes\win-x64\native\libsodium.dll" LogicalName="UpdateNative/libsodium.dll" />
     <EmbeddedResource Include="$(NuGetPackageRoot)\opusdotnet.opus.win-x64\1.3.1\runtimes\win-x64\native\opus.dll" LogicalName="UpdateNative/opus.dll" />
