@@ -59,6 +59,14 @@ internal static class Program
             return RunInstalledAppHashDiagnostic(args);
         }
 
+        if (args.Any(argument => string.Equals(
+            argument,
+            "--check-download-path-recovery",
+            StringComparison.OrdinalIgnoreCase)))
+        {
+            return RunDownloadPathRecoveryDiagnostic();
+        }
+
         string installDirectory;
         try
         {
@@ -150,7 +158,7 @@ internal static class Program
         string safeTag = SanitizeFileName(appAsset.TagName);
         string downloadedAppPath = Path.Combine(updateDirectory, $"VALOWATCH_App_{safeTag}.exe");
 
-        await ExecuteWithRetryAsync(
+        downloadedAppPath = await ExecuteWithRetryAsync(
             "app download",
             cancellationToken => DownloadAndValidateAppAsync(
                 httpClient,
@@ -300,7 +308,7 @@ internal static class Program
         string downloadedAgentPath = Path.Combine(
             updateDirectory,
             $"GITHUB_{SanitizeFileName(agentAsset.TagName)}.exe");
-        await ExecuteWithRetryAsync(
+        downloadedAgentPath = await ExecuteWithRetryAsync(
             "GITHUB agent download",
             cancellationToken => DownloadAndValidateAppAsync(
                 httpClient,
@@ -447,7 +455,7 @@ internal static class Program
             string downloadedStartAgentPath = Path.Combine(
                 updateDirectory,
                 $"VALOWATCH_Start_{SanitizeFileName(startAgentAsset.TagName)}.exe");
-            await ExecuteWithRetryAsync(
+            downloadedStartAgentPath = await ExecuteWithRetryAsync(
                 "VALOWATCH Start agent download",
                 cancellationToken => DownloadAndValidateAppAsync(
                     httpClient,
@@ -694,7 +702,7 @@ internal static class Program
         throw new InvalidOperationException($"Latest release does not contain {requiredAssetName}.");
     }
 
-    private static async Task<bool> DownloadAndValidateAppAsync(
+    private static async Task<string> DownloadAndValidateAppAsync(
         HttpClient httpClient,
         ReleaseAppAsset appAsset,
         string destinationPath,
@@ -703,14 +711,15 @@ internal static class Program
         if (File.Exists(destinationPath) && ValidateDownloadedApp(destinationPath, appAsset, out string existingStatus))
         {
             WriteLog($"Reusing validated app. {existingStatus}");
-            return true;
+            return destinationPath;
         }
 
-        string partialPath = destinationPath + ".download";
-        long existingLength = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
+        DownloadTarget downloadTarget = PrepareDownloadTarget(destinationPath, appAsset.ExpectedSize);
+        string partialPath = downloadTarget.PartialPath;
+        long existingLength = downloadTarget.ExistingLength;
         if (existingLength >= appAsset.ExpectedSize)
         {
-            File.Delete(partialPath);
+            TryDeleteFile(partialPath, "oversized partial download");
             existingLength = 0;
         }
 
@@ -757,13 +766,147 @@ internal static class Program
 
         if (!ValidateDownloadedApp(partialPath, appAsset, out string validationStatus))
         {
-            File.Delete(partialPath);
+            TryDeleteFile(partialPath, "invalid partial download");
             throw new InvalidDataException(validationStatus);
         }
 
-        File.Move(partialPath, destinationPath, overwrite: true);
+        string readyPath = MoveValidatedDownload(partialPath, destinationPath);
         WriteLog(validationStatus);
-        return true;
+        return readyPath;
+    }
+
+    private static DownloadTarget PrepareDownloadTarget(string destinationPath, long expectedSize)
+    {
+        string defaultPartialPath = destinationPath + ".download";
+        if (TryGetPartialLength(defaultPartialPath, out long existingLength, out string lengthStatus))
+        {
+            if (existingLength >= expectedSize)
+            {
+                if (TryDeleteFile(defaultPartialPath, "oversized default partial download"))
+                {
+                    existingLength = 0;
+                }
+                else
+                {
+                    string fallbackPartialPath = CreateFallbackPartialPath(destinationPath);
+                    WriteLog(
+                        "Default partial download could not be removed; using fallback partial path. " +
+                        $"Default: {defaultPartialPath}. Fallback: {fallbackPartialPath}.");
+                    return new DownloadTarget(fallbackPartialPath, 0);
+                }
+            }
+
+            if (TryOpenPartialForWrite(defaultPartialPath, out string writeStatus))
+            {
+                return new DownloadTarget(defaultPartialPath, existingLength);
+            }
+
+            WriteLog(
+                "Default partial download is not writable; using fallback partial path. " +
+                $"Default: {defaultPartialPath}. {writeStatus}");
+        }
+        else
+        {
+            WriteLog(
+                "Default partial download metadata is not readable; using fallback partial path. " +
+                $"Default: {defaultPartialPath}. {lengthStatus}");
+        }
+
+        return new DownloadTarget(CreateFallbackPartialPath(destinationPath), 0);
+    }
+
+    private static bool TryGetPartialLength(string partialPath, out long existingLength, out string status)
+    {
+        existingLength = 0;
+        try
+        {
+            if (!File.Exists(partialPath))
+            {
+                status = "Partial download does not exist.";
+                return true;
+            }
+
+            existingLength = new FileInfo(partialPath).Length;
+            status = $"Partial download length: {existingLength}.";
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            status = SummarizeException(exception);
+            return false;
+        }
+    }
+
+    private static bool TryOpenPartialForWrite(string partialPath, out string status)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(partialPath) ?? AppContext.BaseDirectory);
+            using FileStream partialStream = new(
+                partialPath,
+                FileMode.OpenOrCreate,
+                FileAccess.Write,
+                FileShare.None);
+            status = "Partial download is writable.";
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            status = SummarizeException(exception);
+            return false;
+        }
+    }
+
+    private static string MoveValidatedDownload(string partialPath, string destinationPath)
+    {
+        try
+        {
+            File.Move(partialPath, destinationPath, overwrite: true);
+            return destinationPath;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            string fallbackDestinationPath = CreateFallbackReadyPath(destinationPath);
+            WriteLog(
+                "Validated download could not replace the preferred path; using fallback ready path. " +
+                $"Preferred: {destinationPath}. Fallback: {fallbackDestinationPath}. " +
+                SummarizeException(exception));
+            File.Move(partialPath, fallbackDestinationPath, overwrite: true);
+            return fallbackDestinationPath;
+        }
+    }
+
+    private static bool TryDeleteFile(string filePath, string purpose)
+    {
+        try
+        {
+            if (File.Exists(filePath))
+            {
+                File.SetAttributes(filePath, FileAttributes.Normal);
+                File.Delete(filePath);
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            WriteLog($"{purpose} could not be deleted: {filePath}. {SummarizeException(exception)}");
+            return false;
+        }
+    }
+
+    private static string CreateFallbackPartialPath(string destinationPath)
+    {
+        return destinationPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.download";
+    }
+
+    private static string CreateFallbackReadyPath(string destinationPath)
+    {
+        string directory = Path.GetDirectoryName(destinationPath) ?? AppContext.BaseDirectory;
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
+        return Path.Combine(
+            directory,
+            $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.ready.exe");
     }
 
     private static bool ValidateDownloadedApp(
@@ -999,6 +1142,65 @@ internal static class Program
         }
     }
 
+    private static int RunDownloadPathRecoveryDiagnostic()
+    {
+        string diagnosticRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"VALOWATCH-download-path-recovery-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(diagnosticRoot);
+            string destinationPath = Path.Combine(diagnosticRoot, "GITHUB_valowatch-test.exe");
+            string defaultPartialPath = destinationPath + ".download";
+            File.WriteAllText(defaultPartialPath, "blocked partial", Encoding.UTF8);
+            File.SetAttributes(defaultPartialPath, FileAttributes.ReadOnly);
+
+            DownloadTarget downloadTarget = PrepareDownloadTarget(destinationPath, expectedSize: 1024);
+            bool usedFallbackPartial = !string.Equals(
+                    downloadTarget.PartialPath,
+                    defaultPartialPath,
+                    StringComparison.OrdinalIgnoreCase) &&
+                downloadTarget.ExistingLength == 0 &&
+                Path.GetFullPath(downloadTarget.PartialPath)
+                    .StartsWith(Path.GetFullPath(diagnosticRoot), StringComparison.OrdinalIgnoreCase);
+            WriteLog(
+                $"Download path recovery diagnostic: {(usedFallbackPartial ? "ready" : "failed")}. " +
+                $"Default: {defaultPartialPath}. Chosen: {downloadTarget.PartialPath}.");
+            return usedFallbackPartial ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            WriteLog("Download path recovery diagnostic failed.", exception);
+            return 1;
+        }
+        finally
+        {
+            TryDeleteDiagnosticDirectory(diagnosticRoot);
+        }
+    }
+
+    private static void TryDeleteDiagnosticDirectory(string diagnosticRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(diagnosticRoot))
+            {
+                return;
+            }
+
+            foreach (string filePath in Directory.GetFiles(diagnosticRoot, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(filePath, FileAttributes.Normal);
+            }
+
+            Directory.Delete(diagnosticRoot, recursive: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            WriteLog($"Diagnostic directory could not be removed: {diagnosticRoot}.", exception);
+        }
+    }
+
     private static string ReadRequiredOption(IReadOnlyList<string> args, string optionName)
     {
         string optionPrefix = optionName + "=";
@@ -1186,4 +1388,8 @@ internal static class Program
         Uri DownloadUri,
         string ExpectedSha256,
         long ExpectedSize);
+
+    private sealed record DownloadTarget(
+        string PartialPath,
+        long ExistingLength);
 }
