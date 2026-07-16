@@ -44,6 +44,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     internal const string DiscordVoiceChannelConnectStartupStage = "Discord voice channel connect";
     private const string DiscordAudioCommandName = "valowatch-discord-audio";
     private const string DiscordAudioCommandEnabledOptionName = "enabled";
+    private const string StartCommandName = "start";
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
     private const string SelfDiagnosticsDownloadOptionName = "download";
@@ -207,6 +208,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .ConfigureAwait(false);
             ConfigureDiscordUserVoiceTracking(settings, gatewayContext.Guild);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
+            await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -311,6 +313,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             EnsureVoiceChannelPermissions(guild, voiceChannel);
             await EnsureDiscordAudioCommandAsync(guild, settings).ConfigureAwait(false);
+            await EnsureStartCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
 
@@ -995,6 +998,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task OnSlashCommandExecutedAsync(SocketSlashCommand command)
     {
+        WriteLog($"Slash command received: /{command.Data.Name}. User: {command.User.Id}.");
+
+        if (string.Equals(command.Data.Name, StartCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleStartSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (string.Equals(command.Data.Name, RunningAppCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleRunningAppSlashCommandAsync(command).ConfigureAwait(false);
@@ -1083,8 +1094,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task HandleRunningAppSlashCommandAsync(SocketSlashCommand command)
+    private async Task HandleStartSlashCommandAsync(SocketSlashCommand command)
     {
+        bool deferred = false;
         try
         {
             if (command.User is not SocketGuildUser guildUser)
@@ -1095,17 +1107,95 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
-            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+            if (settings is null)
             {
                 await command
-                    .RespondAsync("VALOWATCHの実行アプリ確認にはサーバー管理権限が必要です。", ephemeral: true)
+                    .RespondAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
 
+            if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
+            {
+                await command
+                    .RespondAsync("このサーバーではVALOWATCHを起動できません。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
+            await StartForVoiceActivityAsync(valorantDetected: false, lineDetected: true)
+                .ConfigureAwait(false);
+
+            await command
+                .FollowupAsync($"VALOWATCH 起動要求を受け付けました。状態: {StatusText}", ephemeral: true)
+                .ConfigureAwait(false);
+            WriteLog($"Start slash command handled for user {command.User.Id}. Status: {StatusText}.");
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException or HttpRequestException or TaskCanceledException)
+        {
+            WriteLog("Start slash command handling failed.", exception);
+            try
+            {
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync($"VALOWATCH の起動に失敗しました: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync($"VALOWATCH の起動に失敗しました: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Start slash command error response failed.", responseException);
+            }
+        }
+    }
+
+    private async Task HandleRunningAppSlashCommandAsync(SocketSlashCommand command)
+    {
+        bool deferred = false;
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+            if (settings is null)
+            {
+                await command
+                    .RespondAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
+            {
+                await command
+                    .RespondAsync("このサーバーではVALOWATCHの実行アプリを確認できません。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
             Embed embed = RunningApplicationSnapshot.BuildAllProcessDiscordEmbed();
             await command
-                .RespondAsync(embed: embed, ephemeral: true)
+                .FollowupAsync(embed: embed, ephemeral: true)
                 .ConfigureAwait(false);
             WriteLog($"Running application slash command responded to user {command.User.Id}.");
         }
@@ -1114,9 +1204,18 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             WriteLog("Running application slash command handling failed.", exception);
             try
             {
-                await command
-                    .RespondAsync("VALOWATCHの実行アプリ確認に失敗しました。", ephemeral: true)
-                    .ConfigureAwait(false);
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync("VALOWATCHの実行アプリ確認に失敗しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync("VALOWATCHの実行アプリ確認に失敗しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
             }
             catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
             {
@@ -1628,26 +1727,73 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task EnsureRunningAppCommandAsync(SocketGuild guild)
+    private async Task EnsureStartCommandAsync(SocketGuild guild)
     {
+        const string description = "VALOWATCHを起動・復旧します";
         try
         {
             var commands = await guild
                 .GetApplicationCommandsAsync()
                 .ConfigureAwait(false);
-            bool commandAlreadyExists = commands.Any(command =>
-                string.Equals(command.Name, RunningAppCommandName, StringComparison.OrdinalIgnoreCase));
-            if (commandAlreadyExists)
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, StartCommandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
             {
-                WriteLog($"Running app slash command already exists: /{RunningAppCommandName}.");
-                return;
+                if (string.Equals(existingCommand.Description, description, StringComparison.Ordinal))
+                {
+                    WriteLog($"Start slash command already exists: /{StartCommandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Start slash command replaced: /{StartCommandName}.");
+            }
+
+            SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
+                .WithName(StartCommandName)
+                .WithDescription(description)
+                .WithContextTypes(InteractionContextType.Guild);
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Start slash command registered: /{StartCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Start slash command could not be registered. " +
+                "The bot will retry registration on the next startup.",
+                exception);
+        }
+    }
+
+    private async Task EnsureRunningAppCommandAsync(SocketGuild guild)
+    {
+        const string description = "VALOWATCHが見える実行中プログラムを表示します";
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, RunningAppCommandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
+            {
+                if (string.Equals(existingCommand.Description, description, StringComparison.Ordinal))
+                {
+                    WriteLog($"Running app slash command already exists: /{RunningAppCommandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Running app slash command replaced: /{RunningAppCommandName}.");
             }
 
             SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
                 .WithName(RunningAppCommandName)
-                .WithDescription("VALOWATCHが見える範囲で実行中アプリ名を表示します")
-                .WithContextTypes(InteractionContextType.Guild)
-                .WithDefaultMemberPermissions(GuildPermission.ManageGuild);
+                .WithDescription(description)
+                .WithContextTypes(InteractionContextType.Guild);
 
             await guild
                 .CreateApplicationCommandAsync(commandBuilder.Build())

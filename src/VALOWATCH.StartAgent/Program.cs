@@ -11,10 +11,13 @@ internal static class Program
 {
     private const string SingleInstanceMutexName = "Local\\VALOWATCH.StartAgent";
     private const string StartCommandName = "start";
+    private const string AppCommandName = "app";
     private const string AgentFileName = "GITHUB.exe";
     private const string AgentProcessName = "GITHUB";
     private const string AppFileName = "VALOWATCH.exe";
     private const string AppProcessName = "VALOWATCH";
+    private const int EmbedDescriptionLimit = 4096;
+    private const int EmbedDescriptionSafetyMargin = 250;
     private static readonly byte[] DurableEnvEntropy = Encoding.UTF8.GetBytes("VALOWATCH.EnvSettings.v1");
 
     private static DiscordSocketClient? discordClient;
@@ -137,18 +140,55 @@ internal static class Program
         IReadOnlyCollection<SocketApplicationCommand> commands = await guild
             .GetApplicationCommandsAsync()
             .ConfigureAwait(false);
-        bool commandExists = commands.Any(command =>
-            string.Equals(command.Name, StartCommandName, StringComparison.OrdinalIgnoreCase));
-        if (!commandExists)
+
+        await EnsureSlashCommandAsync(
+                guild,
+                commands,
+                StartCommandName,
+                "VALOWATCHを起動・復旧します",
+                resolvedPaths)
+            .ConfigureAwait(false);
+        await EnsureSlashCommandAsync(
+                guild,
+                commands,
+                AppCommandName,
+                "VALOWATCHが見える実行中プログラムを表示します",
+                resolvedPaths)
+            .ConfigureAwait(false);
+
+        StartStackResult result = EnsureValowatchStackRunning(resolvedPaths, "StartAgent ready self-heal");
+        WriteLog(
+            resolvedPaths,
+            $"Start agent Discord ready; stack self-heal completed. GITHUB: {result.GitHubStatus}. VALOWATCH: {result.AppStatus}.");
+    }
+
+    private static async Task EnsureSlashCommandAsync(
+        SocketGuild guild,
+        IReadOnlyCollection<SocketApplicationCommand> commands,
+        string commandName,
+        string description,
+        StartAgentPaths resolvedPaths)
+    {
+        SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+            string.Equals(command.Name, commandName, StringComparison.OrdinalIgnoreCase));
+        if (existingCommand is not null)
         {
-            SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
-                .WithName(StartCommandName)
-                .WithDescription("VALOWATCHの監視と本体を起動します");
-            await guild.CreateApplicationCommandAsync(commandBuilder.Build()).ConfigureAwait(false);
-            WriteLog(resolvedPaths, "Start agent slash command registered: /start.");
+            if (string.Equals(existingCommand.Description, description, StringComparison.Ordinal))
+            {
+                WriteLog(resolvedPaths, $"Start agent slash command already exists: /{commandName}.");
+                return;
+            }
+
+            await existingCommand.DeleteAsync().ConfigureAwait(false);
+            WriteLog(resolvedPaths, $"Start agent slash command replaced: /{commandName}.");
         }
 
-        WriteLog(resolvedPaths, "Start agent Discord ready; no app launch is performed until /start is executed.");
+        SlashCommandBuilder commandBuilder = new SlashCommandBuilder()
+            .WithName(commandName)
+            .WithDescription(description)
+            .WithContextTypes(InteractionContextType.Guild);
+        await guild.CreateApplicationCommandAsync(commandBuilder.Build()).ConfigureAwait(false);
+        WriteLog(resolvedPaths, $"Start agent slash command registered: /{commandName}.");
     }
 
     private static async Task OnSlashCommandExecutedAsync(
@@ -156,6 +196,16 @@ internal static class Program
         StartAgentSettings settings,
         StartAgentPaths resolvedPaths)
     {
+        WriteLog(
+            resolvedPaths,
+            $"Start agent slash command received: /{command.Data.Name}. User: {command.User.Id}.");
+
+        if (string.Equals(command.Data.Name, AppCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleAppCommandAsync(command, settings, resolvedPaths).ConfigureAwait(false);
+            return;
+        }
+
         if (!string.Equals(command.Data.Name, StartCommandName, StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -169,18 +219,30 @@ internal static class Program
             return;
         }
 
-        if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
-        {
-            await command.RespondAsync("VALOWATCHを起動するにはサーバー管理権限が必要です。", ephemeral: true)
-                .ConfigureAwait(false);
-            return;
-        }
-
         StartStackResult result = EnsureValowatchStackRunning(resolvedPaths, $"Discord /start by {command.User.Id}");
         await command.RespondAsync(
                 $"VALOWATCH 起動要求を受け付けました。\nGITHUB: {result.GitHubStatus}\nVALOWATCH: {result.AppStatus}",
                 ephemeral: true)
             .ConfigureAwait(false);
+    }
+
+    private static async Task HandleAppCommandAsync(
+        SocketSlashCommand command,
+        StartAgentSettings settings,
+        StartAgentPaths resolvedPaths)
+    {
+        if (command.User is not SocketGuildUser guildUser ||
+            guildUser.Guild.Id != settings.GuildId)
+        {
+            await command.RespondAsync("このサーバーではVALOWATCHの実行アプリを確認できません。", ephemeral: true)
+                .ConfigureAwait(false);
+            return;
+        }
+
+        await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+        Embed embed = BuildRunningProcessEmbed(resolvedPaths);
+        await command.FollowupAsync(embed: embed, ephemeral: true).ConfigureAwait(false);
+        WriteLog(resolvedPaths, $"Start agent /app responded to user {command.User.Id}.");
     }
 
     private static StartStackResult EnsureValowatchStackRunning(StartAgentPaths resolvedPaths, string reason)
@@ -231,8 +293,15 @@ internal static class Program
             processStartInfo.ArgumentList.Add(argument);
         }
 
-        Process.Start(processStartInfo);
-        return "start requested";
+        try
+        {
+            Process.Start(processStartInfo);
+            return "start requested";
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return $"start failed: {SummarizeException(exception)}";
+        }
     }
 
     private static bool IsProcessRunningFromPath(string processName, string expectedPath)
@@ -272,6 +341,191 @@ internal static class Program
         catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
         {
         }
+    }
+
+    private static Embed BuildRunningProcessEmbed(StartAgentPaths resolvedPaths)
+    {
+        SortedDictionary<string, int> processCounts = new(StringComparer.OrdinalIgnoreCase);
+        int totalProcessCount = 0;
+        int privacyFilteredProcessCount = 0;
+        foreach (Process process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                totalProcessCount++;
+                string processName;
+                try
+                {
+                    processName = process.ProcessName.Trim();
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                    privacyFilteredProcessCount++;
+                    continue;
+                }
+
+                string displayName = NormalizeProcessName(processName);
+                if (!IsUsefulProcessDisplayName(displayName))
+                {
+                    privacyFilteredProcessCount++;
+                    continue;
+                }
+
+                processCounts.TryGetValue(displayName, out int existingCount);
+                processCounts[displayName] = existingCount + 1;
+            }
+        }
+
+        string description = BuildProcessListDescription(processCounts, out int omittedProcessNameCount);
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH 実行中プログラム",
+            Description = description,
+            Color = new Discord.Color(63, 185, 80),
+            Timestamp = DateTimeOffset.Now
+        };
+        embedBuilder.AddField("対象", "タスクバー以外も含む実行中プログラム", inline: false);
+        embedBuilder.AddField("件数", $"{processCounts.Count}種類 / {totalProcessCount}プロセス", inline: true);
+        embedBuilder.AddField(
+            "省略",
+            omittedProcessNameCount == 0 && privacyFilteredProcessCount == 0
+                ? "なし"
+                : $"表示上限 {omittedProcessNameCount}件 / 内部系 {privacyFilteredProcessCount}件",
+            inline: true);
+        embedBuilder.AddField(
+            "VALOWATCH",
+            $"GITHUB: {ProcessStateText(AgentProcessName, resolvedPaths.GitHubAgentPath)}\n" +
+            $"VALOWATCH: {ProcessStateText(AppProcessName, resolvedPaths.ValowatchAppPath)}",
+            inline: false);
+        embedBuilder.WithFooter("フルパス、ウィンドウ名、起動引数、PID、ユーザー名は送信していません");
+        return embedBuilder.Build();
+    }
+
+    private static string ProcessStateText(string processName, string executablePath)
+    {
+        if (!File.Exists(executablePath))
+        {
+            return "missing";
+        }
+
+        return IsProcessRunningFromPath(processName, executablePath) ? "running" : "stopped";
+    }
+
+    private static string NormalizeProcessName(string processName)
+    {
+        string normalizedProcessName = NormalizeDisplayName(processName)
+            .Replace("_", " ", StringComparison.Ordinal);
+        const string shippingSuffix = "-Win64-Shipping";
+        return normalizedProcessName.EndsWith(shippingSuffix, StringComparison.OrdinalIgnoreCase)
+            ? normalizedProcessName[..^shippingSuffix.Length]
+            : normalizedProcessName;
+    }
+
+    private static string NormalizeDisplayName(string displayName)
+    {
+        return string.Join(
+            " ",
+            displayName
+                .Replace('\u00A0', ' ')
+                .Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    private static bool IsUsefulProcessDisplayName(string displayName)
+    {
+        string normalizedDisplayName = NormalizeDisplayName(displayName);
+        if (normalizedDisplayName.Length == 0)
+        {
+            return false;
+        }
+
+        string[] internalProcessNames =
+        [
+            "AggregatorHost",
+            "ApplicationFrameHost",
+            "audiodg",
+            "backgroundTaskHost",
+            "conhost",
+            "csrss",
+            "ctfmon",
+            "dllhost",
+            "dwm",
+            "fontdrvhost",
+            "Idle",
+            "LockApp",
+            "lsass",
+            "Memory Compression",
+            "MoUsoCoreWorker",
+            "Registry",
+            "RuntimeBroker",
+            "SearchApp",
+            "SearchHost",
+            "SearchIndexer",
+            "Secure System",
+            "SecurityHealthService",
+            "services",
+            "ShellExperienceHost",
+            "sihost",
+            "smss",
+            "spoolsv",
+            "StartMenuExperienceHost",
+            "svchost",
+            "System",
+            "SystemSettingsBroker",
+            "taskhostw",
+            "TextInputHost",
+            "unsecapp",
+            "UserOOBEBroker",
+            "wininit",
+            "winlogon",
+            "WmiPrvSE",
+            "WUDFHost"
+        ];
+        return !internalProcessNames.Any(processName =>
+            string.Equals(processName, normalizedDisplayName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string BuildProcessListDescription(
+        IReadOnlyDictionary<string, int> processCounts,
+        out int omittedProcessNameCount)
+    {
+        List<string> formattedProcessNames = processCounts
+            .Select(pair => pair.Value <= 1 ? pair.Key : $"{pair.Key} ({pair.Value})")
+            .ToList();
+        omittedProcessNameCount = 0;
+
+        while (formattedProcessNames.Count > 0)
+        {
+            string description = string.Join(Environment.NewLine, formattedProcessNames.Select(name => $"• {name}"));
+            if (description.Length <= EmbedDescriptionLimit - EmbedDescriptionSafetyMargin)
+            {
+                return omittedProcessNameCount == 0
+                    ? description
+                    : $"{description}{Environment.NewLine}• ...ほか{omittedProcessNameCount}件";
+            }
+
+            formattedProcessNames.RemoveAt(formattedProcessNames.Count - 1);
+            omittedProcessNameCount++;
+        }
+
+        return omittedProcessNameCount == 0
+            ? "表示できる実行中プログラムはありません。"
+            : $"表示できる実行中プログラムがありません。省略: {omittedProcessNameCount}件";
+    }
+
+    private static string SummarizeException(Exception exception)
+    {
+        List<string> exceptionParts = [];
+        for (Exception? currentException = exception;
+             currentException is not null && exceptionParts.Count < 2;
+             currentException = currentException.InnerException)
+        {
+            string message = currentException.Message
+                .Replace(Environment.NewLine, " ", StringComparison.Ordinal)
+                .Trim();
+            exceptionParts.Add($"{currentException.GetType().Name}: {message}");
+        }
+
+        return string.Join(" -> ", exceptionParts);
     }
 
     private sealed record StartStackResult(string GitHubStatus, string AppStatus);
