@@ -62,6 +62,18 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-discord-retry-policy", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDiscordRetryPolicyDiagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-self-update-rollback", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunSelfUpdateRollbackDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-microphone", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneDiagnostic();
@@ -770,6 +782,99 @@ static class Program
             }
 
             Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunDiscordRetryPolicyDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            bool voiceConnectTimeoutRecyclesGateway =
+                !DiscordBotVoiceRelay.ShouldKeepGatewayOnlineAfterStartupTimeout(
+                    DiscordBotVoiceRelay.DiscordVoiceChannelConnectStartupStage,
+                    isOnline: true,
+                    hasDiscordClient: true);
+            bool gatewayTimeoutKeepsReusableGateway =
+                DiscordBotVoiceRelay.ShouldKeepGatewayOnlineAfterStartupTimeout(
+                    "Discord command registration",
+                    isOnline: true,
+                    hasDiscordClient: true);
+            bool disconnectedGatewayIsNotKept =
+                !DiscordBotVoiceRelay.ShouldKeepGatewayOnlineAfterStartupTimeout(
+                    "Discord command registration",
+                    isOnline: false,
+                    hasDiscordClient: true);
+            bool missingClientIsNotKept =
+                !DiscordBotVoiceRelay.ShouldKeepGatewayOnlineAfterStartupTimeout(
+                    "Discord command registration",
+                    isOnline: true,
+                    hasDiscordClient: false);
+            bool retryPolicyReady =
+                voiceConnectTimeoutRecyclesGateway &&
+                gatewayTimeoutKeepsReusableGateway &&
+                disconnectedGatewayIsNotKept &&
+                missingClientIsNotKept;
+
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Discord retry policy check: " +
+                $"{(retryPolicyReady ? "ready" : "failed")}. " +
+                $"VoiceConnectRecyclesGateway: {voiceConnectTimeoutRecyclesGateway}. " +
+                $"ReusableGatewayKept: {gatewayTimeoutKeepsReusableGateway}. " +
+                $"DisconnectedGatewayNotKept: {disconnectedGatewayIsNotKept}. " +
+                $"MissingClientNotKept: {missingClientIsNotKept}.");
+            Environment.ExitCode = retryPolicyReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Discord retry policy check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunSelfUpdateRollbackDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string diagnosticRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"VALOWATCH-self-update-rollback-{Guid.NewGuid():N}");
+
+        try
+        {
+            bool rollbackReady = SelfUpdateInstaller.RunRollbackSafetyDiagnostic(
+                diagnosticRoot,
+                out string status);
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Self-update rollback check: " +
+                $"{(rollbackReady ? "ready" : "failed")}. {status}");
+            Environment.ExitCode = rollbackReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Self-update rollback check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(diagnosticRoot))
+                {
+                    Directory.Delete(diagnosticRoot, recursive: true);
+                }
+            }
+            catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 

@@ -41,6 +41,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan DiscordVoiceConnectTimeout = TimeSpan.FromSeconds(45);
     private static readonly TimeSpan DiscordShutdownTimeout = TimeSpan.FromSeconds(5);
     private const bool DiscordVoiceDaveEncryptionEnabled = true;
+    internal const string DiscordVoiceChannelConnectStartupStage = "Discord voice channel connect";
     private const string DiscordAudioCommandName = "valowatch-discord-audio";
     private const string DiscordAudioCommandEnabledOptionName = "enabled";
     private const string RunningAppCommandName = "app";
@@ -304,11 +305,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
-            startupStage = "Discord voice channel connect";
-            audioClient = await voiceChannel
-                .ConnectAsync(selfDeaf: true, selfMute: false)
-                .WaitAsync(DiscordVoiceConnectTimeout)
-                .ConfigureAwait(false);
+            startupStage = DiscordVoiceChannelConnectStartupStage;
+            audioClient = await ConnectVoiceChannelWithTimeoutAsync(voiceChannel).ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: true. SelfMute: false.");
             if (valorantDetected)
             {
@@ -364,7 +362,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             WriteLog($"Discord startup timed out during {startupStage}. Stopping Discord client before retry.", exception);
             await StopCoreAsync(
                     resetValorantNotificationSession: false,
-                    keepDiscordGatewayOnline: IsOnline && discordClient is not null)
+                    keepDiscordGatewayOnline: ShouldKeepGatewayOnlineAfterStartupTimeout(
+                        startupStage,
+                        IsOnline,
+                        discordClient is not null))
                 .ConfigureAwait(false);
             StatusText = $"Discord timed out: {startupStage}";
         }
@@ -500,6 +501,56 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ? null
             : guild.GetTextChannel(settings.TextChannelId);
         return new DiscordGatewayContext(client, guild);
+    }
+
+    private async Task<IAudioClient> ConnectVoiceChannelWithTimeoutAsync(SocketVoiceChannel voiceChannel)
+    {
+        Task<IAudioClient> connectTask = voiceChannel.ConnectAsync(selfDeaf: true, selfMute: false);
+        Task timeoutTask = Task.Delay(DiscordVoiceConnectTimeout);
+        Task completedTask = await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
+        if (ReferenceEquals(completedTask, connectTask))
+        {
+            return await connectTask.ConfigureAwait(false);
+        }
+
+        _ = CleanupLateVoiceConnectAsync(connectTask, voiceChannel.Id);
+        throw new TimeoutException(
+            $"Discord voice channel connect did not complete within {DiscordVoiceConnectTimeout.TotalSeconds:0} seconds.");
+    }
+
+    private async Task CleanupLateVoiceConnectAsync(Task<IAudioClient> connectTask, ulong voiceChannelId)
+    {
+        try
+        {
+            IAudioClient lateAudioClient = await connectTask.ConfigureAwait(false);
+            WriteLog(
+                "Discord voice channel connect completed after the startup timeout; " +
+                $"stopping stale voice client for channel {voiceChannelId}.");
+            await CompleteShutdownOperationAsync(
+                    () => lateAudioClient.StopAsync(),
+                    "late Discord voice client stop")
+                .ConfigureAwait(false);
+            lateAudioClient.Dispose();
+        }
+        catch (Exception exception)
+        {
+            WriteLog(
+                "Discord voice channel connect finished after timeout with no reusable voice client.",
+                exception);
+        }
+    }
+
+    internal static bool ShouldKeepGatewayOnlineAfterStartupTimeout(
+        string startupStage,
+        bool isOnline,
+        bool hasDiscordClient)
+    {
+        return !string.Equals(
+                startupStage,
+                DiscordVoiceChannelConnectStartupStage,
+                StringComparison.Ordinal) &&
+            isOnline &&
+            hasDiscordClient;
     }
 
     public async Task<bool> NotifyLineOpenedAsync(string message)

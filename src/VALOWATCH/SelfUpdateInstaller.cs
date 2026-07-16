@@ -23,6 +23,7 @@ internal static class SelfUpdateInstaller
 
     public static int Run(IReadOnlyList<string> args)
     {
+        ReplacementResult? replacementResult = null;
         try
         {
             string installDirectory = ParseInstallDirectory(args);
@@ -31,17 +32,19 @@ internal static class SelfUpdateInstaller
 
             Directory.CreateDirectory(installDirectory);
             StopInstalledApp(targetExecutablePath);
-            ReplaceExecutable(targetExecutablePath);
+            replacementResult = ReplaceExecutable(targetExecutablePath);
             ExtractNativeResources(installDirectory);
             RemoveObsoleteCaptureTools(installDirectory);
             WriteUpdateCompletedMarker(installDirectory);
             StartInstalledApp(targetExecutablePath);
+            RemoveBackup(replacementResult);
             WriteLog($"Self update completed. Target: {targetExecutablePath}");
             return 0;
         }
-        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
         {
             WriteLog("Self update failed.", exception);
+            RestoreBackup(replacementResult);
             return 1;
         }
     }
@@ -124,12 +127,15 @@ internal static class SelfUpdateInstaller
         }
     }
 
-    private static void ReplaceExecutable(string targetExecutablePath)
+    private static ReplacementResult ReplaceExecutable(string targetExecutablePath)
     {
         string sourceExecutablePath = Environment.ProcessPath
             ?? throw new InvalidOperationException("Self update source executable path is unavailable.");
         string temporaryPath = targetExecutablePath + $".{Environment.ProcessId}.new";
+        string backupPath = targetExecutablePath + ".previous";
+        string? activeBackupPath = null;
         File.Copy(sourceExecutablePath, temporaryPath, overwrite: true);
+        ValidateExecutableFile(temporaryPath, "temporary update executable");
 
         Exception? lastReplacementException = null;
         try
@@ -139,11 +145,18 @@ internal static class SelfUpdateInstaller
                 StopInstalledApp(targetExecutablePath);
                 try
                 {
+                    if (File.Exists(targetExecutablePath))
+                    {
+                        File.Copy(targetExecutablePath, backupPath, overwrite: true);
+                        activeBackupPath = backupPath;
+                    }
+
                     File.Move(temporaryPath, targetExecutablePath, overwrite: true);
-                    return;
+                    ValidateExecutableFile(targetExecutablePath, "installed update executable");
+                    return new ReplacementResult(targetExecutablePath, activeBackupPath);
                 }
                 catch (Exception exception) when (
-                    exception is IOException or UnauthorizedAccessException &&
+                    (exception is IOException or UnauthorizedAccessException) &&
                     replacementAttempt < 20)
                 {
                     lastReplacementException = exception;
@@ -192,6 +205,21 @@ internal static class SelfUpdateInstaller
         }
     }
 
+    private static void ValidateExecutableFile(string filePath, string label)
+    {
+        FileInfo fileInfo = new(filePath);
+        if (!fileInfo.Exists || fileInfo.Length < 2)
+        {
+            throw new IOException($"{label} is missing or empty: {filePath}");
+        }
+
+        using FileStream executableStream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (executableStream.ReadByte() != 'M' || executableStream.ReadByte() != 'Z')
+        {
+            throw new InvalidOperationException($"{label} is not a Windows PE executable: {filePath}");
+        }
+    }
+
     private static void RemoveObsoleteCaptureTools(string installDirectory)
     {
         string normalizedInstallDirectory = Path.GetFullPath(installDirectory);
@@ -230,15 +258,117 @@ internal static class SelfUpdateInstaller
 
     private static void StartInstalledApp(string targetExecutablePath)
     {
+        ValidateExecutableFile(targetExecutablePath, "updated VALOWATCH executable");
         ProcessStartInfo processStartInfo = new()
         {
             FileName = targetExecutablePath,
             UseShellExecute = true,
             WorkingDirectory = Path.GetDirectoryName(targetExecutablePath)
         };
-        if (Process.Start(processStartInfo) is null)
+        Process? startedProcess = Process.Start(processStartInfo);
+        if (startedProcess is null)
         {
             throw new InvalidOperationException("Updated VALOWATCH could not be started.");
+        }
+
+        using (startedProcess)
+        {
+            if (startedProcess.WaitForExit(3000))
+            {
+                throw new InvalidOperationException(
+                    $"Updated VALOWATCH exited immediately with code {startedProcess.ExitCode}.");
+            }
+        }
+    }
+
+    private static void RestoreBackup(ReplacementResult? replacementResult)
+    {
+        if (replacementResult?.BackupPath is null || !File.Exists(replacementResult.BackupPath))
+        {
+            return;
+        }
+
+        try
+        {
+            StopInstalledApp(replacementResult.TargetExecutablePath);
+            File.Copy(replacementResult.BackupPath, replacementResult.TargetExecutablePath, overwrite: true);
+            ValidateExecutableFile(replacementResult.TargetExecutablePath, "restored VALOWATCH executable");
+            StartInstalledApp(replacementResult.TargetExecutablePath);
+            WriteLog($"Previous VALOWATCH executable restored after failed update: {replacementResult.BackupPath}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("Previous VALOWATCH executable could not be restored after failed update.", exception);
+        }
+    }
+
+    private static void RemoveBackup(ReplacementResult replacementResult)
+    {
+        if (replacementResult.BackupPath is null || !File.Exists(replacementResult.BackupPath))
+        {
+            return;
+        }
+
+        try
+        {
+            File.Delete(replacementResult.BackupPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            WriteLog($"Previous VALOWATCH backup could not be removed: {replacementResult.BackupPath}", exception);
+        }
+    }
+
+    internal static bool RunRollbackSafetyDiagnostic(string diagnosticRoot, out string status)
+    {
+        try
+        {
+            string installDirectory = Path.Combine(diagnosticRoot, "app");
+            Directory.CreateDirectory(installDirectory);
+            string targetExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
+            string backupPath = targetExecutablePath + ".previous";
+            byte[] oldBytes = Encoding.UTF8.GetBytes("old executable placeholder");
+            byte[] damagedBytes = Encoding.UTF8.GetBytes("damaged executable placeholder");
+            File.WriteAllBytes(targetExecutablePath, damagedBytes);
+            File.WriteAllBytes(backupPath, oldBytes);
+
+            ReplacementResult replacementResult = new(targetExecutablePath, backupPath);
+            RestoreBackupWithoutStarting(replacementResult);
+            byte[] restoredBytes = File.ReadAllBytes(targetExecutablePath);
+            bool restored = restoredBytes.SequenceEqual(oldBytes);
+            bool currentProcessLooksExecutable = Environment.ProcessPath is not null &&
+                File.Exists(Environment.ProcessPath) &&
+                IsExecutableFile(Environment.ProcessPath);
+            status = $"RollbackRestored: {restored}. CurrentProcessExecutable: {currentProcessLooksExecutable}.";
+            return restored && currentProcessLooksExecutable;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            status = exception.Message;
+            return false;
+        }
+    }
+
+    private static void RestoreBackupWithoutStarting(ReplacementResult replacementResult)
+    {
+        if (replacementResult.BackupPath is null || !File.Exists(replacementResult.BackupPath))
+        {
+            throw new IOException("Rollback backup is missing.");
+        }
+
+        File.Copy(replacementResult.BackupPath, replacementResult.TargetExecutablePath, overwrite: true);
+    }
+
+    private static bool IsExecutableFile(string filePath)
+    {
+        try
+        {
+            ValidateExecutableFile(filePath, "diagnostic executable");
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            return false;
         }
     }
 
@@ -258,4 +388,6 @@ internal static class SelfUpdateInstaller
         {
         }
     }
+
+    private sealed record ReplacementResult(string TargetExecutablePath, string? BackupPath);
 }
