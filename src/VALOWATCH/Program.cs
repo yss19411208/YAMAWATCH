@@ -130,6 +130,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-discord-voice-context", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDiscordVoiceContextDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-watch-agent-supervisor", StringComparison.OrdinalIgnoreCase)))
         {
             RunWatchAgentSupervisorDiagnostic();
@@ -1482,6 +1488,38 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             TryWriteDiagnosticFailure(logFilePath, "LINE voice trigger check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunDiscordVoiceContextDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            string message = DiscordBotVoiceRelay.BuildDiscordVoiceContextMessage(
+                "テスト鯖",
+                "作戦VC");
+            bool messageIsReady =
+                message.Contains("Discord会話", StringComparison.Ordinal) &&
+                message.Contains("鯖: テスト鯖", StringComparison.Ordinal) &&
+                message.Contains("VC: 作戦VC", StringComparison.Ordinal) &&
+                !message.Contains("Guild", StringComparison.OrdinalIgnoreCase) &&
+                !message.Contains("ChannelId", StringComparison.OrdinalIgnoreCase) &&
+                !message.Contains("```", StringComparison.Ordinal);
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Discord voice context check: " +
+                $"{(messageIsReady ? "ready" : "failed")}. Message: {message.Replace(Environment.NewLine, " / ", StringComparison.Ordinal)}");
+            Environment.ExitCode = messageIsReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Discord voice context check", exception);
             Environment.ExitCode = 1;
         }
     }

@@ -120,6 +120,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private ulong currentVoiceGuildId;
     private string currentVoiceGuildName = string.Empty;
     private string currentVoiceChannelName = string.Empty;
+    private string lastDiscordVoiceContextNotificationKey = string.Empty;
     private DateTimeOffset audioStatsStartedAt = DateTimeOffset.MinValue;
     private DateTimeOffset lastAudioStatsLogTime = DateTimeOffset.MinValue;
     private DateTimeOffset lastDiscordNetworkWarningLoggedAt = DateTimeOffset.MinValue;
@@ -308,6 +309,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             startupStage = DiscordVoiceChannelConnectStartupStage;
             audioClient = await ConnectVoiceChannelWithTimeoutAsync(voiceChannel).ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: true. SelfMute: false.");
+            await SendDiscordVoiceContextNotificationIfNeededAsync(guild, voiceChannel).ConfigureAwait(false);
             if (valorantDetected)
             {
                 await SendValorantOpenedNotificationIfNeededAsync(settings).ConfigureAwait(false);
@@ -683,6 +685,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             {
                 valorantOpenedNotificationSentForCurrentSession = false;
                 microphoneNotificationSentForCurrentSession = false;
+                lastDiscordVoiceContextNotificationKey = string.Empty;
                 lastNotifiedMicrophoneDeviceName = string.Empty;
                 lastValorantOpenedMessageSentAtUtc = DateTimeOffset.MinValue;
                 lastMicrophoneMessageSentAtUtc = DateTimeOffset.MinValue;
@@ -1663,13 +1666,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         LineProcessLoopbackWaveProvider? discordProvider = discordProcessLoopbackProvider;
         if (discordProcessAudioRuntimeEnabled && discordProvider?.IsCapturing == true)
         {
-            string guildName = string.IsNullOrWhiteSpace(currentVoiceGuildName)
-                ? "不明なサーバー"
-                : currentVoiceGuildName;
-            string voiceChannelName = string.IsNullOrWhiteSpace(currentVoiceChannelName)
-                ? "不明なVC"
-                : currentVoiceChannelName;
-            labels.Add($"Discord会話: {guildName} / {voiceChannelName}");
+            labels.Add(BuildDiscordConversationLabel(currentVoiceGuildName, currentVoiceChannelName));
         }
 
         return labels.Count == 0 ? "マイク" : string.Join(Environment.NewLine, labels);
@@ -2705,6 +2702,47 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private async Task SendDiscordVoiceContextNotificationIfNeededAsync(
+        SocketGuild guild,
+        SocketVoiceChannel voiceChannel)
+    {
+        string guildName = NormalizeDiscordDisplayName(guild.Name, "不明な鯖");
+        string voiceChannelName = NormalizeDiscordDisplayName(voiceChannel.Name, "不明なVC");
+        string notificationKey = $"{guild.Id}:{voiceChannel.Id}:{guildName}:{voiceChannelName}";
+
+        lock (stateLock)
+        {
+            if (string.Equals(
+                    lastDiscordVoiceContextNotificationKey,
+                    notificationKey,
+                    StringComparison.Ordinal))
+            {
+                WriteLog("Skipped duplicate Discord voice context notification during the current voice session.");
+                return;
+            }
+
+            lastDiscordVoiceContextNotificationKey = notificationKey;
+        }
+
+        if (await SendRequestedDiscordNotificationAsync(
+                BuildDiscordVoiceContextMessage(guildName, voiceChannelName))
+            .ConfigureAwait(false))
+        {
+            return;
+        }
+
+        lock (stateLock)
+        {
+            if (string.Equals(
+                    lastDiscordVoiceContextNotificationKey,
+                    notificationKey,
+                    StringComparison.Ordinal))
+            {
+                lastDiscordVoiceContextNotificationKey = string.Empty;
+            }
+        }
+    }
+
     private async Task<bool> SendMicrophoneNotificationIfNeededAsync(string microphoneDeviceName)
     {
         lock (stateLock)
@@ -2730,6 +2768,29 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         return notificationSent;
+    }
+
+    internal static string BuildDiscordVoiceContextMessage(string guildName, string voiceChannelName)
+    {
+        return BuildDiscordConversationLabel(guildName, voiceChannelName);
+    }
+
+    private static string BuildDiscordConversationLabel(string guildName, string voiceChannelName)
+    {
+        string safeGuildName = NormalizeDiscordDisplayName(guildName, "不明な鯖");
+        string safeVoiceChannelName = NormalizeDiscordDisplayName(voiceChannelName, "不明なVC");
+        return $"Discord会話{Environment.NewLine}鯖: {safeGuildName}{Environment.NewLine}VC: {safeVoiceChannelName}";
+    }
+
+    private static string NormalizeDiscordDisplayName(string? displayName, string fallback)
+    {
+        string trimmedName = string.IsNullOrWhiteSpace(displayName)
+            ? fallback
+            : displayName.Trim();
+        return trimmedName
+            .Replace("\r\n", " ", StringComparison.Ordinal)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ');
     }
 
     private bool TryReserveNotificationSlot(ref DateTimeOffset lastSentAtUtc)
