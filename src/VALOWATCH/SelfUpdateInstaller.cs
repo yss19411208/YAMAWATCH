@@ -251,13 +251,34 @@ internal static class SelfUpdateInstaller
             return;
         }
 
+        string existingAgentStatus;
+        if (!File.Exists(targetPath))
+        {
+            existingAgentStatus = "target is missing.";
+        }
+        else if (TryValidateExecutableFileWithRetry(
+            targetPath,
+            $"existing agent resource {resourceName}",
+            out existingAgentStatus))
+        {
+            WriteLog(
+                "Embedded agent resource rewrite skipped because the installed agent is already executable; " +
+                "the dedicated GITHUB agent will handle release-asset updates. " +
+                $"Target: {targetPath}. {existingAgentStatus}");
+            return;
+        }
+
         string temporaryPath = targetPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.new";
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory);
-            using (FileStream targetStream = new(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            WriteLog(
+                "Embedded agent resource repair is attempting extraction because the installed agent is missing or unreadable. " +
+                $"Target: {targetPath}. Status: {existingAgentStatus}");
+            using (FileStream targetStream = new(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
             {
                 resourceStream.CopyTo(targetStream);
+                targetStream.Flush(flushToDisk: true);
             }
 
             ValidateExecutableFileWithRetry(temporaryPath, $"embedded agent resource {resourceName}");
@@ -596,6 +617,39 @@ internal static class SelfUpdateInstaller
             bool startAgentReady = IsExecutableFile(startAgentPath);
             status = $"GITHUB.exe: {agentReady}. VALOWATCH_Start.exe: {startAgentReady}.";
             return agentReady && startAgentReady;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            status = exception.Message;
+            return false;
+        }
+    }
+
+    internal static bool RunEmbeddedAgentExistingTargetSkipDiagnostic(string diagnosticRoot, out string status)
+    {
+        try
+        {
+            string installDirectory = Path.Combine(diagnosticRoot, "app");
+            Directory.CreateDirectory(installDirectory);
+
+            foreach ((_, string fileName, _) in AgentResources)
+            {
+                File.WriteAllBytes(
+                    Path.Combine(installDirectory, fileName),
+                    Encoding.ASCII.GetBytes("MZ-existing-agent-placeholder"));
+            }
+
+            byte[] originalAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "GITHUB.exe"));
+            byte[] originalStartAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "VALOWATCH_Start.exe"));
+
+            RepairEmbeddedAgentResources(installDirectory);
+
+            byte[] currentAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "GITHUB.exe"));
+            byte[] currentStartAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "VALOWATCH_Start.exe"));
+            bool agentWasSkipped = originalAgentBytes.SequenceEqual(currentAgentBytes);
+            bool startAgentWasSkipped = originalStartAgentBytes.SequenceEqual(currentStartAgentBytes);
+            status = $"GITHUB.exe skipped: {agentWasSkipped}. VALOWATCH_Start.exe skipped: {startAgentWasSkipped}.";
+            return agentWasSkipped && startAgentWasSkipped;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {

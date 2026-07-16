@@ -86,6 +86,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-embedded-agent-existing-skip", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunEmbeddedAgentExistingTargetSkipDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-microphone", StringComparison.OrdinalIgnoreCase)))
         {
             RunMicrophoneDiagnostic();
@@ -949,6 +955,47 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Embedded agent repair check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(diagnosticRoot))
+                {
+                    Directory.Delete(diagnosticRoot, recursive: true);
+                }
+            }
+            catch (Exception cleanupException) when (cleanupException is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    private static void RunEmbeddedAgentExistingTargetSkipDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string diagnosticRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"VALOWATCH-embedded-agent-skip-{Guid.NewGuid():N}");
+
+        try
+        {
+            bool skipReady = SelfUpdateInstaller.RunEmbeddedAgentExistingTargetSkipDiagnostic(
+                diagnosticRoot,
+                out string status);
+            Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Embedded agent existing-target skip check: " +
+                $"{(skipReady ? "ready" : "failed")}. {status}");
+            Environment.ExitCode = skipReady ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Embedded agent existing-target skip check", exception);
             Environment.ExitCode = 1;
         }
         finally
