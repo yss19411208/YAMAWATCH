@@ -82,6 +82,7 @@ public sealed class DiscordBotSettingsStore
             GuildId = 0,
             VoiceChannelId = 0,
             TextChannelId = 0,
+            MonitoredDiscordUserId = 0,
             ValorantOpenedMessage = "VALORANTを開きました",
             StreamMicrophoneAudio = true,
             MicrophoneDeviceName = string.Empty,
@@ -159,6 +160,17 @@ public sealed class DiscordBotSettingsStore
         if (TryGetUnsignedLong(envValues, out ulong textChannelId, "DISCORD_TEXT_CHANNEL_ID", "DISCORD_STATUS_CHANNEL_ID", "TEXT_CHANNEL_ID", "STATUS_CHANNEL_ID"))
         {
             settings.TextChannelId = textChannelId;
+        }
+
+        if (TryGetUnsignedLong(
+            envValues,
+            out ulong monitoredDiscordUserId,
+            "DISCORD_MONITORED_USER_ID",
+            "VALOWATCH_DISCORD_USER_ID",
+            "DISCORD_USER_ID",
+            "DISCORD_OWNER_USER_ID"))
+        {
+            settings.MonitoredDiscordUserId = monitoredDiscordUserId;
         }
 
         if (TryGetString(envValues, out string valorantOpenedMessage, "DISCORD_VALORANT_OPENED_MESSAGE", "VALOWATCH_VALORANT_OPENED_MESSAGE"))
@@ -293,6 +305,7 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_GUILD_ID=0",
             "DISCORD_VOICE_CHANNEL_ID=0",
             "DISCORD_TEXT_CHANNEL_ID=0",
+            "DISCORD_MONITORED_USER_ID=0",
             "DISCORD_STREAM_MIC_AUDIO=true",
             "DISCORD_MIC_DEVICE_NAME=",
             "DISCORD_MIC_VOLUME=0.85",

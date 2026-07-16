@@ -56,6 +56,22 @@ internal static class SelfUpdateInstaller
         }
     }
 
+    internal static void RepairEmbeddedAgentResourcesForInstalledApp(
+        string installDirectory,
+        Action<string, Exception?> writeLog)
+    {
+        try
+        {
+            ValidateInstallDirectory(installDirectory);
+            RepairEmbeddedAgentResources(installDirectory);
+            writeLog("Embedded update agents were checked for the installed app.", null);
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
+        {
+            writeLog("Embedded update agents could not be checked for the installed app.", exception);
+        }
+    }
+
     private static string ParseInstallDirectory(IReadOnlyList<string> args)
     {
         string optionPrefix = InstallDirectoryOption + "=";
@@ -244,7 +260,7 @@ internal static class SelfUpdateInstaller
                 resourceStream.CopyTo(targetStream);
             }
 
-            ValidateExecutableFile(temporaryPath, $"embedded agent resource {resourceName}");
+            ValidateExecutableFileWithRetry(temporaryPath, $"embedded agent resource {resourceName}");
             if (File.Exists(targetPath) && FilesHaveSameSha256(temporaryPath, targetPath))
             {
                 File.Delete(temporaryPath);
@@ -254,8 +270,16 @@ internal static class SelfUpdateInstaller
 
             StopProcessFromPath(processName, targetPath);
             MoveFileWithRetry(temporaryPath, targetPath, $"embedded agent resource {resourceName}");
-            ValidateExecutableFile(targetPath, $"installed agent resource {resourceName}");
-            WriteLog($"Embedded agent resource installed: {targetPath}");
+            if (TryValidateExecutableFileWithRetry(targetPath, $"installed agent resource {resourceName}", out string validationStatus))
+            {
+                WriteLog($"Embedded agent resource installed: {targetPath}");
+            }
+            else
+            {
+                WriteLog(
+                    $"Embedded agent resource was placed but final validation is still blocked: {targetPath}. " +
+                    validationStatus);
+            }
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException or System.ComponentModel.Win32Exception)
         {
@@ -335,6 +359,43 @@ internal static class SelfUpdateInstaller
         }
 
         throw new IOException($"{label} remained locked after 20 replacement attempts.", lastReplacementException);
+    }
+
+    private static void ValidateExecutableFileWithRetry(string filePath, string label)
+    {
+        if (TryValidateExecutableFileWithRetry(filePath, label, out string status))
+        {
+            return;
+        }
+
+        throw new IOException(status);
+    }
+
+    private static bool TryValidateExecutableFileWithRetry(string filePath, string label, out string status)
+    {
+        Exception? lastValidationException = null;
+        for (int validationAttempt = 1; validationAttempt <= 60; validationAttempt++)
+        {
+            try
+            {
+                ValidateExecutableFile(filePath, label);
+                status = $"{label} is readable.";
+                return true;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                lastValidationException = exception;
+                if (validationAttempt >= 60)
+                {
+                    break;
+                }
+
+                Thread.Sleep(TimeSpan.FromMilliseconds(500));
+            }
+        }
+
+        status = $"{label} remained unreadable after 60 validation attempts. {lastValidationException?.Message}";
+        return false;
     }
 
     private static bool FilesHaveSameSha256(string firstPath, string secondPath)
@@ -555,15 +616,7 @@ internal static class SelfUpdateInstaller
 
     private static bool IsExecutableFile(string filePath)
     {
-        try
-        {
-            ValidateExecutableFile(filePath, "diagnostic executable");
-            return true;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            return false;
-        }
+        return TryValidateExecutableFileWithRetry(filePath, "diagnostic executable", out _);
     }
 
     private static void WriteLog(string message, Exception? exception = null)

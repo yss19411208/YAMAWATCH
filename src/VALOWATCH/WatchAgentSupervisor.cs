@@ -59,6 +59,9 @@ internal static class WatchAgentSupervisor
             return;
         }
 
+        SelfUpdateInstaller.RepairEmbeddedAgentResourcesForInstalledApp(plan.InstallDirectory, writeLog);
+        plan = GetPlan(appPaths);
+
         if (plan.AgentPath is null)
         {
             writeLog("GITHUB watch agent was not found; normal background updates cannot be supervised yet.", null);

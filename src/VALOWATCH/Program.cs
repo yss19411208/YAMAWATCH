@@ -136,6 +136,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-discord-voice-state-filter", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDiscordVoiceStateFilterDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-watch-agent-supervisor", StringComparison.OrdinalIgnoreCase)))
         {
             RunWatchAgentSupervisorDiagnostic();
@@ -1520,6 +1526,50 @@ static class Program
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Discord voice context check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunDiscordVoiceStateFilterDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            bool anyHumanTracked = DiscordBotVoiceRelay.ShouldTrackDiscordVoiceStateUser(
+                monitoredDiscordUserId: 0,
+                voiceStateUserId: 1234,
+                isBot: false);
+            bool botsIgnored = !DiscordBotVoiceRelay.ShouldTrackDiscordVoiceStateUser(
+                monitoredDiscordUserId: 0,
+                voiceStateUserId: 1234,
+                isBot: true);
+            bool monitoredUserTracked = DiscordBotVoiceRelay.ShouldTrackDiscordVoiceStateUser(
+                monitoredDiscordUserId: 1234,
+                voiceStateUserId: 1234,
+                isBot: false);
+            bool otherHumanIgnoredWhenConfigured = !DiscordBotVoiceRelay.ShouldTrackDiscordVoiceStateUser(
+                monitoredDiscordUserId: 1234,
+                voiceStateUserId: 5678,
+                isBot: false);
+            bool ready = anyHumanTracked &&
+                botsIgnored &&
+                monitoredUserTracked &&
+                otherHumanIgnoredWhenConfigured;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Discord voice state filter check: " +
+                $"{(ready ? "ready" : "failed")}. " +
+                $"AnyHuman: {anyHumanTracked}. BotsIgnored: {botsIgnored}. " +
+                $"MonitoredUser: {monitoredUserTracked}. OtherHumanIgnored: {otherHumanIgnoredWhenConfigured}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Discord voice state filter check", exception);
             Environment.ExitCode = 1;
         }
     }

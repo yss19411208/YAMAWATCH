@@ -18,6 +18,8 @@ public sealed class DiscordBotSettings
 
     public ulong TextChannelId { get; set; }
 
+    public ulong MonitoredDiscordUserId { get; set; }
+
     public string ValorantOpenedMessage { get; set; } = "VALORANTを開きました";
 
     public bool StreamMicrophoneAudio { get; set; } = true;
