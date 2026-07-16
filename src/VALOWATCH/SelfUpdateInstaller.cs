@@ -15,10 +15,16 @@ internal static class SelfUpdateInstaller
         ("UpdateNative/libsodium.dll", "libsodium.dll"),
         ("UpdateNative/opus.dll", "opus.dll")
     ];
-    private static readonly (string ResourceName, string FileName, string ProcessName)[] AgentResources =
+    private enum AgentInstallLocation
+    {
+        WorkspaceRoot,
+        InstallDirectory
+    }
+
+    private static readonly (string ResourceName, string FileName, string ProcessName, AgentInstallLocation Location)[] AgentResources =
     [
-        ("UpdateAgent/GITHUB.exe", "GITHUB.exe", "GITHUB"),
-        ("UpdateAgent/VALOWATCH_Start.exe", "VALOWATCH_Start.exe", "VALOWATCH_Start")
+        ("UpdateAgent/GITHUB.exe", "GITHUB.exe", "GITHUB", AgentInstallLocation.WorkspaceRoot),
+        ("UpdateAgent/VALOWATCH_Start.exe", "VALOWATCH_Start.exe", "VALOWATCH_Start", AgentInstallLocation.WorkspaceRoot)
     ];
 
     public static bool IsUpdateInvocation(IReadOnlyList<string> args)
@@ -230,13 +236,22 @@ internal static class SelfUpdateInstaller
 
     private static void RepairEmbeddedAgentResources(string installDirectory)
     {
-        foreach ((string resourceName, string fileName, string processName) in AgentResources)
+        string workspaceRoot = ResolveWorkspaceRootForInstallDirectory(installDirectory);
+        foreach ((string resourceName, string fileName, string processName, AgentInstallLocation location) in AgentResources)
         {
             TryExtractEmbeddedAgentResource(
                 resourceName,
-                Path.Combine(installDirectory, fileName),
+                Path.Combine(
+                    location == AgentInstallLocation.WorkspaceRoot ? workspaceRoot : installDirectory,
+                    fileName),
                 processName);
         }
+    }
+
+    private static string ResolveWorkspaceRootForInstallDirectory(string installDirectory)
+    {
+        return Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
     }
 
     private static void TryExtractEmbeddedAgentResource(
@@ -251,6 +266,17 @@ internal static class SelfUpdateInstaller
             return;
         }
 
+        byte[] resourceSha256 = ComputeSha256(resourceStream);
+        if (resourceStream.CanSeek)
+        {
+            resourceStream.Position = 0;
+        }
+        else
+        {
+            WriteLog($"Embedded agent resource stream is not seekable and will be skipped: {resourceName}");
+            return;
+        }
+
         string existingAgentStatus;
         if (!File.Exists(targetPath))
         {
@@ -261,11 +287,16 @@ internal static class SelfUpdateInstaller
             $"existing agent resource {resourceName}",
             out existingAgentStatus))
         {
-            WriteLog(
-                "Embedded agent resource rewrite skipped because the installed agent is already executable; " +
-                "the dedicated GITHUB agent will handle release-asset updates. " +
-                $"Target: {targetPath}. {existingAgentStatus}");
-            return;
+            byte[] existingSha256 = ComputeSha256(targetPath);
+            if (CryptographicOperations.FixedTimeEquals(resourceSha256, existingSha256))
+            {
+                WriteLog(
+                    "Embedded agent resource rewrite skipped because the installed agent already matches the embedded resource. " +
+                    $"Target: {targetPath}. SHA-256: {Convert.ToHexString(existingSha256)}.");
+                return;
+            }
+
+            existingAgentStatus += $" Existing SHA-256 differs from embedded resource. Existing: {Convert.ToHexString(existingSha256)}. Embedded: {Convert.ToHexString(resourceSha256)}.";
         }
 
         string temporaryPath = targetPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.new";
@@ -432,6 +463,11 @@ internal static class SelfUpdateInstaller
         return SHA256.HashData(fileStream);
     }
 
+    private static byte[] ComputeSha256(Stream stream)
+    {
+        return SHA256.HashData(stream);
+    }
+
     private static void ValidateExecutableFile(string filePath, string label)
     {
         FileInfo fileInfo = new(filePath);
@@ -582,7 +618,7 @@ internal static class SelfUpdateInstaller
         {
             List<string> statuses = [];
             bool allResourcesReady = true;
-            foreach ((string resourceName, string fileName, _) in AgentResources)
+            foreach ((string resourceName, string fileName, _, _) in AgentResources)
             {
                 using Stream? resourceStream = typeof(SelfUpdateInstaller).Assembly.GetManifestResourceStream(resourceName);
                 bool resourceReady = resourceStream is not null &&
@@ -611,8 +647,8 @@ internal static class SelfUpdateInstaller
             Directory.CreateDirectory(installDirectory);
             RepairEmbeddedAgentResources(installDirectory);
 
-            string agentPath = Path.Combine(installDirectory, "GITHUB.exe");
-            string startAgentPath = Path.Combine(installDirectory, "VALOWATCH_Start.exe");
+            string agentPath = Path.Combine(diagnosticRoot, "GITHUB.exe");
+            string startAgentPath = Path.Combine(diagnosticRoot, "VALOWATCH_Start.exe");
             bool agentReady = IsExecutableFile(agentPath);
             bool startAgentReady = IsExecutableFile(startAgentPath);
             status = $"GITHUB.exe: {agentReady}. VALOWATCH_Start.exe: {startAgentReady}.";
@@ -632,20 +668,15 @@ internal static class SelfUpdateInstaller
             string installDirectory = Path.Combine(diagnosticRoot, "app");
             Directory.CreateDirectory(installDirectory);
 
-            foreach ((_, string fileName, _) in AgentResources)
-            {
-                File.WriteAllBytes(
-                    Path.Combine(installDirectory, fileName),
-                    Encoding.ASCII.GetBytes("MZ-existing-agent-placeholder"));
-            }
+            RepairEmbeddedAgentResources(installDirectory);
 
-            byte[] originalAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "GITHUB.exe"));
-            byte[] originalStartAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "VALOWATCH_Start.exe"));
+            byte[] originalAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "GITHUB.exe"));
+            byte[] originalStartAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "VALOWATCH_Start.exe"));
 
             RepairEmbeddedAgentResources(installDirectory);
 
-            byte[] currentAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "GITHUB.exe"));
-            byte[] currentStartAgentBytes = File.ReadAllBytes(Path.Combine(installDirectory, "VALOWATCH_Start.exe"));
+            byte[] currentAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "GITHUB.exe"));
+            byte[] currentStartAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "VALOWATCH_Start.exe"));
             bool agentWasSkipped = originalAgentBytes.SequenceEqual(currentAgentBytes);
             bool startAgentWasSkipped = originalStartAgentBytes.SequenceEqual(currentStartAgentBytes);
             status = $"GITHUB.exe skipped: {agentWasSkipped}. VALOWATCH_Start.exe skipped: {startAgentWasSkipped}.";

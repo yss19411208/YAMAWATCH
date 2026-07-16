@@ -339,7 +339,7 @@ internal static class Program
 
         string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
             ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
-        string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "github-agent");
+        string updateDirectory = CreateUpdateDirectory(installDirectory, "github-agent", preferExternal: true);
         Directory.CreateDirectory(updateDirectory);
         string downloadedAgentPath = Path.Combine(
             updateDirectory,
@@ -434,9 +434,7 @@ internal static class Program
 
             string replacementSourcePath = Environment.ProcessPath
                 ?? throw new InvalidOperationException("GITHUB replacement source path is unavailable.");
-            string temporaryTargetPath = targetAgentPath + $".{Environment.ProcessId}.new";
-            File.Copy(replacementSourcePath, temporaryTargetPath, overwrite: true);
-            File.Move(temporaryTargetPath, targetAgentPath, overwrite: true);
+            CopyValidatedExecutableWithRetry(replacementSourcePath, targetAgentPath, "GITHUB replacement");
             bool disableUpdates = args.Any(argument => string.Equals(
                 argument,
                 "--disable-updates",
@@ -494,9 +492,7 @@ internal static class Program
 
     private static async Task EnsureStartAgentInstalledAndRunningAsync(string installDirectory)
     {
-        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
-            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
-        string installedStartAgentPath = Path.Combine(Path.GetFullPath(installDirectory), StartAgentFileName);
+        string installedStartAgentPath = ResolveInstalledStartAgentPath(installDirectory);
         using HttpClient httpClient = CreateHttpClient();
         ReleaseAppAsset startAgentAsset = await ExecuteWithRetryAsync(
             "VALOWATCH Start agent release lookup",
@@ -504,7 +500,7 @@ internal static class Program
 
         if (!FileMatchesRelease(installedStartAgentPath, startAgentAsset.ExpectedSha256, out string currentStatus))
         {
-            string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "start-agent");
+            string updateDirectory = CreateUpdateDirectory(installDirectory, "start-agent", preferExternal: true);
             Directory.CreateDirectory(updateDirectory);
             string downloadedStartAgentPath = Path.Combine(
                 updateDirectory,
@@ -517,9 +513,7 @@ internal static class Program
                     downloadedStartAgentPath,
                     cancellationToken)).ConfigureAwait(false);
             StopProcessesFromPath("VALOWATCH_Start", installedStartAgentPath);
-            string temporaryPath = installedStartAgentPath + $".{Environment.ProcessId}.new";
-            File.Copy(downloadedStartAgentPath, temporaryPath, overwrite: true);
-            File.Move(temporaryPath, installedStartAgentPath, overwrite: true);
+            CopyValidatedExecutableWithRetry(downloadedStartAgentPath, installedStartAgentPath, "VALOWATCH Start agent");
             WriteLog($"VALOWATCH Start agent installed. Previous: {currentStatus}");
         }
 
@@ -528,7 +522,7 @@ internal static class Program
 
     private static void EnsureStartAgentRunningIfPresent(string installDirectory)
     {
-        string installedStartAgentPath = Path.Combine(Path.GetFullPath(installDirectory), StartAgentFileName);
+        string installedStartAgentPath = ResolveInstalledStartAgentPath(installDirectory);
         if (!File.Exists(installedStartAgentPath) ||
             IsProcessRunningFromPath("VALOWATCH_Start", installedStartAgentPath))
         {
@@ -568,6 +562,41 @@ internal static class Program
                 $"VALOWATCH Start agent launch failed; retrying after {StartAgentLaunchRetryInterval.TotalMinutes:0} minutes.",
                 exception);
         }
+    }
+
+    private static string ResolveInstalledStartAgentPath(string installDirectory)
+    {
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        return Path.Combine(workspaceRoot, StartAgentFileName);
+    }
+
+    private static void CopyValidatedExecutableWithRetry(string sourcePath, string targetPath, string label)
+    {
+        ValidateExecutableFile(sourcePath, $"{label} source");
+        Exception? lastException = null;
+        for (int attempt = 1; attempt <= 20; attempt++)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory);
+                File.Copy(sourcePath, targetPath, overwrite: true);
+                ValidateExecutableFile(targetPath, $"{label} target");
+                return;
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                lastException = exception;
+                if (attempt >= 20)
+                {
+                    break;
+                }
+
+                Thread.Sleep(TimeSpan.FromMilliseconds(500));
+            }
+        }
+
+        throw new IOException($"{label} could not be copied after 20 attempts.", lastException);
     }
 
     private static void StopProcessesFromPath(string processName, string expectedPath)
@@ -1007,7 +1036,11 @@ internal static class Program
 
     private static string CreateFallbackPartialPath(string destinationPath)
     {
-        return destinationPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.download";
+        string fallbackDirectory = CreateLocalAppDataDownloadDirectory(destinationPath);
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
+        return Path.Combine(
+            fallbackDirectory,
+            $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.download");
     }
 
     private static string CreateEmergencyPartialPath(string destinationPath)
@@ -1049,6 +1082,74 @@ internal static class Program
         return emergencyDirectory;
     }
 
+    private static string CreateLocalAppDataDownloadDirectory(string destinationPath)
+    {
+        try
+        {
+            string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (string.IsNullOrWhiteSpace(localAppDataDirectory))
+            {
+                return CreateEmergencyDownloadDirectory(destinationPath);
+            }
+
+            string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
+            string fallbackDirectory = Path.Combine(
+                localAppDataDirectory,
+                "VALOWATCH",
+                "updates",
+                SanitizeFileName(fileNameWithoutExtension));
+            Directory.CreateDirectory(fallbackDirectory);
+            return fallbackDirectory;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            WriteLog(
+                "LocalAppData update directory could not be used; falling back to Temp. " +
+                SummarizeException(exception));
+            return CreateEmergencyDownloadDirectory(destinationPath);
+        }
+    }
+
+    private static string CreateUpdateDirectory(string installDirectory, string bucketName, bool preferExternal)
+    {
+        if (preferExternal)
+        {
+            try
+            {
+                string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrWhiteSpace(localAppDataDirectory))
+                {
+                    string externalDirectory = Path.Combine(
+                        localAppDataDirectory,
+                        "VALOWATCH",
+                        "updates",
+                        SanitizeFileName(bucketName));
+                    Directory.CreateDirectory(externalDirectory);
+                    return externalDirectory;
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                WriteLog(
+                    "External LocalAppData update directory could not be used; falling back to Temp. " +
+                    SummarizeException(exception));
+                string tempDirectory = Path.Combine(
+                    Path.GetTempPath(),
+                    "VALOWATCH",
+                    "updates",
+                    SanitizeFileName(bucketName));
+                Directory.CreateDirectory(tempDirectory);
+                return tempDirectory;
+            }
+        }
+
+        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
+        string workspaceUpdateDirectory = Path.Combine(workspaceRoot, "data", "updates", SanitizeFileName(bucketName));
+        Directory.CreateDirectory(workspaceUpdateDirectory);
+        return workspaceUpdateDirectory;
+    }
+
     private static bool ValidateDownloadedApp(
         string filePath,
         ReleaseAppAsset appAsset,
@@ -1084,6 +1185,21 @@ internal static class Program
 
         status = $"App PE and SHA-256 validation passed: {actualSha256}.";
         return true;
+    }
+
+    private static void ValidateExecutableFile(string filePath, string label)
+    {
+        FileInfo fileInfo = new(filePath);
+        if (!fileInfo.Exists || fileInfo.Length < 2)
+        {
+            throw new IOException($"{label} is missing or empty: {filePath}");
+        }
+
+        using FileStream executableStream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (executableStream.ReadByte() != 'M' || executableStream.ReadByte() != 'Z')
+        {
+            throw new InvalidDataException($"{label} is not a Windows PE executable: {filePath}");
+        }
     }
 
     private static async Task<int> LaunchAppSelfUpdateAsync(
@@ -1302,7 +1418,9 @@ internal static class Program
                     StringComparison.OrdinalIgnoreCase) &&
                 downloadTarget.ExistingLength == 0 &&
                 Path.GetFullPath(downloadTarget.PartialPath)
-                    .StartsWith(Path.GetFullPath(diagnosticRoot), StringComparison.OrdinalIgnoreCase);
+                    .Contains(
+                        Path.Combine("VALOWATCH", "updates"),
+                        StringComparison.OrdinalIgnoreCase);
             string emergencyPartialPath = CreateEmergencyPartialPath(destinationPath);
             string expectedEmergencyRoot = Path.Combine(Path.GetTempPath(), "VALOWATCH", "updates");
             bool emergencyFallbackReady =
@@ -1371,7 +1489,7 @@ internal static class Program
 
     private static bool IsRetryable(Exception exception)
     {
-        return exception is HttpRequestException or TaskCanceledException or IOException or JsonException;
+        return exception is HttpRequestException or TaskCanceledException or IOException or UnauthorizedAccessException or NotSupportedException or JsonException;
     }
 
     private static bool ContainsRetryableException(Exception exception)
