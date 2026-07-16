@@ -8,6 +8,7 @@ internal sealed record WatchAgentPlan(
     string WorkspaceRoot,
     string InstallDirectory,
     string? AgentPath,
+    string? StartAgentPath,
     bool InstalledAppExists,
     bool AgentAlreadyRunning);
 
@@ -36,6 +37,7 @@ internal static class WatchAgentSupervisor
         string workspaceRoot = ResolveWorkspaceRoot(appPaths, currentAppDirectory);
         string installDirectory = ResolveInstallDirectory(workspaceRoot, currentAppDirectory);
         string? agentPath = ResolveAgentPath(workspaceRoot, installDirectory, currentAppDirectory);
+        string? startAgentPath = ResolveStartAgentPath(workspaceRoot, installDirectory, currentAppDirectory);
         bool installedAppExists = File.Exists(Path.Combine(installDirectory, AppFileName));
         bool agentAlreadyRunning = agentPath is not null && IsProcessRunningFromPath(AgentProcessName, agentPath);
 
@@ -43,6 +45,7 @@ internal static class WatchAgentSupervisor
             workspaceRoot,
             installDirectory,
             agentPath,
+            startAgentPath,
             installedAppExists,
             agentAlreadyRunning);
     }
@@ -62,6 +65,11 @@ internal static class WatchAgentSupervisor
         }
         else if (!plan.AgentAlreadyRunning)
         {
+            StopConflictingWorkspaceProcesses(
+                AgentProcessName,
+                plan.AgentPath,
+                plan.WorkspaceRoot,
+                writeLog);
             StartProcess(
                 plan.AgentPath,
                 plan.WorkspaceRoot,
@@ -87,8 +95,7 @@ internal static class WatchAgentSupervisor
 
         string agentCommand = BuildGitHubAgentCommand(plan.AgentPath, plan.InstallDirectory);
         EnsureRegistryStartup(agentCommand, writeLog);
-        string startAgentPath = Path.Combine(plan.WorkspaceRoot, StartAgentFileName);
-        EnsureStartupCommand(plan.AgentPath, startAgentPath, plan.InstallDirectory, writeLog);
+        EnsureStartupCommand(plan.AgentPath, plan.StartAgentPath, plan.InstallDirectory, writeLog);
         EnsureScheduledTask(
             KeepAliveScheduledTaskName,
             agentCommand,
@@ -100,9 +107,9 @@ internal static class WatchAgentSupervisor
                 processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
             },
             writeLog);
-        if (File.Exists(startAgentPath))
+        if (plan.StartAgentPath is not null)
         {
-            string startAgentCommand = BuildStartAgentCommand(startAgentPath, plan.InstallDirectory);
+            string startAgentCommand = BuildStartAgentCommand(plan.StartAgentPath, plan.InstallDirectory);
             EnsureScheduledTask(
                 StartAgentKeepAliveScheduledTaskName,
                 startAgentCommand,
@@ -121,9 +128,8 @@ internal static class WatchAgentSupervisor
         WatchAgentPlan plan,
         Action<string, Exception?> writeLog)
     {
-        string startAgentPath = Path.Combine(plan.WorkspaceRoot, StartAgentFileName);
-        if (!File.Exists(startAgentPath) ||
-            IsProcessRunningFromPath(StartAgentProcessName, startAgentPath))
+        if (plan.StartAgentPath is null ||
+            IsProcessRunningFromPath(StartAgentProcessName, plan.StartAgentPath))
         {
             return;
         }
@@ -135,8 +141,13 @@ internal static class WatchAgentSupervisor
         }
 
         nextStartAgentLaunchAttemptAtUtc = nowUtc.Add(StartAgentLaunchRetryInterval);
+        StopConflictingWorkspaceProcesses(
+            StartAgentProcessName,
+            plan.StartAgentPath,
+            plan.WorkspaceRoot,
+            writeLog);
         StartProcess(
-            startAgentPath,
+            plan.StartAgentPath,
             plan.WorkspaceRoot,
             [
                 "--install-dir",
@@ -200,12 +211,30 @@ internal static class WatchAgentSupervisor
         string? installParentDirectory = Directory.GetParent(installDirectory)?.FullName;
         IEnumerable<string?> candidatePaths =
         [
+            Path.Combine(installDirectory, AgentFileName),
+            Path.Combine(currentAppDirectory, AgentFileName),
             string.IsNullOrWhiteSpace(installParentDirectory) ? null : Path.Combine(installParentDirectory, AgentFileName),
             Path.Combine(workspaceRoot, AgentFileName),
-            Path.Combine(workspaceRoot, "github", AgentFileName),
-            Path.Combine(currentAppDirectory, AgentFileName)
+            Path.Combine(workspaceRoot, "github", AgentFileName)
         ];
 
+        return ResolveFirstExistingPath(candidatePaths);
+    }
+
+    private static string? ResolveStartAgentPath(string workspaceRoot, string installDirectory, string currentAppDirectory)
+    {
+        IEnumerable<string?> candidatePaths =
+        [
+            Path.Combine(installDirectory, StartAgentFileName),
+            Path.Combine(currentAppDirectory, StartAgentFileName),
+            Path.Combine(workspaceRoot, StartAgentFileName)
+        ];
+
+        return ResolveFirstExistingPath(candidatePaths);
+    }
+
+    private static string? ResolveFirstExistingPath(IEnumerable<string?> candidatePaths)
+    {
         return candidatePaths
             .Where(static candidatePath => !string.IsNullOrWhiteSpace(candidatePath))
             .Select(static candidatePath => Path.GetFullPath(candidatePath!))
@@ -252,6 +281,46 @@ internal static class WatchAgentSupervisor
         return false;
     }
 
+    private static void StopConflictingWorkspaceProcesses(
+        string processName,
+        string expectedPath,
+        string workspaceRoot,
+        Action<string, Exception?> writeLog)
+    {
+        string normalizedExpectedPath = Path.GetFullPath(expectedPath);
+        string normalizedWorkspaceRoot = NormalizeDirectory(workspaceRoot);
+        string workspacePrefix = normalizedWorkspaceRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                try
+                {
+                    string? processPath = process.MainModule?.FileName;
+                    if (string.IsNullOrWhiteSpace(processPath))
+                    {
+                        continue;
+                    }
+
+                    string normalizedProcessPath = Path.GetFullPath(processPath);
+                    if (normalizedProcessPath.Equals(normalizedExpectedPath, StringComparison.OrdinalIgnoreCase) ||
+                        !normalizedProcessPath.StartsWith(workspacePrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5000);
+                    writeLog($"Stopped stale {processName} process so the preferred agent can run: {normalizedProcessPath}", null);
+                }
+                catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or UnauthorizedAccessException)
+                {
+                    writeLog($"Could not stop stale {processName} process.", exception);
+                }
+            }
+        }
+    }
+
     private static bool IsApplicationControlPolicyBlock(Win32Exception exception)
     {
         return exception.NativeErrorCode == ApplicationControlPolicyBlockedErrorCode ||
@@ -282,7 +351,7 @@ internal static class WatchAgentSupervisor
 
     private static void EnsureStartupCommand(
         string agentPath,
-        string startAgentPath,
+        string? startAgentPath,
         string installDirectory,
         Action<string, Exception?> writeLog)
     {
@@ -301,7 +370,7 @@ internal static class WatchAgentSupervisor
                 [
                     "@echo off",
                     $"start \"\" \"{agentPath}\" --watch --install-dir \"{installDirectory}\"",
-                    File.Exists(startAgentPath)
+                    startAgentPath is not null
                         ? $"start \"\" \"{startAgentPath}\" --install-dir \"{installDirectory}\""
                         : "rem VALOWATCH_Start.exe is not installed yet"
                 ]) + Environment.NewLine;

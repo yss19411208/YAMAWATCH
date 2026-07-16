@@ -1501,7 +1501,8 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] GITHUB watch agent supervisor check: " +
                 $"{(supervisorReady ? "ready" : "failed")}. " +
                 $"WorkspaceRoot: {plan.WorkspaceRoot}. InstallDirectory: {plan.InstallDirectory}. " +
-                $"AgentPath: {plan.AgentPath ?? "(none)"}. InstalledAppExists: {plan.InstalledAppExists}. " +
+                $"AgentPath: {plan.AgentPath ?? "(none)"}. StartAgentPath: {plan.StartAgentPath ?? "(none)"}. " +
+                $"InstalledAppExists: {plan.InstalledAppExists}. " +
                 $"AgentAlreadyRunning: {plan.AgentAlreadyRunning}.");
             Environment.ExitCode = supervisorReady ? 0 : 1;
         }

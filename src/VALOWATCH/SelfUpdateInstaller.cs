@@ -214,13 +214,11 @@ internal static class SelfUpdateInstaller
 
     private static void RepairEmbeddedAgentResources(string installDirectory)
     {
-        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
-            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
         foreach ((string resourceName, string fileName, string processName) in AgentResources)
         {
             TryExtractEmbeddedAgentResource(
                 resourceName,
-                Path.Combine(workspaceRoot, fileName),
+                Path.Combine(installDirectory, fileName),
                 processName);
         }
     }
@@ -528,12 +526,11 @@ internal static class SelfUpdateInstaller
         try
         {
             string installDirectory = Path.Combine(diagnosticRoot, "app");
-            string workspaceRoot = diagnosticRoot;
             Directory.CreateDirectory(installDirectory);
             RepairEmbeddedAgentResources(installDirectory);
 
-            string agentPath = Path.Combine(workspaceRoot, "GITHUB.exe");
-            string startAgentPath = Path.Combine(workspaceRoot, "VALOWATCH_Start.exe");
+            string agentPath = Path.Combine(installDirectory, "GITHUB.exe");
+            string startAgentPath = Path.Combine(installDirectory, "VALOWATCH_Start.exe");
             bool agentReady = IsExecutableFile(agentPath);
             bool startAgentReady = IsExecutableFile(startAgentPath);
             status = $"GITHUB.exe: {agentReady}. VALOWATCH_Start.exe: {startAgentReady}.";

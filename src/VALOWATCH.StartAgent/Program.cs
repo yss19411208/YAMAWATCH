@@ -417,6 +417,7 @@ internal static class Program
         public string InstallDirectory { get; private init; } = string.Empty;
 
         public string GitHubAgentPath => ResolveFirstExistingPath(
+            Path.Combine(InstallDirectory, AgentFileName),
             Path.Combine(WorkspaceRoot, AgentFileName),
             Path.Combine(WorkspaceRoot, "github", AgentFileName));
 
