@@ -358,15 +358,27 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             ScreenStreamMethod.H264Hls => $"/{PublicPath}/stream.m3u8",
             _ => $"/{PublicPath}/stream.mjpg"
         };
+        string streamPathHtml = WebUtility.HtmlEncode(streamPath);
+        string streamPathJavaScript = streamPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
         string mediaElement = Options.Method == ScreenStreamMethod.Mjpeg
-            ? $"<img id=\"screen\" src=\"{WebUtility.HtmlEncode(streamPath)}\" alt=\"VALOWATCH stream\">"
-            : $"<video id=\"screen\" src=\"{WebUtility.HtmlEncode(streamPath)}\" autoplay muted playsinline controls></video>";
+            ? $"<img id=\"screen\" src=\"{streamPathHtml}\" alt=\"VALOWATCH stream\">"
+            : Options.Method == ScreenStreamMethod.H264Hls
+                ? "<video id=\"screen\" autoplay muted playsinline controls></video>"
+                : $"<video id=\"screen\" src=\"{streamPathHtml}\" autoplay muted playsinline controls></video>";
         string mediaScript = Options.Method switch
         {
-            ScreenStreamMethod.H264Hls => """
+            ScreenStreamMethod.H264Hls => $$"""
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 <script>
 const screenVideo = document.getElementById('screen');
-if (!screenVideo.canPlayType('application/vnd.apple.mpegurl') && !screenVideo.canPlayType('application/x-mpegURL')) {
+const streamPath = '{{streamPathJavaScript}}';
+if (window.Hls && Hls.isSupported()) {
+  const hls = new Hls({ lowLatencyMode: true, liveSyncDurationCount: 2, maxLiveSyncPlaybackRate: 1.5 });
+  hls.loadSource(streamPath);
+  hls.attachMedia(screenVideo);
+} else if (screenVideo.canPlayType('application/vnd.apple.mpegurl') || screenVideo.canPlayType('application/x-mpegURL')) {
+  screenVideo.src = streamPath;
+} else {
   document.getElementById('status').textContent += ' / HLS browser support is required';
 }
 </script>

@@ -129,7 +129,7 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 
 リンク配信は `/stream on target:full` または `/stream on target:valorant` で開始します。VALOWATCH内のローカル配信サーバーをCloudflare Quick Tunnelで公開し、Discordに「配信開始」とランダムURLを送信します。停止は `/stream off`、状態確認は `/stream status` です。PC画面上には追加UIを出しません。URLはランダムで、リンクを知らない人には通常見つかりませんが、ログイン認証ではないためURLを共有した相手だけに扱ってください。`target:valorant` はVALORANTのウィンドウが見つかる場合だけ開始できます。VALORANTが独占フルスクリーンの場合はWindows側から画面を取得できないことがあるため、画面モードはウィンドウフルスクリーンを使ってください。
 
-配信方式は `method` で選べます。指定しない場合は高画質・低遅延向けの `h264-fmp4` です。回線が不安定な場合は少し遅延が増えますが `h264-hls` を使ってください。古いブラウザやH.264がうまく再生されない場合だけ互換用の `mjpeg` を使います。
+配信方式は `method` で選べます。指定しない場合は高画質・低遅延向けの `h264-fmp4` です。回線が不安定な場合は少し遅延が増えますが `h264-hls` を使ってください。HLSページはブラウザ互換用に `hls.js` をCDNから読み込みます。古いブラウザやH.264がうまく再生されない場合だけ互換用の `mjpeg` を使います。
 
 高画質寄りの例は `/stream on target:valorant method:h264-fmp4 fps:60 quality:90 width:1920` です。安定寄りの例は `/stream on target:valorant method:h264-hls fps:60 quality:90 width:1920` です。軽くしたい場合は `width:1280` や `fps:30` に下げてください。互換用MJPEGは `/stream on target:valorant method:mjpeg fps:60 quality:30 width:320` です。指定しない場合は `.env` の `VALOWATCH_STREAM_DEFAULT_FPS`、`VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY`、`VALOWATCH_STREAM_DEFAULT_WIDTH` を使い、未設定なら15fps/品質65/横幅960pxで開始します。
 

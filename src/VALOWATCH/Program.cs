@@ -931,9 +931,11 @@ static class Program
 
             bool playlistLooksLikeHls = playlistText.Contains("#EXTM3U", StringComparison.OrdinalIgnoreCase) &&
                 playlistText.Contains("#EXTINF", StringComparison.OrdinalIgnoreCase);
+            bool pageHasHlsJavaScriptFallback = pageHtml.Contains("hls.js@1", StringComparison.OrdinalIgnoreCase);
             bool segmentLooksLikeTransportStream = segmentBytes.Length > 1024 && segmentBytes[0] == 0x47;
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.m3u8", StringComparison.OrdinalIgnoreCase) &&
+                pageHasHlsJavaScriptFallback &&
                 playlistLooksLikeHls &&
                 segmentLooksLikeTransportStream &&
                 options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
@@ -944,7 +946,7 @@ static class Program
                 $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"PlaylistBytes: {Encoding.UTF8.GetByteCount(playlistText)}. SegmentBytes: {segmentBytes.Length}. " +
-                $"PlaylistHls: {playlistLooksLikeHls}. SegmentTs: {segmentLooksLikeTransportStream}. " +
+                $"PlaylistHls: {playlistLooksLikeHls}. SegmentTs: {segmentLooksLikeTransportStream}. HlsJsFallback: {pageHasHlsJavaScriptFallback}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
