@@ -1,0 +1,3 @@
+VALOWATCH update trigger
+TimestampJst: 2026-07-19T15:45:48+09:00
+Purpose: force a release build so remote clients can test automatic update pickup.
