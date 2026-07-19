@@ -731,13 +731,12 @@ static class Program
                 .ReadAsStreamAsync(readTimeout.Token)
                 .GetAwaiter()
                 .GetResult();
-            byte[] streamBuffer = new byte[1024 * 1024];
+            byte[] streamBuffer = new byte[8 * 1024 * 1024];
             int totalReadBytes = 0;
             int jpegStartMarkers = 0;
             Stopwatch readStopwatch = Stopwatch.StartNew();
             while (readStopwatch.Elapsed < TimeSpan.FromSeconds(2) &&
-                   totalReadBytes < streamBuffer.Length &&
-                   jpegStartMarkers < 3)
+                   totalReadBytes < streamBuffer.Length)
             {
                 int remainingBytes = streamBuffer.Length - totalReadBytes;
                 int readByteCount = responseStream
@@ -755,6 +754,8 @@ static class Program
                 jpegStartMarkers = CountJpegStartMarkers(streamBuffer.AsSpan(0, totalReadBytes));
             }
 
+            double sampleSeconds = Math.Max(0.001D, readStopwatch.Elapsed.TotalSeconds);
+            double observedMjpegMarkerRate = jpegStartMarkers / sampleSeconds;
             bool contentTypeLooksLikeMjpeg = response.Content.Headers.ContentType?.MediaType
                 ?.Equals("multipart/x-mixed-replace", StringComparison.OrdinalIgnoreCase) == true;
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
@@ -769,6 +770,7 @@ static class Program
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"MjpegContentType: {contentTypeLooksLikeMjpeg}. " +
                 $"ReadBytes: {totalReadBytes}. JpegMarkers: {jpegStartMarkers}. " +
+                $"ObservedMarkerRate: {observedMjpegMarkerRate.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
