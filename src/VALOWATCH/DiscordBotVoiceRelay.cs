@@ -3034,7 +3034,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         if (!TryResolveObservedDiscordVoiceChannel(guild, out SocketVoiceChannel? voiceChannel, out ulong observedUserId))
         {
-            WriteLog("No Discord human voice state was detected in the configured guild.");
+            WriteLog("No configured Discord monitored user voice state was detected in the configured guild.");
             return;
         }
 
@@ -3056,25 +3056,19 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         voiceChannel = null;
         observedUserId = 0;
 
-        if (currentMonitoredDiscordUserId != 0 &&
-            TryFindVoiceChannelForUser(guild, currentMonitoredDiscordUserId, out voiceChannel))
+        if (currentMonitoredDiscordUserId == 0)
+        {
+            WriteLog("Discord voice context detection skipped because DISCORD_MONITORED_USER_ID is not configured.");
+            return false;
+        }
+
+        if (TryFindVoiceChannelForUser(guild, currentMonitoredDiscordUserId, out voiceChannel))
         {
             observedUserId = currentMonitoredDiscordUserId;
             return true;
         }
 
-        if (currentMonitoredDiscordUserId != 0)
-        {
-            WriteLog(
-                "Configured Discord monitored user was not found in a voice channel; " +
-                "falling back to any human voice state in the configured guild.");
-        }
-
-        if (TryFindAnyHumanVoiceChannel(guild, out voiceChannel, out observedUserId))
-        {
-            return true;
-        }
-
+        WriteLog("Configured Discord monitored user was not found in a voice channel.");
         return false;
     }
 
@@ -3093,29 +3087,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         voiceChannel = null;
-        return false;
-    }
-
-    private static bool TryFindAnyHumanVoiceChannel(
-        SocketGuild guild,
-        out SocketVoiceChannel? voiceChannel,
-        out ulong observedUserId)
-    {
-        foreach (SocketVoiceChannel candidateChannel in guild.VoiceChannels)
-        {
-            SocketGuildUser? humanUser = candidateChannel.Users.FirstOrDefault(user => !user.IsBot);
-            if (humanUser is null)
-            {
-                continue;
-            }
-
-            voiceChannel = candidateChannel;
-            observedUserId = humanUser.Id;
-            return true;
-        }
-
-        voiceChannel = null;
-        observedUserId = 0;
         return false;
     }
 
@@ -3227,15 +3198,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         ulong voiceStateUserId,
         bool isBot)
     {
-        _ = monitoredDiscordUserId;
-        _ = voiceStateUserId;
-
         if (isBot)
         {
             return false;
         }
 
-        return true;
+        return monitoredDiscordUserId != 0 && monitoredDiscordUserId == voiceStateUserId;
     }
 
     private static string BuildDiscordConversationLabel(string guildName, string voiceChannelName)
@@ -3449,7 +3417,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         try
         {
-            Embed embed = RunningApplicationSnapshot.BuildDiscordEmbed();
+            Embed embed = RunningApplicationSnapshot.BuildDiscordEmbed(BuildDiscordVoiceStatusForSnapshot());
             await textChannel.SendMessageAsync(embed: embed).ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -3460,6 +3428,51 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
 
             WriteLog("Running application snapshot could not be sent; it will be retried later.", exception);
+        }
+    }
+
+    private string BuildDiscordVoiceStatusForSnapshot()
+    {
+        lock (stateLock)
+        {
+            List<string> statusLines = [];
+            if (IsRunning &&
+                !string.IsNullOrWhiteSpace(currentVoiceGuildName) &&
+                !string.IsNullOrWhiteSpace(currentVoiceChannelName))
+            {
+                statusLines.Add("BOT: VC接続中");
+                statusLines.Add($"鯖: {NormalizeDiscordDisplayName(currentVoiceGuildName, "不明な鯖")}");
+                statusLines.Add($"VC: {NormalizeDiscordDisplayName(currentVoiceChannelName, "不明なVC")}");
+            }
+            else if (IsOnline)
+            {
+                statusLines.Add("BOT: オンライン / VC未接続");
+            }
+            else
+            {
+                statusLines.Add("BOT: オフライン");
+            }
+
+            if (!string.IsNullOrWhiteSpace(currentDiscordConversationGuildName) &&
+                !string.IsNullOrWhiteSpace(currentDiscordConversationChannelName))
+            {
+                statusLines.Add(string.Empty);
+                statusLines.Add("Discord会話: 検知中");
+                statusLines.Add($"鯖: {NormalizeDiscordDisplayName(currentDiscordConversationGuildName, "不明な鯖")}");
+                statusLines.Add($"VC: {NormalizeDiscordDisplayName(currentDiscordConversationChannelName, "不明なVC")}");
+            }
+            else if (currentMonitoredDiscordUserId == 0)
+            {
+                statusLines.Add(string.Empty);
+                statusLines.Add("Discord会話: 対象ユーザー未設定");
+            }
+            else
+            {
+                statusLines.Add(string.Empty);
+                statusLines.Add("Discord会話: 検知なし");
+            }
+
+            return string.Join(Environment.NewLine, statusLines);
         }
     }
 

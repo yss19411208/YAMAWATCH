@@ -9,7 +9,7 @@ internal static class RunningApplicationSnapshot
     private const int EmbedDescriptionLimit = 4096;
     private const int EmbedDescriptionSafetyMargin = 250;
 
-    public static Embed BuildDiscordEmbed()
+    public static Embed BuildDiscordEmbed(string discordVoiceStatus = "")
     {
         RunningApplicationSnapshotData snapshotData = CaptureTaskbarApplications();
         string description = BuildApplicationListDescription(snapshotData.ApplicationCounts, out int omittedApplicationCount);
@@ -22,6 +22,11 @@ internal static class RunningApplicationSnapshot
         };
 
         embedBuilder.AddField("対象", "下のタスクバーに表示されているアプリのみ", inline: false);
+        if (!string.IsNullOrWhiteSpace(discordVoiceStatus))
+        {
+            embedBuilder.AddField("Discord通話", discordVoiceStatus.Trim(), inline: false);
+        }
+
         embedBuilder.AddField("件数", $"{snapshotData.ApplicationCounts.Count}種類 / {snapshotData.WindowCount}ウィンドウ", inline: true);
         embedBuilder.AddField("省略", omittedApplicationCount == 0 ? "なし" : $"{omittedApplicationCount}件", inline: true);
         embedBuilder.WithFooter("パスは送信していません。タスクバー表示名に近い名前だけです");
@@ -52,9 +57,9 @@ internal static class RunningApplicationSnapshot
         return embedBuilder.Build();
     }
 
-    public static string BuildDiagnosticText()
+    public static string BuildDiagnosticText(string discordVoiceStatus = "")
     {
-        Embed embed = BuildDiscordEmbed();
+        Embed embed = BuildDiscordEmbed(discordVoiceStatus);
         return BuildDiagnosticText(embed);
     }
 
