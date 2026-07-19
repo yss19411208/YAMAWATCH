@@ -363,8 +363,8 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string mediaElement = Options.Method == ScreenStreamMethod.Mjpeg
             ? $"<img id=\"screen\" src=\"{streamPathHtml}\" alt=\"VALOWATCH stream\">"
             : Options.Method == ScreenStreamMethod.H264Hls
-                ? "<video id=\"screen\" autoplay muted playsinline controls></video>"
-                : $"<video id=\"screen\" src=\"{streamPathHtml}\" autoplay muted playsinline controls></video>";
+                ? "<video id=\"screen\" autoplay muted playsinline></video>"
+                : $"<video id=\"screen\" src=\"{streamPathHtml}\" autoplay muted playsinline></video>";
         string mediaScript = Options.Method switch
         {
             ScreenStreamMethod.H264Hls => $$"""

@@ -860,8 +860,10 @@ static class Program
             bool streamLooksLikeFragmentedMp4 =
                 ContainsAsciiToken(streamBytes, "ftyp") &&
                 (ContainsAsciiToken(streamBytes, "moov") || ContainsAsciiToken(streamBytes, "moof") || ContainsAsciiToken(streamBytes, "mdat"));
+            bool pageHasVideoControls = pageHtml.Contains(" controls", StringComparison.OrdinalIgnoreCase);
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
+                !pageHasVideoControls &&
                 contentTypeLooksLikeMp4 &&
                 streamLooksLikeFragmentedMp4 &&
                 options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
@@ -872,7 +874,7 @@ static class Program
                 $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"Mp4ContentType: {contentTypeLooksLikeMp4}. ReadBytes: {streamBytes.Length}. " +
-                $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. " +
+                $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. VideoControls: {pageHasVideoControls}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
@@ -932,10 +934,12 @@ static class Program
             bool playlistLooksLikeHls = playlistText.Contains("#EXTM3U", StringComparison.OrdinalIgnoreCase) &&
                 playlistText.Contains("#EXTINF", StringComparison.OrdinalIgnoreCase);
             bool pageHasHlsJavaScriptFallback = pageHtml.Contains("hls.js@1", StringComparison.OrdinalIgnoreCase);
+            bool pageHasVideoControls = pageHtml.Contains(" controls", StringComparison.OrdinalIgnoreCase);
             bool segmentLooksLikeTransportStream = segmentBytes.Length > 1024 && segmentBytes[0] == 0x47;
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.m3u8", StringComparison.OrdinalIgnoreCase) &&
                 pageHasHlsJavaScriptFallback &&
+                !pageHasVideoControls &&
                 playlistLooksLikeHls &&
                 segmentLooksLikeTransportStream &&
                 options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
@@ -946,7 +950,8 @@ static class Program
                 $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"PlaylistBytes: {Encoding.UTF8.GetByteCount(playlistText)}. SegmentBytes: {segmentBytes.Length}. " +
-                $"PlaylistHls: {playlistLooksLikeHls}. SegmentTs: {segmentLooksLikeTransportStream}. HlsJsFallback: {pageHasHlsJavaScriptFallback}. " +
+                $"PlaylistHls: {playlistLooksLikeHls}. SegmentTs: {segmentLooksLikeTransportStream}. " +
+                $"HlsJsFallback: {pageHasHlsJavaScriptFallback}. VideoControls: {pageHasVideoControls}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
