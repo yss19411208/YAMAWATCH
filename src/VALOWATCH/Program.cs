@@ -876,6 +876,11 @@ static class Program
                 pageHtml.Contains($"seekCooldownMilliseconds = {seekCooldownMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains($"reconnectStallMilliseconds = {reconnectStallMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("reconnectFmp4Stream", StringComparison.OrdinalIgnoreCase);
+            bool pageHasVisibilityRecovery =
+                pageHtml.Contains("visibilitychange", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("suspendFmp4ForHiddenPage", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("resumeFmp4FromHiddenPage", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("hiddenStreamSuspended", StringComparison.OrdinalIgnoreCase);
             bool fmp4LatencyLimitStaysUnderThreeSeconds = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds < 3D &&
                 ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds <= 100 &&
                 ScreenStreamingServer.H264Fmp4ReconnectStallMilliseconds <= 2000;
@@ -887,6 +892,7 @@ static class Program
                 pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
                 !pageHasVideoControls &&
                 pageHasLowLatencyController &&
+                pageHasVisibilityRecovery &&
                 fmp4LatencyLimitStaysUnderThreeSeconds &&
                 fmp4FragmentDurationConfigured &&
                 fmp4KeyframeIntervalConfigured &&
@@ -902,6 +908,7 @@ static class Program
                 $"Mp4ContentType: {contentTypeLooksLikeMp4}. ReadBytes: {streamBytes.Length}. " +
                 $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. VideoControls: {pageHasVideoControls}. " +
                 $"LowLatencyController: {pageHasLowLatencyController}. " +
+                $"VisibilityRecovery: {pageHasVisibilityRecovery}. " +
                 $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
                 $"LatencyCheckMs: {latencyCheckIntervalMillisecondsText}. " +
                 $"SeekCooldownMs: {seekCooldownMillisecondsText}. " +

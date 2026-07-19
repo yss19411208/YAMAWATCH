@@ -416,10 +416,58 @@ let lastPlaybackTime = 0;
 let lastPlaybackMovedAtMilliseconds = performance.now();
 let reconnectNonce = 0;
 let frameMonitorScheduled = false;
+let hiddenStreamSuspended = false;
 screenVideo.preload = 'auto';
 screenVideo.controls = false;
 screenVideo.muted = true;
 screenVideo.defaultPlaybackRate = 1;
+function isFmp4PageHidden() {
+  return document.hidden || document.visibilityState === 'hidden';
+}
+function suspendFmp4ForHiddenPage() {
+  if (!isFmp4PageHidden()) {
+    return false;
+  }
+
+  const nowMilliseconds = performance.now();
+  lastPlaybackMovedAtMilliseconds = nowMilliseconds;
+  if (hiddenStreamSuspended) {
+    return true;
+  }
+
+  hiddenStreamSuspended = true;
+  screenVideo.playbackRate = 1;
+  try {
+    screenVideo.pause();
+    screenVideo.removeAttribute('src');
+    screenVideo.load();
+  } catch {
+  }
+
+  return true;
+}
+function resumeFmp4FromHiddenPage() {
+  if (isFmp4PageHidden()) {
+    return;
+  }
+
+  const shouldReconnect = hiddenStreamSuspended || !screenVideo.currentSrc;
+  hiddenStreamSuspended = false;
+  frameMonitorScheduled = false;
+  lastPlaybackMovedAtMilliseconds = performance.now();
+  try {
+    lastPlaybackTime = screenVideo.currentTime;
+  } catch {
+    lastPlaybackTime = 0;
+  }
+  if (shouldReconnect) {
+    reconnectFmp4Stream(true);
+    return;
+  }
+
+  keepFmp4Playing(true);
+  keepFmp4LatencyLow();
+}
 function markFmp4PlaybackMovement(nowMilliseconds) {
   if (Math.abs(screenVideo.currentTime - lastPlaybackTime) > 0.015) {
     lastPlaybackMovedAtMilliseconds = nowMilliseconds;
@@ -460,9 +508,14 @@ function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds) {
     return false;
   }
 }
-function reconnectFmp4Stream() {
+function reconnectFmp4Stream(forceReconnect = false) {
   const nowMilliseconds = performance.now();
-  if (nowMilliseconds - lastReconnectAtMilliseconds < Math.max(3000, reconnectStallMilliseconds)) {
+  if (suspendFmp4ForHiddenPage()) {
+    return;
+  }
+
+  if (!forceReconnect &&
+      nowMilliseconds - lastReconnectAtMilliseconds < Math.max(3000, reconnectStallMilliseconds)) {
     return;
   }
 
@@ -486,6 +539,10 @@ function reconnectFmp4Stream() {
   keepFmp4Playing(true);
 }
 function keepFmp4LatencyLow() {
+  if (suspendFmp4ForHiddenPage()) {
+    return;
+  }
+
   const nowMilliseconds = performance.now();
   markFmp4PlaybackMovement(nowMilliseconds);
   const latencyState = readFmp4LatencySeconds();
@@ -522,6 +579,10 @@ function keepFmp4LatencyLow() {
   }
 }
 async function keepFmp4Playing(forcePlay = false) {
+  if (isFmp4PageHidden()) {
+    return;
+  }
+
   const nowMilliseconds = performance.now();
   if (!forcePlay && !screenVideo.paused && !screenVideo.ended) {
     return;
@@ -566,7 +627,21 @@ screenVideo.addEventListener('waiting', () => window.setTimeout(keepFmp4LatencyL
 screenVideo.addEventListener('stalled', reconnectFmp4Stream);
 screenVideo.addEventListener('seeked', keepFmp4LatencyLow);
 screenVideo.addEventListener('ended', reconnectFmp4Stream);
+document.addEventListener('visibilitychange', () => {
+  if (isFmp4PageHidden()) {
+    suspendFmp4ForHiddenPage();
+  } else {
+    resumeFmp4FromHiddenPage();
+  }
+});
+window.addEventListener('pageshow', resumeFmp4FromHiddenPage);
+window.addEventListener('focus', resumeFmp4FromHiddenPage);
+window.addEventListener('pagehide', suspendFmp4ForHiddenPage);
 window.setInterval(() => {
+  if (suspendFmp4ForHiddenPage()) {
+    return;
+  }
+
   keepFmp4LatencyLow();
   if (screenVideo.paused || screenVideo.ended) {
     keepFmp4Playing();
