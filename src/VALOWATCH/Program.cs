@@ -731,11 +731,13 @@ static class Program
                 .ReadAsStreamAsync(readTimeout.Token)
                 .GetAwaiter()
                 .GetResult();
-            byte[] streamBuffer = new byte[8 * 1024 * 1024];
+            byte[] streamBuffer = new byte[16 * 1024 * 1024];
             int totalReadBytes = 0;
             int jpegStartMarkers = 0;
+            int jpegStartMarkersAtSampleStart = 0;
+            Stopwatch? sampleStopwatch = null;
             Stopwatch readStopwatch = Stopwatch.StartNew();
-            while (readStopwatch.Elapsed < TimeSpan.FromSeconds(2) &&
+            while (readStopwatch.Elapsed < TimeSpan.FromSeconds(6) &&
                    totalReadBytes < streamBuffer.Length)
             {
                 int remainingBytes = streamBuffer.Length - totalReadBytes;
@@ -752,10 +754,23 @@ static class Program
 
                 totalReadBytes += readByteCount;
                 jpegStartMarkers = CountJpegStartMarkers(streamBuffer.AsSpan(0, totalReadBytes));
+                if (sampleStopwatch is null && jpegStartMarkers > 0)
+                {
+                    sampleStopwatch = Stopwatch.StartNew();
+                    jpegStartMarkersAtSampleStart = jpegStartMarkers;
+                }
+
+                if (sampleStopwatch?.Elapsed >= TimeSpan.FromSeconds(2))
+                {
+                    break;
+                }
             }
 
-            double sampleSeconds = Math.Max(0.001D, readStopwatch.Elapsed.TotalSeconds);
-            double observedMjpegMarkerRate = jpegStartMarkers / sampleSeconds;
+            double sampleSeconds = Math.Max(0.001D, sampleStopwatch?.Elapsed.TotalSeconds ?? readStopwatch.Elapsed.TotalSeconds);
+            int sampledJpegStartMarkers = sampleStopwatch is null
+                ? jpegStartMarkers
+                : Math.Max(0, jpegStartMarkers - jpegStartMarkersAtSampleStart);
+            double observedMjpegMarkerRate = sampledJpegStartMarkers / sampleSeconds;
             bool contentTypeLooksLikeMjpeg = response.Content.Headers.ContentType?.MediaType
                 ?.Equals("multipart/x-mixed-replace", StringComparison.OrdinalIgnoreCase) == true;
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
@@ -769,7 +784,7 @@ static class Program
                 $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"MjpegContentType: {contentTypeLooksLikeMjpeg}. " +
-                $"ReadBytes: {totalReadBytes}. JpegMarkers: {jpegStartMarkers}. " +
+                $"ReadBytes: {totalReadBytes}. JpegMarkers: {jpegStartMarkers}. SampledJpegMarkers: {sampledJpegStartMarkers}. " +
                 $"ObservedMarkerRate: {observedMjpegMarkerRate.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
