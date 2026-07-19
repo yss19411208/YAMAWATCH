@@ -57,6 +57,55 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
 
     public DateTimeOffset StartedAtUtc { get; }
 
+    public ScreenStreamOptions Options => ScreenStreamOptions.Create(
+        Target,
+        FramesPerSecond,
+        JpegQuality,
+        MaxWidth,
+        Method);
+
+    public bool IsTunnelProcessRunning
+    {
+        get
+        {
+            if (disposed)
+            {
+                return false;
+            }
+
+            try
+            {
+                return !cloudflaredProcess.HasExited;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+    }
+
+    public string TunnelProcessStatusText
+    {
+        get
+        {
+            if (disposed)
+            {
+                return "session disposed";
+            }
+
+            try
+            {
+                return cloudflaredProcess.HasExited
+                    ? $"cloudflared exited with code {cloudflaredProcess.ExitCode}"
+                    : "cloudflared running";
+            }
+            catch (InvalidOperationException exception)
+            {
+                return $"cloudflared status unavailable: {exception.Message}";
+            }
+        }
+    }
+
     public static async Task<ScreenStreamSession> StartAsync(
         AppPaths appPaths,
         ScreenCaptureTarget target,
@@ -127,6 +176,38 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         log(
             $"Screen stream session stopped. Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. Url: {PublicUrl}.",
             null);
+    }
+
+    public async Task<ScreenStreamHealthStatus> CheckPublicUrlHealthAsync(
+        HttpClient httpClient,
+        CancellationToken cancellationToken)
+    {
+        if (!IsTunnelProcessRunning)
+        {
+            return ScreenStreamHealthStatus.Unhealthy(TunnelProcessStatusText);
+        }
+
+        try
+        {
+            using HttpRequestMessage request = new(HttpMethod.Get, PublicUrl);
+            using HttpResponseMessage response = await httpClient
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+                .ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                return ScreenStreamHealthStatus.Healthy(
+                    $"public URL returned {(int)response.StatusCode}");
+            }
+
+            return ScreenStreamHealthStatus.Unhealthy(
+                $"public URL returned {(int)response.StatusCode} {response.ReasonPhrase}");
+        }
+        catch (Exception exception) when (
+            exception is HttpRequestException or TaskCanceledException or OperationCanceledException or InvalidOperationException)
+        {
+            return ScreenStreamHealthStatus.Unhealthy(
+                $"public URL check failed: {exception.GetType().Name}: {exception.Message}");
+        }
     }
 
     public void Dispose()
@@ -325,5 +406,18 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         {
             process.Dispose();
         }
+    }
+}
+
+internal readonly record struct ScreenStreamHealthStatus(bool IsHealthy, string Detail)
+{
+    public static ScreenStreamHealthStatus Healthy(string detail)
+    {
+        return new ScreenStreamHealthStatus(true, detail);
+    }
+
+    public static ScreenStreamHealthStatus Unhealthy(string detail)
+    {
+        return new ScreenStreamHealthStatus(false, detail);
     }
 }

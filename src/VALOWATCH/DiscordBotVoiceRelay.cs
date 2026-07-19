@@ -6,6 +6,7 @@ using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 using System.Diagnostics;
+using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -27,9 +28,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan AudioStatsLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ScreenStreamHealthCheckInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ScreenStreamHealthRequestTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan ScreenStreamRestartTimeout = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan ScreenStreamMonitorShutdownTimeout = TimeSpan.FromSeconds(3);
     private const int DiscordEmbedDescriptionLimit = 4096;
     private const int DiscordEmbedDescriptionSafetyMargin = 120;
+    private const int ScreenStreamPublicUrlFailureThreshold = 2;
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan ScreenStreamRestartFailureNotificationCooldown = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan StartupNotificationCooldown = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan MicrophoneHealthCheckInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MicrophoneCallbackTimeout = TimeSpan.FromSeconds(4);
@@ -138,6 +145,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool screenshotCommandEnabled;
     private bool streamCommandEnabled = true;
     private ScreenStreamSession? activeScreenStreamSession;
+    private ScreenStreamOptions? requestedScreenStreamOptions;
+    private IMessageChannel? activeScreenStreamNotifyChannel;
+    private CancellationTokenSource? screenStreamMonitorCancellationTokenSource;
+    private Task? screenStreamMonitorTask;
+    private bool screenStreamRestartInProgress;
+    private int screenStreamConsecutiveHealthFailures;
+    private int screenStreamRequestGeneration;
+    private DateTimeOffset lastScreenStreamRestartFailureNotificationAtUtc = DateTimeOffset.MinValue;
     private ulong currentMonitoredDiscordUserId;
     private ulong currentVoiceGuildId;
     private string currentVoiceGuildName = string.Empty;
@@ -1619,7 +1634,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .ConfigureAwait(false);
 
             using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(3));
-            ScreenStreamSession session = await StartOrReplaceScreenStreamAsync(streamOptions, timeout.Token)
+            ScreenStreamSession session = await StartOrReplaceScreenStreamAsync(streamOptions, targetChannel, timeout.Token)
                 .ConfigureAwait(false);
 
             await targetChannel
@@ -1733,8 +1748,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task<ScreenStreamSession> StartOrReplaceScreenStreamAsync(
         ScreenStreamOptions streamOptions,
+        IMessageChannel notifyChannel,
         CancellationToken cancellationToken)
     {
+        await StopScreenStreamMonitorAsync().ConfigureAwait(false);
         await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -1748,6 +1765,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .StartAsync(appPaths, streamOptions, WriteScreenStreamLog, cancellationToken)
                 .ConfigureAwait(false);
             activeScreenStreamSession = session;
+            requestedScreenStreamOptions = streamOptions;
+            activeScreenStreamNotifyChannel = notifyChannel;
+            screenStreamConsecutiveHealthFailures = 0;
+            screenStreamRestartInProgress = false;
+            screenStreamRequestGeneration++;
             WriteLog(
                 "Screen stream started. " +
                 $"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}. " +
@@ -1755,6 +1777,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"Method: {ScreenStreamMethodNames.ToOptionValue(session.Method)}. " +
                 $"Engine: {session.EngineName}. " +
                 $"Url: {session.PublicUrl}.");
+            EnsureScreenStreamMonitorStarted();
             return session;
         }
         finally
@@ -1765,12 +1788,18 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task<bool> StopActiveScreenStreamAsync(string reason, IMessageChannel? notifyChannel)
     {
+        await StopScreenStreamMonitorAsync().ConfigureAwait(false);
         ScreenStreamSession? sessionToStop;
         await screenStreamSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
             sessionToStop = activeScreenStreamSession;
             activeScreenStreamSession = null;
+            requestedScreenStreamOptions = null;
+            activeScreenStreamNotifyChannel = null;
+            screenStreamRestartInProgress = false;
+            screenStreamConsecutiveHealthFailures = 0;
+            screenStreamRequestGeneration++;
         }
         finally
         {
@@ -1808,6 +1837,369 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return true;
     }
 
+    private void EnsureScreenStreamMonitorStarted()
+    {
+        lock (stateLock)
+        {
+            if (screenStreamMonitorTask is { IsCompleted: false })
+            {
+                return;
+            }
+
+            screenStreamMonitorCancellationTokenSource?.Dispose();
+            CancellationTokenSource cancellationTokenSource = new();
+            screenStreamMonitorCancellationTokenSource = cancellationTokenSource;
+            screenStreamMonitorTask = Task.Run(
+                () => MonitorScreenStreamAsync(cancellationTokenSource.Token),
+                CancellationToken.None);
+        }
+    }
+
+    private async Task StopScreenStreamMonitorAsync()
+    {
+        CancellationTokenSource? cancellationTokenSource;
+        Task? monitorTask;
+        lock (stateLock)
+        {
+            cancellationTokenSource = screenStreamMonitorCancellationTokenSource;
+            monitorTask = screenStreamMonitorTask;
+            screenStreamMonitorCancellationTokenSource = null;
+            screenStreamMonitorTask = null;
+        }
+
+        if (cancellationTokenSource is null)
+        {
+            return;
+        }
+
+        await cancellationTokenSource.CancelAsync().ConfigureAwait(false);
+        if (monitorTask is not null)
+        {
+            try
+            {
+                await monitorTask.WaitAsync(ScreenStreamMonitorShutdownTimeout).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (TimeoutException exception)
+            {
+                WriteLog("Screen stream monitor did not stop before timeout; cleanup will continue.", exception);
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Screen stream monitor stopped with an error.", exception);
+            }
+        }
+
+        cancellationTokenSource.Dispose();
+    }
+
+    private async Task MonitorScreenStreamAsync(CancellationToken cancellationToken)
+    {
+        using HttpClient httpClient = new()
+        {
+            Timeout = ScreenStreamHealthRequestTimeout
+        };
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(ScreenStreamHealthCheckInterval, cancellationToken).ConfigureAwait(false);
+                await RepairScreenStreamIfNeededAsync(httpClient, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Screen stream monitor stopped unexpectedly.", exception);
+        }
+    }
+
+    private async Task RepairScreenStreamIfNeededAsync(HttpClient httpClient, CancellationToken cancellationToken)
+    {
+        ScreenStreamSession? sessionSnapshot;
+        ScreenStreamOptions? requestedOptionsSnapshot;
+        int requestGenerationSnapshot;
+        await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (screenStreamRestartInProgress)
+            {
+                return;
+            }
+
+            requestedOptionsSnapshot = requestedScreenStreamOptions;
+            sessionSnapshot = activeScreenStreamSession;
+            requestGenerationSnapshot = screenStreamRequestGeneration;
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+
+        if (!requestedOptionsSnapshot.HasValue)
+        {
+            return;
+        }
+
+        string? restartReason = null;
+        if (sessionSnapshot is null)
+        {
+            restartReason = "screen stream session missing while the stream command is still enabled";
+        }
+        else if (!sessionSnapshot.IsTunnelProcessRunning)
+        {
+            restartReason = sessionSnapshot.TunnelProcessStatusText;
+        }
+        else
+        {
+            ScreenStreamHealthStatus healthStatus = await sessionSnapshot
+                .CheckPublicUrlHealthAsync(httpClient, cancellationToken)
+                .ConfigureAwait(false);
+            if (healthStatus.IsHealthy)
+            {
+                await ResetScreenStreamHealthFailuresAsync(sessionSnapshot, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            int failureCount = await IncrementScreenStreamHealthFailuresAsync(
+                    sessionSnapshot,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (failureCount <= 0)
+            {
+                return;
+            }
+
+            WriteLog(
+                $"Screen stream public URL health check failed. " +
+                $"Failures: {failureCount}/{ScreenStreamPublicUrlFailureThreshold}. " +
+                $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}.");
+            if (failureCount < ScreenStreamPublicUrlFailureThreshold)
+            {
+                return;
+            }
+
+            restartReason = $"{healthStatus.Detail} after {failureCount} consecutive checks";
+        }
+
+        await RestartScreenStreamAsync(
+                sessionSnapshot,
+                requestedOptionsSnapshot.Value,
+                requestGenerationSnapshot,
+                restartReason,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task ResetScreenStreamHealthFailuresAsync(
+        ScreenStreamSession session,
+        CancellationToken cancellationToken)
+    {
+        await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (ReferenceEquals(activeScreenStreamSession, session))
+            {
+                screenStreamConsecutiveHealthFailures = 0;
+            }
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+    }
+
+    private async Task<int> IncrementScreenStreamHealthFailuresAsync(
+        ScreenStreamSession session,
+        CancellationToken cancellationToken)
+    {
+        await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!ReferenceEquals(activeScreenStreamSession, session))
+            {
+                return 0;
+            }
+
+            screenStreamConsecutiveHealthFailures++;
+            return screenStreamConsecutiveHealthFailures;
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+    }
+
+    private async Task RestartScreenStreamAsync(
+        ScreenStreamSession? expectedSession,
+        ScreenStreamOptions requestedOptionsSnapshot,
+        int requestGenerationSnapshot,
+        string restartReason,
+        CancellationToken cancellationToken)
+    {
+        ScreenStreamSession? staleSession;
+        IMessageChannel? notifyChannel;
+        await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!requestedScreenStreamOptions.HasValue ||
+                screenStreamRequestGeneration != requestGenerationSnapshot ||
+                screenStreamRestartInProgress)
+            {
+                return;
+            }
+
+            if (expectedSession is not null && !ReferenceEquals(activeScreenStreamSession, expectedSession))
+            {
+                return;
+            }
+
+            screenStreamRestartInProgress = true;
+            screenStreamConsecutiveHealthFailures = 0;
+            staleSession = activeScreenStreamSession;
+            activeScreenStreamSession = null;
+            notifyChannel = activeScreenStreamNotifyChannel ?? discordStatusTextChannel;
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+
+        string staleUrl = staleSession?.PublicUrl ?? "(none)";
+        WriteLog($"Screen stream tunnel is unavailable; restarting. Reason: {restartReason}. OldUrl: {staleUrl}.");
+
+        ScreenStreamSession? replacementSession = null;
+        try
+        {
+            if (staleSession is not null)
+            {
+                await staleSession.DisposeAsync().ConfigureAwait(false);
+            }
+
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(ScreenStreamRestartTimeout);
+            replacementSession = await ScreenStreamSession
+                .StartAsync(appPaths, requestedOptionsSnapshot, WriteScreenStreamLog, timeout.Token)
+                .ConfigureAwait(false);
+
+            bool acceptedReplacement = false;
+            ScreenStreamSession? acceptedSession = null;
+            await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (requestedScreenStreamOptions.HasValue &&
+                    screenStreamRequestGeneration == requestGenerationSnapshot &&
+                    requestedScreenStreamOptions.Value.Equals(requestedOptionsSnapshot))
+                {
+                    activeScreenStreamSession = replacementSession;
+                    activeScreenStreamNotifyChannel = notifyChannel;
+                    screenStreamConsecutiveHealthFailures = 0;
+                    acceptedReplacement = true;
+                    acceptedSession = replacementSession;
+                    replacementSession = null;
+                }
+
+                screenStreamRestartInProgress = false;
+            }
+            finally
+            {
+                screenStreamSemaphore.Release();
+            }
+
+            if (!acceptedReplacement)
+            {
+                if (replacementSession is not null)
+                {
+                    await replacementSession.DisposeAsync().ConfigureAwait(false);
+                }
+
+                return;
+            }
+
+            if (acceptedSession is null)
+            {
+                return;
+            }
+
+            WriteLog(
+                $"Screen stream tunnel restarted. Reason: {restartReason}. " +
+                $"NewUrl: {acceptedSession.PublicUrl}.");
+            if (notifyChannel is not null)
+            {
+                await notifyChannel
+                    .SendMessageAsync(embed: BuildStreamRecoveredEmbed(acceptedSession, restartReason))
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or TimeoutException or OperationCanceledException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+        {
+            if (replacementSession is not null)
+            {
+                try
+                {
+                    await replacementSession.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception disposeException) when (disposeException is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+                {
+                    WriteLog("Screen stream replacement cleanup failed after restart error.", disposeException);
+                }
+            }
+
+            await MarkScreenStreamRestartFinishedAsync(requestGenerationSnapshot).ConfigureAwait(false);
+            WriteLog($"Screen stream tunnel restart failed. Reason: {restartReason}.", exception);
+            await SendScreenStreamRestartFailureNotificationAsync(notifyChannel, exception).ConfigureAwait(false);
+        }
+    }
+
+    private async Task MarkScreenStreamRestartFinishedAsync(int requestGenerationSnapshot)
+    {
+        await screenStreamSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (screenStreamRequestGeneration == requestGenerationSnapshot)
+            {
+                screenStreamRestartInProgress = false;
+            }
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+    }
+
+    private async Task SendScreenStreamRestartFailureNotificationAsync(
+        IMessageChannel? notifyChannel,
+        Exception exception)
+    {
+        if (notifyChannel is null)
+        {
+            return;
+        }
+
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc - lastScreenStreamRestartFailureNotificationAtUtc < ScreenStreamRestartFailureNotificationCooldown)
+        {
+            return;
+        }
+
+        lastScreenStreamRestartFailureNotificationAtUtc = nowUtc;
+        try
+        {
+            await notifyChannel
+                .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信URLの自動復旧に失敗しました: {exception.Message}"))
+                .ConfigureAwait(false);
+        }
+        catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("Screen stream restart failure notification failed.", responseException);
+        }
+    }
+
     private Embed BuildStreamStartedEmbed(ScreenStreamSession session)
     {
         EmbedBuilder embedBuilder = new()
@@ -1822,6 +2214,23 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 "停止: /stream off",
+            Color = new Discord.Color(88, 166, 255),
+            Timestamp = DateTimeOffset.Now
+        };
+        return embedBuilder.Build();
+    }
+
+    private Embed BuildStreamRecoveredEmbed(ScreenStreamSession session, string restartReason)
+    {
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH 配信URL更新",
+            Description =
+                $"新しい配信URL: {session.PublicUrl}{Environment.NewLine}" +
+                $"理由: {restartReason}{Environment.NewLine}" +
+                $"対象: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
+                $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
+                $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}",
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
         };
@@ -1856,6 +2265,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 $"URL: {session.PublicUrl}{Environment.NewLine}" +
+                $"トンネル: {session.TunnelProcessStatusText}{Environment.NewLine}" +
                 $"開始: {session.StartedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
         }
 
