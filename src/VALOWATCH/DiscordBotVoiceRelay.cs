@@ -211,7 +211,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
-            await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Client).ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
             lock (stateLock)
@@ -321,7 +321,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             startupStage = DiscordVoiceChannelConnectStartupStage;
             audioClient = await ConnectVoiceChannelWithTimeoutAsync(voiceChannel).ConfigureAwait(false);
             WriteLog($"Joined Discord voice channel {voiceChannel.Id}. SelfDeaf: true. SelfMute: false.");
-            await SendObservedDiscordVoiceContextIfNeededAsync(guild).ConfigureAwait(false);
+            await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Client).ConfigureAwait(false);
             if (valorantDetected)
             {
                 await SendValorantOpenedNotificationIfNeededAsync(settings).ConfigureAwait(false);
@@ -979,11 +979,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (joinedVoiceChannel is null)
             {
                 ClearObservedDiscordVoiceContextIfMatching(previousVoiceChannel, user.Id);
-                return;
-            }
-
-            if (currentVoiceGuildId != 0 && joinedVoiceChannel.Guild.Id != currentVoiceGuildId)
-            {
                 return;
             }
 
@@ -1678,7 +1673,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         WriteLog(
             "Discord user voice tracking configured. " +
             $"Guild: {currentVoiceGuildName} ({currentVoiceGuildId}). " +
-            $"MonitoredUserId: {(currentMonitoredDiscordUserId == 0 ? "any-human" : currentMonitoredDiscordUserId.ToString(System.Globalization.CultureInfo.InvariantCulture))}.");
+            $"MonitoredUserId: {(currentMonitoredDiscordUserId == 0 ? "not-configured" : currentMonitoredDiscordUserId.ToString(System.Globalization.CultureInfo.InvariantCulture))}.");
     }
 
     private async Task EnsureDiscordAudioCommandAsync(SocketGuild guild, DiscordBotSettings settings)
@@ -1988,13 +1983,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         LineProcessLoopbackWaveProvider? discordProvider = discordProcessLoopbackProvider;
         if (discordProcessAudioRuntimeEnabled && discordProvider?.IsCapturing == true)
         {
-            string guildName = string.IsNullOrWhiteSpace(currentDiscordConversationGuildName)
-                ? currentVoiceGuildName
-                : currentDiscordConversationGuildName;
-            string voiceChannelName = string.IsNullOrWhiteSpace(currentDiscordConversationChannelName)
-                ? currentVoiceChannelName
-                : currentDiscordConversationChannelName;
-            labels.Add(BuildDiscordConversationLabel(guildName, voiceChannelName));
+            if (!string.IsNullOrWhiteSpace(currentDiscordConversationGuildName) &&
+                !string.IsNullOrWhiteSpace(currentDiscordConversationChannelName))
+            {
+                labels.Add(BuildDiscordConversationLabel(
+                    currentDiscordConversationGuildName,
+                    currentDiscordConversationChannelName));
+            }
+            else
+            {
+                labels.Add("Discord会話（鯖/VC未検知）");
+            }
         }
 
         return labels.Count == 0 ? "マイク" : string.Join(Environment.NewLine, labels);
@@ -3030,22 +3029,28 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task SendObservedDiscordVoiceContextIfNeededAsync(SocketGuild guild)
+    private async Task SendObservedDiscordVoiceContextIfNeededAsync(DiscordSocketClient client)
     {
-        if (!TryResolveObservedDiscordVoiceChannel(guild, out SocketVoiceChannel? voiceChannel, out ulong observedUserId))
+        foreach (SocketGuild guild in client.Guilds)
         {
-            WriteLog("No configured Discord monitored user voice state was detected in the configured guild.");
+            if (!TryResolveObservedDiscordVoiceChannel(guild, out SocketVoiceChannel? voiceChannel, out ulong observedUserId))
+            {
+                continue;
+            }
+
+            if (voiceChannel is null)
+            {
+                continue;
+            }
+
+            await SendDiscordVoiceContextNotificationIfNeededAsync(voiceChannel, observedUserId)
+                .ConfigureAwait(false);
             return;
         }
 
-        if (voiceChannel is null)
-        {
-            WriteLog("Discord human voice state detection returned no voice channel.");
-            return;
-        }
-
-        await SendDiscordVoiceContextNotificationIfNeededAsync(voiceChannel, observedUserId)
-            .ConfigureAwait(false);
+        WriteLog(
+            "No configured Discord monitored user voice state was detected in bot-visible guilds. " +
+            "Guilds where the bot is not a member cannot be inspected by the Discord bot gateway.");
     }
 
     private bool TryResolveObservedDiscordVoiceChannel(
@@ -3436,6 +3441,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         lock (stateLock)
         {
             List<string> statusLines = [];
+            bool discordAppRunning = RunningApplicationSnapshot.IsDiscordProcessRunning();
+            statusLines.Add($"Discordアプリ: {(discordAppRunning ? "実行中" : "未検出")}");
+
             if (IsRunning &&
                 !string.IsNullOrWhiteSpace(currentVoiceGuildName) &&
                 !string.IsNullOrWhiteSpace(currentVoiceChannelName))
@@ -3470,6 +3478,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             {
                 statusLines.Add(string.Empty);
                 statusLines.Add("Discord会話: 検知なし");
+                if (discordAppRunning)
+                {
+                    statusLines.Add("Bot未参加の鯖/DMはVC名取得不可");
+                }
             }
 
             return string.Join(Environment.NewLine, statusLines);

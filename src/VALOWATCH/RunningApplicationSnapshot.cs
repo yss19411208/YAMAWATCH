@@ -8,6 +8,13 @@ internal static class RunningApplicationSnapshot
 {
     private const int EmbedDescriptionLimit = 4096;
     private const int EmbedDescriptionSafetyMargin = 250;
+    private static readonly string[] DiscordProcessNames =
+    [
+        "Discord",
+        "DiscordCanary",
+        "DiscordPTB",
+        "DiscordDevelopment"
+    ];
 
     public static Embed BuildDiscordEmbed(string discordVoiceStatus = "")
     {
@@ -21,7 +28,10 @@ internal static class RunningApplicationSnapshot
             Timestamp = snapshotData.CapturedAt
         };
 
-        embedBuilder.AddField("対象", "下のタスクバーに表示されているアプリのみ", inline: false);
+        string targetDescription = snapshotData.DiscordProcessIncluded
+            ? "下のタスクバーに表示されているアプリ + Discord（最小化中も検出）"
+            : "下のタスクバーに表示されているアプリのみ";
+        embedBuilder.AddField("対象", targetDescription, inline: false);
         if (!string.IsNullOrWhiteSpace(discordVoiceStatus))
         {
             embedBuilder.AddField("Discord通話", discordVoiceStatus.Trim(), inline: false);
@@ -67,6 +77,11 @@ internal static class RunningApplicationSnapshot
     {
         Embed embed = BuildAllProcessDiscordEmbed();
         return BuildDiagnosticText(embed);
+    }
+
+    internal static bool IsDiscordProcessRunning()
+    {
+        return CountRunningDiscordProcesses() > 0;
     }
 
     private static string BuildDiagnosticText(Embed embed)
@@ -135,10 +150,56 @@ internal static class RunningApplicationSnapshot
             applicationCounts[group.Key] = group.Count();
         }
 
+        bool discordProcessIncluded = EnsureDiscordProcessIncluded(applicationCounts);
+
         return new RunningApplicationSnapshotData(
             DateTimeOffset.Now,
             taskbarWindows.Count,
+            discordProcessIncluded,
             applicationCounts);
+    }
+
+    private static bool EnsureDiscordProcessIncluded(IDictionary<string, int> applicationCounts)
+    {
+        if (CountRunningDiscordProcesses() == 0)
+        {
+            return false;
+        }
+
+        if (applicationCounts.ContainsKey("Discord"))
+        {
+            return false;
+        }
+
+        applicationCounts["Discord"] = 1;
+        return true;
+    }
+
+    private static int CountRunningDiscordProcesses()
+    {
+        int runningProcessCount = 0;
+        foreach (string processName in DiscordProcessNames)
+        {
+            Process[] processes;
+            try
+            {
+                processes = Process.GetProcessesByName(processName);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                continue;
+            }
+
+            foreach (Process process in processes)
+            {
+                using (process)
+                {
+                    runningProcessCount++;
+                }
+            }
+        }
+
+        return runningProcessCount;
     }
 
     private static RunningProcessSnapshotData CaptureAllRunningProcesses()
@@ -278,6 +339,12 @@ internal static class RunningApplicationSnapshot
 
     private static bool TryMapKnownProcessName(string processName, string windowTitle, out string displayName)
     {
+        if (IsDiscordProcessName(processName))
+        {
+            displayName = "Discord";
+            return true;
+        }
+
         if (string.Equals(processName, "VALORANT-Win64-Shipping", StringComparison.OrdinalIgnoreCase))
         {
             displayName = "VALORANT";
@@ -305,6 +372,12 @@ internal static class RunningApplicationSnapshot
 
         displayName = string.Empty;
         return false;
+    }
+
+    private static bool IsDiscordProcessName(string processName)
+    {
+        return DiscordProcessNames.Any(discordProcessName =>
+            string.Equals(discordProcessName, processName, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string TryGetFileDescription(Process process)
@@ -488,6 +561,7 @@ internal static class RunningApplicationSnapshot
     private sealed record RunningApplicationSnapshotData(
         DateTimeOffset CapturedAt,
         int WindowCount,
+        bool DiscordProcessIncluded,
         IReadOnlyDictionary<string, int> ApplicationCounts);
 
     private sealed record RunningProcessSnapshotData(

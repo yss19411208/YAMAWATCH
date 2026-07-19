@@ -1509,11 +1509,12 @@ static class Program
         try
         {
             string message = RunningApplicationSnapshot.BuildDiagnosticText(
-                $"BOT: VC接続中{Environment.NewLine}鯖: テスト鯖{Environment.NewLine}VC: 一般");
+                $"Discordアプリ: 実行中{Environment.NewLine}BOT: VC接続中{Environment.NewLine}鯖: テスト鯖{Environment.NewLine}VC: 一般");
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             bool snapshotIsReady = message.Length <= 2000 &&
                 message.Contains("VALOWATCH 実行中アプリ", StringComparison.Ordinal) &&
                 message.Contains("Discord通話", StringComparison.Ordinal) &&
+                message.Contains("Discordアプリ: 実行中", StringComparison.Ordinal) &&
                 message.Contains("BOT: VC接続中", StringComparison.Ordinal) &&
                 message.Contains("VC: 一般", StringComparison.Ordinal) &&
                 !message.Contains("```", StringComparison.Ordinal) &&
