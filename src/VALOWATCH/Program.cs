@@ -1648,21 +1648,21 @@ static class Program
                 monitoredDiscordUserId: 1234,
                 voiceStateUserId: 1234,
                 isBot: false);
-            bool otherHumanIgnoredWhenConfigured = !DiscordBotVoiceRelay.ShouldTrackDiscordVoiceStateUser(
+            bool otherHumanTrackedWhenConfigured = DiscordBotVoiceRelay.ShouldTrackDiscordVoiceStateUser(
                 monitoredDiscordUserId: 1234,
                 voiceStateUserId: 5678,
                 isBot: false);
             bool ready = anyHumanTracked &&
                 botsIgnored &&
                 monitoredUserTracked &&
-                otherHumanIgnoredWhenConfigured;
+                otherHumanTrackedWhenConfigured;
 
             AppendDiagnosticLogLine(
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Discord voice state filter check: " +
                 $"{(ready ? "ready" : "failed")}. " +
                 $"AnyHuman: {anyHumanTracked}. BotsIgnored: {botsIgnored}. " +
-                $"MonitoredUser: {monitoredUserTracked}. OtherHumanIgnored: {otherHumanIgnoredWhenConfigured}.");
+                $"MonitoredUser: {monitoredUserTracked}. OtherHumanTrackedWhenConfigured: {otherHumanTrackedWhenConfigured}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)

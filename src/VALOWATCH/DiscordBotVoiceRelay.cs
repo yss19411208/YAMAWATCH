@@ -3063,8 +3063,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return true;
         }
 
-        if (currentMonitoredDiscordUserId == 0 &&
-            TryFindAnyHumanVoiceChannel(guild, out voiceChannel, out observedUserId))
+        if (currentMonitoredDiscordUserId != 0)
+        {
+            WriteLog(
+                "Configured Discord monitored user was not found in a voice channel; " +
+                "falling back to any human voice state in the configured guild.");
+        }
+
+        if (TryFindAnyHumanVoiceChannel(guild, out voiceChannel, out observedUserId))
         {
             return true;
         }
@@ -3221,12 +3227,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         ulong voiceStateUserId,
         bool isBot)
     {
+        _ = monitoredDiscordUserId;
+        _ = voiceStateUserId;
+
         if (isBot)
         {
             return false;
         }
 
-        return monitoredDiscordUserId == 0 || monitoredDiscordUserId == voiceStateUserId;
+        return true;
     }
 
     private static string BuildDiscordConversationLabel(string guildName, string voiceChannelName)
