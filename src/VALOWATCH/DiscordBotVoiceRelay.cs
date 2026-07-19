@@ -1741,6 +1741,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 "Screen stream started. " +
                 $"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}. " +
                 $"FPS: {session.FramesPerSecond}. Quality: {session.JpegQuality}. Width: {session.MaxWidth}. " +
+                $"Engine: {session.EngineName}. " +
                 $"Url: {session.PublicUrl}.");
             return session;
         }
@@ -1774,8 +1775,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         string publicUrl = sessionToStop.PublicUrl;
         int framesPerSecond = sessionToStop.FramesPerSecond;
         int maxWidth = sessionToStop.MaxWidth;
+        string engineName = sessionToStop.EngineName;
         await sessionToStop.DisposeAsync().ConfigureAwait(false);
-        WriteLog($"Screen stream stopped. Reason: {reason}. Target: {targetText}. FPS: {framesPerSecond}. Width: {maxWidth}. Url: {publicUrl}.");
+        WriteLog($"Screen stream stopped. Reason: {reason}. Target: {targetText}. FPS: {framesPerSecond}. Width: {maxWidth}. Engine: {engineName}. Url: {publicUrl}.");
         if (notifyChannel is not null)
         {
             try
@@ -1804,6 +1806,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
                 $"JPEG品質: {session.JpegQuality}{Environment.NewLine}" +
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
+                $"方式: {session.EngineName}{Environment.NewLine}" +
                 "停止: /stream off",
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
@@ -1836,6 +1839,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
                 $"JPEG品質: {session.JpegQuality}{Environment.NewLine}" +
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
+                $"方式: {session.EngineName}{Environment.NewLine}" +
                 $"URL: {session.PublicUrl}{Environment.NewLine}" +
                 $"開始: {session.StartedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
         }

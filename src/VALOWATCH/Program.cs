@@ -204,6 +204,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-ffmpeg-tool", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunFfmpegToolDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-identity", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateIdentityDiagnostic(args);
@@ -660,7 +666,7 @@ static class Program
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
         {
             TryWriteDiagnosticFailure(logFilePath, "Stream server check", exception);
             Environment.ExitCode = 1;
@@ -685,9 +691,21 @@ static class Program
                 ScreenStreamingServer.MaximumFramesPerSecond,
                 ScreenStreamingServer.MinimumJpegQuality,
                 ScreenStreamingServer.MinimumMaxWidth);
+            string ffmpegPath = FfmpegToolProvider
+                .ResolveFfmpegPathAsync(
+                    appPaths,
+                    (message, exception) =>
+                    {
+                        string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                        AppendDiagnosticLogLine(logFilePath, $"{DateTimeOffset.Now:O} [Diagnostics] FFmpeg setup: {message}{exceptionText}");
+                    },
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
             List<string> serverMessages = [];
             server = ScreenStreamingServer.Start(
                 options,
+                ffmpegPath,
                 (message, exception) =>
                 {
                     string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
@@ -737,7 +755,6 @@ static class Program
                 jpegStartMarkers = CountJpegStartMarkers(streamBuffer.AsSpan(0, totalReadBytes));
             }
 
-            double burstCaptureFps = MeasureBurstCaptureFramesPerSecond(options, frameCount: 30);
             bool contentTypeLooksLikeMjpeg = response.Content.Headers.ContentType?.MediaType
                 ?.Equals("multipart/x-mixed-replace", StringComparison.OrdinalIgnoreCase) == true;
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
@@ -749,13 +766,13 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Stream 60fps check: " +
                 $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
-                $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. MjpegContentType: {contentTypeLooksLikeMjpeg}. " +
+                $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
+                $"MjpegContentType: {contentTypeLooksLikeMjpeg}. " +
                 $"ReadBytes: {totalReadBytes}. JpegMarkers: {jpegStartMarkers}. " +
-                $"BurstCaptureFPS: {burstCaptureFps.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
         {
             TryWriteDiagnosticFailure(logFilePath, "Stream 60fps check", exception);
             Environment.ExitCode = 1;
@@ -763,6 +780,40 @@ static class Program
         finally
         {
             server?.Dispose();
+        }
+    }
+
+    private static void RunFfmpegToolDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            string ffmpegPath = FfmpegToolProvider
+                .ResolveFfmpegPathAsync(
+                    appPaths,
+                    (message, exception) =>
+                    {
+                        string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                        AppendDiagnosticLogLine(logFilePath, $"{DateTimeOffset.Now:O} [Diagnostics] FFmpeg setup: {message}{exceptionText}");
+                    },
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            FileInfo ffmpegFile = new(ffmpegPath);
+            bool ready = ffmpegFile.Exists && ffmpegFile.Length > 1024 * 1024;
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] FFmpeg tool check: " +
+                $"{(ready ? "ready" : "failed")}. Path: {ffmpegPath}. Bytes: {ffmpegFile.Length}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or System.ComponentModel.Win32Exception or System.IO.InvalidDataException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "FFmpeg tool check", exception);
+            Environment.ExitCode = 1;
         }
     }
 

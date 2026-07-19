@@ -66,6 +66,42 @@ jobs:
             Remove-Item -LiteralPath $modelZipPath -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Download FFmpeg screen streaming tool
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path .\tools -Force | Out-Null
+          $ffmpegZipPath = ".\tools\ffmpeg-release-essentials.zip"
+          $ffmpegExtractPath = ".\tools\ffmpeg-extract"
+          $ffmpegShaUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256"
+          $ffmpegZipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+          $shaText = Invoke-RestMethod -Uri $ffmpegShaUrl
+          $expectedSha = [regex]::Match([string]$shaText, "\b[a-fA-F0-9]{64}\b").Value.ToUpperInvariant()
+          if ([string]::IsNullOrWhiteSpace($expectedSha)) {
+            throw "FFmpeg SHA-256 digest could not be parsed."
+          }
+
+          Invoke-WebRequest -Uri $ffmpegZipUrl -OutFile $ffmpegZipPath
+          $actualSha = (Get-FileHash -Path $ffmpegZipPath -Algorithm SHA256).Hash.ToUpperInvariant()
+          if ($actualSha -ne $expectedSha) {
+            throw "FFmpeg SHA-256 mismatch. Expected $expectedSha but got $actualSha."
+          }
+
+          Remove-Item -LiteralPath $ffmpegExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path $ffmpegZipPath), (Join-Path (Get-Location) $ffmpegExtractPath))
+          $ffmpegExe = Get-ChildItem -Path $ffmpegExtractPath -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if ($null -eq $ffmpegExe) {
+            throw "Downloaded FFmpeg archive did not contain ffmpeg.exe."
+          }
+
+          Copy-Item -LiteralPath $ffmpegExe.FullName -Destination .\tools\ffmpeg.exe -Force
+          $header = [System.IO.File]::ReadAllBytes((Resolve-Path .\tools\ffmpeg.exe))[0..1]
+          if ($header[0] -ne 0x4D -or $header[1] -ne 0x5A) {
+            throw "Extracted ffmpeg.exe is not a Windows PE executable."
+          }
+
       - name: Publish VALOWATCH agents for embedding
         shell: pwsh
         run: |

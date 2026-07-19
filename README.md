@@ -34,11 +34,10 @@ VALOWATCH は、VALORANT 起動中の strats.gg オーバーレイと、Discord 
 - VALORANT画面録画
 - カメラ録画
 - MP3 / MP4のDiscord添付共有
-- FFmpeg同梱
 
 文字起こしは録音ファイルを保存しません。短い音声チャンクをメモリ上で処理し、exeに埋め込んだ無料のVosk日本語モデルを初回起動時に自動展開してローカル認識します。外部の有料APIへ音声を送信しません。
 
-過去に作られた録音ファイルはユーザーデータなので自動削除しませんが、今後VALOWATCHが新しく作ることはありません。更新時にはアプリ配下の旧FFmpegツールを削除します。
+過去に作られた録音ファイルはユーザーデータなので自動削除しませんが、今後VALOWATCHが新しく作ることはありません。FFmpegは録画保存ではなく、Discordコマンドで開始したリンク配信の60fps経路にだけ使います。
 
 ## インストール
 
@@ -132,6 +131,8 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 
 配信はMJPEG連続ストリームで、`fps`、`quality`、`width` を指定できます。60fpsを最優先する例は `/stream on target:valorant fps:60 quality:30 width:320` です。見やすさを上げたい場合は `width:640`、重い場合は `/stream on target:valorant fps:30 quality:60 width:960` または `fps:15` に下げてください。指定しない場合は `.env` の `VALOWATCH_STREAM_DEFAULT_FPS`、`VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY`、`VALOWATCH_STREAM_DEFAULT_WIDTH` を使い、未設定なら15fps/品質65/横幅960pxで開始します。
 
+配布先PCにFFmpegが入っていなくても、GitHub Actionsで作る更新版 `VALOWATCH_App.exe` にはWindows用FFmpegが埋め込まれます。`fps:60` で開始するとVALOWATCHが埋め込みFFmpegを `data\tools\ffmpeg\ffmpeg.exe` へ展開し、以後の60fps配信はFFmpegの `gdigrab` と `mpjpeg` を使う高速経路になります。ローカル開発版など埋め込みFFmpegが無い場合だけ、Windows用FFmpeg essentials ZIPを取得してSHA-256確認後に配置します。
+
 文字起こしは `VALOWATCH_TRANSCRIPTION_ENABLED=true` で有効化します。GitHub公開更新版では `VALOWATCH_TRANSCRIPTION_ENGINE=vosk` を使い、Vosk日本語smallモデルをexeから `data\models` へ自動展開します。VCがText-In-Voice対応なら入室中VCのテキストチャットへ投稿し、使えない場合だけ `DISCORD_TEXT_CHANNEL_ID` へ投稿します。
 
 ## 自動更新
@@ -159,6 +160,7 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 .\VALOWATCH.exe --check-stream-command
 .\VALOWATCH.exe --check-stream-server
 .\VALOWATCH.exe --check-stream-60fps
+.\VALOWATCH.exe --check-ffmpeg-tool
 .\VALOWATCH.exe --check-update-identity --expected-current-commit=<commit SHA>
 .\VALOWATCH_Start.exe --check-start-agent
 ```

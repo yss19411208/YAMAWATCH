@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -25,6 +26,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly string token;
     private readonly TimeSpan frameInterval;
     private readonly ScreenCapturePlan capturePlan;
+    private readonly string? ffmpegPath;
     private FullScreenScreenshotFrame? cachedFrame;
     private DateTimeOffset cachedFrameAtUtc = DateTimeOffset.MinValue;
     private Task? acceptTask;
@@ -33,11 +35,13 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         TcpListener listener,
         ScreenStreamOptions options,
         ScreenCapturePlan capturePlan,
+        string? ffmpegPath,
         Action<string, Exception?> log)
     {
         this.listener = listener;
         Options = options;
         this.capturePlan = capturePlan;
+        this.ffmpegPath = string.IsNullOrWhiteSpace(ffmpegPath) ? null : ffmpegPath;
         this.log = log;
         token = Guid.NewGuid().ToString("N");
         frameInterval = TimeSpan.FromTicks(Math.Max(1L, TimeSpan.TicksPerSecond / options.FramesPerSecond));
@@ -56,6 +60,8 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
     public int MaxWidth => Options.MaxWidth;
 
+    public string EngineName => ffmpegPath is null ? "dotnet-mjpeg" : "ffmpeg-mpjpeg";
+
     public string LocalOrigin { get; }
 
     public string PublicPath { get; }
@@ -67,15 +73,21 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
     public static ScreenStreamingServer Start(ScreenStreamOptions options, Action<string, Exception?> log)
     {
+        return Start(options, ffmpegPath: null, log);
+    }
+
+    public static ScreenStreamingServer Start(ScreenStreamOptions options, string? ffmpegPath, Action<string, Exception?> log)
+    {
         ScreenCapturePlan capturePlan = FullScreenScreenshotCapture.CreateCapturePlan(options.Target, options.MaxWidth);
         TcpListener listener = new(IPAddress.Loopback, port: 0);
         listener.Start();
-        ScreenStreamingServer server = new(listener, options, capturePlan, log);
+        ScreenStreamingServer server = new(listener, options, capturePlan, ffmpegPath, log);
         server.acceptTask = Task.Run(server.AcceptLoopAsync);
         server.log(
             $"Screen streaming server started. Target: {ScreenCaptureTargetNames.ToOptionValue(options.Target)}. " +
             $"FPS: {options.FramesPerSecond}. Quality: {options.JpegQuality}. MaxWidth: {options.MaxWidth}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
+            $"Engine: {server.EngineName}. " +
             $"LocalOrigin: {server.LocalOrigin}.",
             null);
         return server;
@@ -229,6 +241,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string targetName = WebUtility.HtmlEncode(ScreenCaptureTargetNames.ToOptionValue(Target));
         string fpsText = WebUtility.HtmlEncode(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
         string widthText = WebUtility.HtmlEncode(MaxWidth.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        string engineText = WebUtility.HtmlEncode(EngineName);
         string framePath = $"/{PublicPath}/frame.jpg";
         string streamPath = $"/{PublicPath}/stream.mjpg";
         string html = $$"""
@@ -247,7 +260,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 </head>
 <body>
 <img id="screen" src="{{streamPath}}" alt="VALOWATCH stream">
-<div id="status">VALOWATCH stream: {{targetName}} / {{fpsText}}fps / width {{widthText}}</div>
+<div id="status">VALOWATCH stream: {{targetName}} / {{fpsText}}fps / width {{widthText}} / {{engineText}}</div>
 <script>
 const screenImage = document.getElementById('screen');
 screenImage.onerror = () => {
@@ -298,6 +311,12 @@ screenImage.onerror = () => {
 
     private async Task WriteMjpegStreamResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
     {
+        if (ffmpegPath is not null)
+        {
+            await WriteFfmpegMjpegStreamResponseAsync(networkStream, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         int sentFrames = 0;
         DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
         try
@@ -338,6 +357,161 @@ screenImage.onerror = () => {
                 $"AverageFPS: {(sentFrames / elapsedSeconds).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}.",
                 null);
         }
+    }
+
+    private async Task WriteFfmpegMjpegStreamResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
+    {
+        Process? process = null;
+        long copiedBytes = 0;
+        DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
+        try
+        {
+            process = StartFfmpegMjpegProcess();
+            _ = Task.Run(() => ReadFfmpegErrorLinesAsync(process, cancellationToken), CancellationToken.None);
+            await WriteFfmpegMjpegResponseHeaderAsync(networkStream, cancellationToken).ConfigureAwait(false);
+
+            byte[] copyBuffer = new byte[1024 * 128];
+            Stream ffmpegOutputStream = process.StandardOutput.BaseStream;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                int readByteCount = await ffmpegOutputStream
+                    .ReadAsync(copyBuffer.AsMemory(0, copyBuffer.Length), cancellationToken)
+                    .ConfigureAwait(false);
+                if (readByteCount == 0)
+                {
+                    break;
+                }
+
+                await networkStream
+                    .WriteAsync(copyBuffer.AsMemory(0, readByteCount), cancellationToken)
+                    .ConfigureAwait(false);
+                copiedBytes += readByteCount;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            log("FFmpeg screen stream connection stopped.", exception);
+        }
+        finally
+        {
+            if (process is not null)
+            {
+                StopProcess(process, "ffmpeg", log);
+            }
+
+            double elapsedSeconds = Math.Max(0.001D, (DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds);
+            log(
+                "FFmpeg screen stream connection closed. " +
+                $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. " +
+                $"ConfiguredFPS: {FramesPerSecond}. MaxWidth: {MaxWidth}. CopiedBytes: {copiedBytes}. " +
+                $"AverageBytesPerSecond: {(copiedBytes / elapsedSeconds).ToString("0", System.Globalization.CultureInfo.InvariantCulture)}.",
+                null);
+        }
+    }
+
+    private Process StartFfmpegMjpegProcess()
+    {
+        string executablePath = ffmpegPath ?? throw new InvalidOperationException("FFmpeg path is unavailable.");
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = executablePath,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        startInfo.ArgumentList.Add("-hide_banner");
+        startInfo.ArgumentList.Add("-loglevel");
+        startInfo.ArgumentList.Add("warning");
+        startInfo.ArgumentList.Add("-nostdin");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("gdigrab");
+        startInfo.ArgumentList.Add("-draw_mouse");
+        startInfo.ArgumentList.Add("1");
+        startInfo.ArgumentList.Add("-framerate");
+        startInfo.ArgumentList.Add(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-offset_x");
+        startInfo.ArgumentList.Add(capturePlan.Bounds.Left.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-offset_y");
+        startInfo.ArgumentList.Add(capturePlan.Bounds.Top.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-video_size");
+        startInfo.ArgumentList.Add($"{capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add("desktop");
+
+        if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
+            capturePlan.OutputSize.Height != capturePlan.Bounds.Height)
+        {
+            startInfo.ArgumentList.Add("-vf");
+            startInfo.ArgumentList.Add($"scale={capturePlan.OutputSize.Width}:{capturePlan.OutputSize.Height}:flags=fast_bilinear");
+        }
+
+        startInfo.ArgumentList.Add("-an");
+        startInfo.ArgumentList.Add("-c:v");
+        startInfo.ArgumentList.Add("mjpeg");
+        startInfo.ArgumentList.Add("-q:v");
+        startInfo.ArgumentList.Add(ToFfmpegMjpegQualityScale(JpegQuality).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("mpjpeg");
+        startInfo.ArgumentList.Add("pipe:1");
+
+        Process process = new()
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("FFmpeg process could not be started.");
+        }
+
+        log(
+            "FFmpeg screen stream process started. " +
+            $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
+            $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
+            $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}.",
+            null);
+        return process;
+    }
+
+    private async Task ReadFfmpegErrorLinesAsync(Process process, CancellationToken cancellationToken)
+    {
+        int loggedLineCount = 0;
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested &&
+                   await process.StandardError.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                loggedLineCount++;
+                if (loggedLineCount <= 12 || loggedLineCount % 30 == 0)
+                {
+                    log($"FFmpeg stream stderr: {line.Trim()}", null);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or ObjectDisposedException or InvalidOperationException or OperationCanceledException)
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                log("FFmpeg stderr reader stopped.", exception);
+            }
+        }
+    }
+
+    private static int ToFfmpegMjpegQualityScale(long jpegQuality)
+    {
+        double normalizedQuality = (Math.Clamp(jpegQuality, MinimumJpegQuality, MaximumJpegQuality) - MinimumJpegQuality) /
+            (double)(MaximumJpegQuality - MinimumJpegQuality);
+        return Math.Clamp((int)Math.Round(18D - normalizedQuality * 16D), 2, 18);
     }
 
     private static async Task WriteMjpegFrameAsync(
@@ -445,6 +619,43 @@ screenImage.onerror = () => {
         await networkStream
             .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static async Task WriteFfmpegMjpegResponseHeaderAsync(
+        NetworkStream networkStream,
+        CancellationToken cancellationToken)
+    {
+        string header =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: multipart/x-mixed-replace; boundary=ffmpeg\r\n" +
+            "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
+            "Pragma: no-cache\r\n" +
+            "X-Robots-Tag: noindex, nofollow\r\n" +
+            "Connection: close\r\n" +
+            "\r\n";
+        await networkStream
+            .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static void StopProcess(Process process, string processName, Action<string, Exception?> log)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(3000);
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            log($"{processName} process could not be stopped cleanly.", exception);
+        }
+        finally
+        {
+            process.Dispose();
+        }
     }
 }
 
