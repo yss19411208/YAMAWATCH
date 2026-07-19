@@ -57,6 +57,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StreamSubcommandOffName = "off";
     private const string StreamSubcommandStatusName = "status";
     private const string StreamTargetOptionName = "target";
+    private const string StreamMethodOptionName = "method";
     private const string StreamFramesPerSecondOptionName = "fps";
     private const string StreamQualityOptionName = "quality";
     private const string StreamWidthOptionName = "width";
@@ -1613,7 +1614,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed(
                     "配信開始準備中: " +
                     $"{ScreenCaptureTargetNames.ToOptionValue(streamOptions.Target)} / " +
-                    $"{streamOptions.FramesPerSecond}fps"))
+                    $"{streamOptions.FramesPerSecond}fps / " +
+                    ScreenStreamMethodNames.ToOptionValue(streamOptions.Method)))
                 .ConfigureAwait(false);
 
             using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(3));
@@ -1626,7 +1628,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await command
                 .FollowupAsync(
                     "配信を開始しました: " +
-                    $"{ScreenCaptureTargetNames.ToOptionValue(session.Target)} / {session.FramesPerSecond}fps",
+                    $"{ScreenCaptureTargetNames.ToOptionValue(session.Target)} / " +
+                    $"{session.FramesPerSecond}fps / {ScreenStreamMethodNames.ToOptionValue(session.Method)}",
                     ephemeral: true)
                 .ConfigureAwait(false);
         }
@@ -1675,6 +1678,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             throw new InvalidOperationException($"Unknown stream target: {targetText}");
         }
 
+        object? methodValue = onOption?.Options.FirstOrDefault(option =>
+            string.Equals(option.Name, StreamMethodOptionName, StringComparison.OrdinalIgnoreCase))?.Value;
+        string methodText = methodValue?.ToString() ?? ScreenStreamMethodNames.H264Fmp4;
+        if (!ScreenStreamMethodNames.TryParse(methodText, out ScreenStreamMethod method))
+        {
+            throw new InvalidOperationException($"Unknown stream method: {methodText}");
+        }
+
         int framesPerSecond = ReadIntegerSubcommandOption(
             onOption,
             StreamFramesPerSecondOptionName,
@@ -1688,7 +1699,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             StreamWidthOptionName,
             settings.StreamDefaultMaxWidth);
 
-        return ScreenStreamOptions.Create(target, framesPerSecond, jpegQuality, maxWidth);
+        return ScreenStreamOptions.Create(target, framesPerSecond, jpegQuality, maxWidth, method);
     }
 
     private static int ReadIntegerSubcommandOption(
@@ -1741,6 +1752,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 "Screen stream started. " +
                 $"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}. " +
                 $"FPS: {session.FramesPerSecond}. Quality: {session.JpegQuality}. Width: {session.MaxWidth}. " +
+                $"Method: {ScreenStreamMethodNames.ToOptionValue(session.Method)}. " +
                 $"Engine: {session.EngineName}. " +
                 $"Url: {session.PublicUrl}.");
             return session;
@@ -1775,15 +1787,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         string publicUrl = sessionToStop.PublicUrl;
         int framesPerSecond = sessionToStop.FramesPerSecond;
         int maxWidth = sessionToStop.MaxWidth;
+        string methodName = ScreenStreamMethodNames.ToOptionValue(sessionToStop.Method);
         string engineName = sessionToStop.EngineName;
         await sessionToStop.DisposeAsync().ConfigureAwait(false);
-        WriteLog($"Screen stream stopped. Reason: {reason}. Target: {targetText}. FPS: {framesPerSecond}. Width: {maxWidth}. Engine: {engineName}. Url: {publicUrl}.");
+        WriteLog($"Screen stream stopped. Reason: {reason}. Target: {targetText}. FPS: {framesPerSecond}. Width: {maxWidth}. Method: {methodName}. Engine: {engineName}. Url: {publicUrl}.");
         if (notifyChannel is not null)
         {
             try
             {
                 await notifyChannel
-                    .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信停止: {targetText} / {framesPerSecond}fps"))
+                    .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信停止: {targetText} / {framesPerSecond}fps / {methodName}"))
                     .ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException)
@@ -1804,9 +1817,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"配信URL: {session.PublicUrl}{Environment.NewLine}" +
                 $"対象: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
-                $"JPEG品質: {session.JpegQuality}{Environment.NewLine}" +
+                $"品質: {session.JpegQuality}{Environment.NewLine}" +
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
-                $"方式: {session.EngineName}{Environment.NewLine}" +
+                $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 "停止: /stream off",
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
@@ -1837,9 +1851,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             embedBuilder.Description =
                 $"配信中: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
-                $"JPEG品質: {session.JpegQuality}{Environment.NewLine}" +
+                $"品質: {session.JpegQuality}{Environment.NewLine}" +
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
-                $"方式: {session.EngineName}{Environment.NewLine}" +
+                $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 $"URL: {session.PublicUrl}{Environment.NewLine}" +
                 $"開始: {session.StartedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
         }
@@ -2503,7 +2518,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
-        const string description = "VALOWATCH stream controls v3";
+        const string description = "VALOWATCH stream controls v4";
         try
         {
             var commands = await guild
@@ -2542,7 +2557,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         return new SlashCommandBuilder()
             .WithName(StreamCommandName)
-            .WithDescription("VALOWATCH stream controls v3")
+            .WithDescription("VALOWATCH stream controls v4")
             .WithContextTypes(InteractionContextType.Guild)
             .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
             .AddOption(
@@ -2560,6 +2575,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                             .AddChoice("valorant", ScreenCaptureTargetNames.Valorant))
                     .AddOption(
                         new SlashCommandOptionBuilder()
+                            .WithName(StreamMethodOptionName)
+                            .WithDescription("Stream method: h264-fmp4 is smoother, h264-hls is steadier")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(false)
+                            .AddChoice(ScreenStreamMethodNames.H264Fmp4, ScreenStreamMethodNames.H264Fmp4)
+                            .AddChoice(ScreenStreamMethodNames.H264Hls, ScreenStreamMethodNames.H264Hls)
+                            .AddChoice(ScreenStreamMethodNames.Mjpeg, ScreenStreamMethodNames.Mjpeg))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
                             .WithName(StreamFramesPerSecondOptionName)
                             .WithDescription("FPS: 1-60. 60 is heavy and may drop frames on some PCs")
                             .WithType(ApplicationCommandOptionType.Integer)
@@ -2567,7 +2591,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     .AddOption(
                         new SlashCommandOptionBuilder()
                             .WithName(StreamQualityOptionName)
-                            .WithDescription("JPEG quality: 30-95. Lower is lighter")
+                            .WithDescription("Quality: 30-95. Higher is clearer and heavier")
                             .WithType(ApplicationCommandOptionType.Integer)
                             .WithRequired(false))
                     .AddOption(

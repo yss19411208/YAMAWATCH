@@ -27,6 +27,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly TimeSpan frameInterval;
     private readonly ScreenCapturePlan capturePlan;
     private readonly string? ffmpegPath;
+    private readonly string streamWorkDirectory;
+    private readonly string? hlsDirectory;
+    private Process? hlsProcess;
     private FullScreenScreenshotFrame? cachedFrame;
     private DateTimeOffset cachedFrameAtUtc = DateTimeOffset.MinValue;
     private Task? acceptTask;
@@ -36,14 +39,19 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         ScreenStreamOptions options,
         ScreenCapturePlan capturePlan,
         string? ffmpegPath,
+        string streamWorkDirectory,
         Action<string, Exception?> log)
     {
         this.listener = listener;
         Options = options;
         this.capturePlan = capturePlan;
         this.ffmpegPath = string.IsNullOrWhiteSpace(ffmpegPath) ? null : ffmpegPath;
+        this.streamWorkDirectory = streamWorkDirectory;
         this.log = log;
         token = Guid.NewGuid().ToString("N");
+        hlsDirectory = options.Method == ScreenStreamMethod.H264Hls
+            ? Path.Combine(streamWorkDirectory, $"hls-{token}")
+            : null;
         frameInterval = TimeSpan.FromTicks(Math.Max(1L, TimeSpan.TicksPerSecond / options.FramesPerSecond));
         int port = ((IPEndPoint)listener.LocalEndpoint).Port;
         LocalOrigin = $"http://127.0.0.1:{port}";
@@ -60,7 +68,16 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
     public int MaxWidth => Options.MaxWidth;
 
-    public string EngineName => ffmpegPath is null ? "dotnet-mjpeg" : "ffmpeg-mpjpeg";
+    public ScreenStreamMethod Method => Options.Method;
+
+    public string EngineName => Options.Method switch
+    {
+        ScreenStreamMethod.Mjpeg when ffmpegPath is null => "dotnet-mjpeg",
+        ScreenStreamMethod.Mjpeg => "ffmpeg-mjpeg",
+        ScreenStreamMethod.H264Fmp4 => "ffmpeg-h264-fmp4",
+        ScreenStreamMethod.H264Hls => "ffmpeg-h264-hls",
+        _ => "unknown"
+    };
 
     public string LocalOrigin { get; }
 
@@ -78,10 +95,31 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
     public static ScreenStreamingServer Start(ScreenStreamOptions options, string? ffmpegPath, Action<string, Exception?> log)
     {
+        string defaultWorkDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH", "streaming");
+        return Start(options, ffmpegPath, defaultWorkDirectory, log);
+    }
+
+    public static ScreenStreamingServer Start(
+        ScreenStreamOptions options,
+        string? ffmpegPath,
+        string streamWorkDirectory,
+        Action<string, Exception?> log)
+    {
         ScreenCapturePlan capturePlan = FullScreenScreenshotCapture.CreateCapturePlan(options.Target, options.MaxWidth);
+        if (options.RequiresFfmpeg && string.IsNullOrWhiteSpace(ffmpegPath))
+        {
+            throw new InvalidOperationException($"FFmpeg is required for stream method {ScreenStreamMethodNames.ToOptionValue(options.Method)}.");
+        }
+
+        Directory.CreateDirectory(streamWorkDirectory);
         TcpListener listener = new(IPAddress.Loopback, port: 0);
         listener.Start();
-        ScreenStreamingServer server = new(listener, options, capturePlan, ffmpegPath, log);
+        ScreenStreamingServer server = new(listener, options, capturePlan, ffmpegPath, streamWorkDirectory, log);
+        if (options.Method == ScreenStreamMethod.H264Hls)
+        {
+            server.StartHlsEncoder();
+        }
+
         server.acceptTask = Task.Run(server.AcceptLoopAsync);
         server.log(
             $"Screen streaming server started. Target: {ScreenCaptureTargetNames.ToOptionValue(options.Target)}. " +
@@ -97,6 +135,12 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     {
         await cancellationTokenSource.CancelAsync().ConfigureAwait(false);
         listener.Stop();
+        if (hlsProcess is not null)
+        {
+            StopProcess(hlsProcess, "ffmpeg hls", log);
+            hlsProcess = null;
+        }
+
         if (acceptTask is not null)
         {
             try
@@ -108,6 +152,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             }
         }
 
+        TryDeleteHlsDirectory();
         cancellationTokenSource.Dispose();
         frameSemaphore.Dispose();
     }
@@ -174,6 +219,34 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
                 return;
             }
 
+            if (IsFmp4Path(requestPath))
+            {
+                await WriteFmp4StreamResponseAsync(networkStream, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (IsHlsPlaylistPath(requestPath))
+            {
+                await WriteHlsFileResponseAsync(
+                    networkStream,
+                    Path.Combine(hlsDirectory ?? string.Empty, "stream.m3u8"),
+                    "application/vnd.apple.mpegurl",
+                    rewritePlaylist: true,
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (TryGetHlsSegmentFilePath(requestPath, out string hlsSegmentPath))
+            {
+                await WriteHlsFileResponseAsync(
+                    networkStream,
+                    hlsSegmentPath,
+                    "video/mp2t",
+                    rewritePlaylist: false,
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             await WritePlainTextResponseAsync(
                 networkStream,
                 statusCode: 404,
@@ -236,6 +309,42 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         return string.Equals(requestPath, $"/{PublicPath}/stream.mjpg", StringComparison.Ordinal);
     }
 
+    private bool IsFmp4Path(string requestPath)
+    {
+        return string.Equals(requestPath, $"/{PublicPath}/stream.mp4", StringComparison.Ordinal);
+    }
+
+    private bool IsHlsPlaylistPath(string requestPath)
+    {
+        return string.Equals(requestPath, $"/{PublicPath}/stream.m3u8", StringComparison.Ordinal);
+    }
+
+    private bool TryGetHlsSegmentFilePath(string requestPath, out string segmentFilePath)
+    {
+        segmentFilePath = string.Empty;
+        if (hlsDirectory is null)
+        {
+            return false;
+        }
+
+        string prefix = $"/{PublicPath}/hls/";
+        if (!requestPath.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string segmentFileName = WebUtility.UrlDecode(requestPath[prefix.Length..]);
+        if (string.IsNullOrWhiteSpace(segmentFileName) ||
+            segmentFileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            !segmentFileName.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        segmentFilePath = Path.Combine(hlsDirectory, segmentFileName);
+        return true;
+    }
+
     private async Task WriteHtmlResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
     {
         string targetName = WebUtility.HtmlEncode(ScreenCaptureTargetNames.ToOptionValue(Target));
@@ -243,7 +352,42 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string widthText = WebUtility.HtmlEncode(MaxWidth.ToString(System.Globalization.CultureInfo.InvariantCulture));
         string engineText = WebUtility.HtmlEncode(EngineName);
         string framePath = $"/{PublicPath}/frame.jpg";
-        string streamPath = $"/{PublicPath}/stream.mjpg";
+        string streamPath = Options.Method switch
+        {
+            ScreenStreamMethod.H264Fmp4 => $"/{PublicPath}/stream.mp4",
+            ScreenStreamMethod.H264Hls => $"/{PublicPath}/stream.m3u8",
+            _ => $"/{PublicPath}/stream.mjpg"
+        };
+        string mediaElement = Options.Method == ScreenStreamMethod.Mjpeg
+            ? $"<img id=\"screen\" src=\"{WebUtility.HtmlEncode(streamPath)}\" alt=\"VALOWATCH stream\">"
+            : $"<video id=\"screen\" src=\"{WebUtility.HtmlEncode(streamPath)}\" autoplay muted playsinline controls></video>";
+        string mediaScript = Options.Method switch
+        {
+            ScreenStreamMethod.H264Hls => """
+<script>
+const screenVideo = document.getElementById('screen');
+if (!screenVideo.canPlayType('application/vnd.apple.mpegurl') && !screenVideo.canPlayType('application/x-mpegURL')) {
+  document.getElementById('status').textContent += ' / HLS browser support is required';
+}
+</script>
+""",
+            ScreenStreamMethod.H264Fmp4 => """
+<script>
+const screenVideo = document.getElementById('screen');
+screenVideo.onerror = () => {
+  document.getElementById('status').textContent += ' / video stream reconnect may be needed';
+};
+</script>
+""",
+            _ => $$"""
+<script>
+const screenImage = document.getElementById('screen');
+screenImage.onerror = () => {
+  screenImage.src = '{{framePath}}?t=' + Date.now();
+};
+</script>
+"""
+        };
         string html = $$"""
 <!doctype html>
 <html lang="ja">
@@ -259,14 +403,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 </style>
 </head>
 <body>
-<img id="screen" src="{{streamPath}}" alt="VALOWATCH stream">
+{{mediaElement}}
 <div id="status">VALOWATCH stream: {{targetName}} / {{fpsText}}fps / width {{widthText}} / {{engineText}}</div>
-<script>
-const screenImage = document.getElementById('screen');
-screenImage.onerror = () => {
-  screenImage.src = '{{framePath}}?t=' + Date.now();
-};
-</script>
+{{mediaScript}}
 </body>
 </html>
 """;
@@ -412,6 +551,126 @@ screenImage.onerror = () => {
         }
     }
 
+    private async Task WriteFmp4StreamResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
+    {
+        if (Options.Method != ScreenStreamMethod.H264Fmp4)
+        {
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 404,
+                reasonPhrase: "Not Found",
+                "fMP4 stream is not enabled for this session.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        Process? process = null;
+        long copiedBytes = 0;
+        DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
+        try
+        {
+            process = StartFfmpegFmp4Process();
+            _ = Task.Run(() => ReadFfmpegErrorLinesAsync(process, cancellationToken), CancellationToken.None);
+            await WriteFmp4ResponseHeaderAsync(networkStream, cancellationToken).ConfigureAwait(false);
+
+            byte[] copyBuffer = new byte[1024 * 256];
+            Stream ffmpegOutputStream = process.StandardOutput.BaseStream;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                int readByteCount = await ffmpegOutputStream
+                    .ReadAsync(copyBuffer.AsMemory(0, copyBuffer.Length), cancellationToken)
+                    .ConfigureAwait(false);
+                if (readByteCount == 0)
+                {
+                    break;
+                }
+
+                await networkStream
+                    .WriteAsync(copyBuffer.AsMemory(0, readByteCount), cancellationToken)
+                    .ConfigureAwait(false);
+                copiedBytes += readByteCount;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            log("FFmpeg fMP4 screen stream connection stopped.", exception);
+        }
+        finally
+        {
+            if (process is not null)
+            {
+                StopProcess(process, "ffmpeg fmp4", log);
+            }
+
+            double elapsedSeconds = Math.Max(0.001D, (DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds);
+            log(
+                "FFmpeg fMP4 screen stream connection closed. " +
+                $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. " +
+                $"ConfiguredFPS: {FramesPerSecond}. MaxWidth: {MaxWidth}. CopiedBytes: {copiedBytes}. " +
+                $"AverageBytesPerSecond: {(copiedBytes / elapsedSeconds).ToString("0", System.Globalization.CultureInfo.InvariantCulture)}.",
+                null);
+        }
+    }
+
+    private async Task WriteHlsFileResponseAsync(
+        NetworkStream networkStream,
+        string filePath,
+        string contentType,
+        bool rewritePlaylist,
+        CancellationToken cancellationToken)
+    {
+        if (Options.Method != ScreenStreamMethod.H264Hls)
+        {
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 404,
+                reasonPhrase: "Not Found",
+                "HLS stream is not enabled for this session.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            bool fileReady = await WaitForFileReadyAsync(filePath, cancellationToken).ConfigureAwait(false);
+            if (!fileReady)
+            {
+                await WritePlainTextResponseAsync(
+                    networkStream,
+                    statusCode: 503,
+                    reasonPhrase: "Service Unavailable",
+                    "HLS stream is warming up.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            byte[] bytes = rewritePlaylist
+                ? Encoding.UTF8.GetBytes(RewriteHlsPlaylist(await ReadAllTextSharedAsync(filePath, cancellationToken).ConfigureAwait(false)))
+                : await ReadAllBytesSharedAsync(filePath, cancellationToken).ConfigureAwait(false);
+            await WriteResponseHeaderAsync(
+                networkStream,
+                200,
+                "OK",
+                contentType,
+                bytes.Length,
+                cancellationToken).ConfigureAwait(false);
+            await networkStream.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            log("HLS stream file response failed.", exception);
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 503,
+                reasonPhrase: "Service Unavailable",
+                "HLS stream file is unavailable.",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private Process StartFfmpegMjpegProcess()
     {
         string executablePath = ffmpegPath ?? throw new InvalidOperationException("FFmpeg path is unavailable.");
@@ -478,6 +737,174 @@ screenImage.onerror = () => {
         return process;
     }
 
+    private Process StartFfmpegFmp4Process()
+    {
+        ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: true);
+        AddFfmpegCaptureInputArguments(startInfo);
+        AddFfmpegH264OutputArguments(startInfo);
+        startInfo.ArgumentList.Add("-movflags");
+        startInfo.ArgumentList.Add("+frag_keyframe+empty_moov+default_base_moof");
+        startInfo.ArgumentList.Add("-frag_duration");
+        startInfo.ArgumentList.Add("500000");
+        startInfo.ArgumentList.Add("-flush_packets");
+        startInfo.ArgumentList.Add("1");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("mp4");
+        startInfo.ArgumentList.Add("pipe:1");
+
+        Process process = StartFfmpegProcess(startInfo);
+        log(
+            "FFmpeg fMP4 screen stream process started. " +
+            $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
+            $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
+            $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
+            $"CRF: {ToH264Crf(JpegQuality)}.",
+            null);
+        return process;
+    }
+
+    private void StartHlsEncoder()
+    {
+        if (hlsDirectory is null)
+        {
+            throw new InvalidOperationException("HLS work directory is unavailable.");
+        }
+
+        Directory.CreateDirectory(hlsDirectory);
+        foreach (string staleFilePath in Directory.EnumerateFiles(hlsDirectory, "*", SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                File.Delete(staleFilePath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                log($"Stale HLS file could not be deleted. Path: {staleFilePath}.", exception);
+            }
+        }
+
+        hlsProcess = StartFfmpegHlsProcess();
+        _ = Task.Run(() => ReadFfmpegErrorLinesAsync(hlsProcess, cancellationTokenSource.Token), CancellationToken.None);
+    }
+
+    private Process StartFfmpegHlsProcess()
+    {
+        string directory = hlsDirectory ?? throw new InvalidOperationException("HLS work directory is unavailable.");
+        string playlistPath = Path.Combine(directory, "stream.m3u8");
+        string segmentPattern = Path.Combine(directory, "segment_%05d.ts");
+
+        ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: false);
+        AddFfmpegCaptureInputArguments(startInfo);
+        AddFfmpegH264OutputArguments(startInfo);
+        startInfo.ArgumentList.Add("-flags");
+        startInfo.ArgumentList.Add("+cgop");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("hls");
+        startInfo.ArgumentList.Add("-hls_time");
+        startInfo.ArgumentList.Add("1");
+        startInfo.ArgumentList.Add("-hls_list_size");
+        startInfo.ArgumentList.Add("6");
+        startInfo.ArgumentList.Add("-hls_flags");
+        startInfo.ArgumentList.Add("delete_segments+omit_endlist+independent_segments+temp_file");
+        startInfo.ArgumentList.Add("-hls_segment_filename");
+        startInfo.ArgumentList.Add(segmentPattern);
+        startInfo.ArgumentList.Add(playlistPath);
+
+        Process process = StartFfmpegProcess(startInfo);
+        log(
+            "FFmpeg HLS screen stream process started. " +
+            $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
+            $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
+            $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
+            $"CRF: {ToH264Crf(JpegQuality)}. Playlist: {playlistPath}.",
+            null);
+        return process;
+    }
+
+    private ProcessStartInfo CreateFfmpegStartInfo(bool redirectOutput)
+    {
+        string executablePath = ffmpegPath ?? throw new InvalidOperationException("FFmpeg path is unavailable.");
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = executablePath,
+            UseShellExecute = false,
+            RedirectStandardOutput = redirectOutput,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("-hide_banner");
+        startInfo.ArgumentList.Add("-loglevel");
+        startInfo.ArgumentList.Add("warning");
+        startInfo.ArgumentList.Add("-nostdin");
+        return startInfo;
+    }
+
+    private static Process StartFfmpegProcess(ProcessStartInfo startInfo)
+    {
+        Process process = new()
+        {
+            StartInfo = startInfo,
+            EnableRaisingEvents = true
+        };
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("FFmpeg process could not be started.");
+        }
+
+        return process;
+    }
+
+    private void AddFfmpegCaptureInputArguments(ProcessStartInfo startInfo)
+    {
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("gdigrab");
+        startInfo.ArgumentList.Add("-draw_mouse");
+        startInfo.ArgumentList.Add("1");
+        startInfo.ArgumentList.Add("-framerate");
+        startInfo.ArgumentList.Add(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-offset_x");
+        startInfo.ArgumentList.Add(capturePlan.Bounds.Left.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-offset_y");
+        startInfo.ArgumentList.Add(capturePlan.Bounds.Top.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-video_size");
+        startInfo.ArgumentList.Add($"{capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add("desktop");
+    }
+
+    private void AddFfmpegH264OutputArguments(ProcessStartInfo startInfo)
+    {
+        List<string> videoFilters = [];
+        if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
+            capturePlan.OutputSize.Height != capturePlan.Bounds.Height)
+        {
+            videoFilters.Add($"scale={capturePlan.OutputSize.Width}:{capturePlan.OutputSize.Height}:flags=fast_bilinear");
+        }
+
+        videoFilters.Add("format=yuv420p");
+        startInfo.ArgumentList.Add("-vf");
+        startInfo.ArgumentList.Add(string.Join(",", videoFilters));
+        startInfo.ArgumentList.Add("-an");
+        startInfo.ArgumentList.Add("-c:v");
+        startInfo.ArgumentList.Add("libx264");
+        startInfo.ArgumentList.Add("-preset");
+        startInfo.ArgumentList.Add("veryfast");
+        startInfo.ArgumentList.Add("-tune");
+        startInfo.ArgumentList.Add("zerolatency");
+        startInfo.ArgumentList.Add("-pix_fmt");
+        startInfo.ArgumentList.Add("yuv420p");
+        startInfo.ArgumentList.Add("-r");
+        startInfo.ArgumentList.Add(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-g");
+        startInfo.ArgumentList.Add(GetH264GroupOfPicturesSize().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-keyint_min");
+        startInfo.ArgumentList.Add(GetH264GroupOfPicturesSize().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-sc_threshold");
+        startInfo.ArgumentList.Add("0");
+        startInfo.ArgumentList.Add("-crf");
+        startInfo.ArgumentList.Add(ToH264Crf(JpegQuality).ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     private async Task ReadFfmpegErrorLinesAsync(Process process, CancellationToken cancellationToken)
     {
         int loggedLineCount = 0;
@@ -512,6 +939,86 @@ screenImage.onerror = () => {
         double normalizedQuality = (Math.Clamp(jpegQuality, MinimumJpegQuality, MaximumJpegQuality) - MinimumJpegQuality) /
             (double)(MaximumJpegQuality - MinimumJpegQuality);
         return Math.Clamp((int)Math.Round(18D - normalizedQuality * 16D), 2, 18);
+    }
+
+    private static int ToH264Crf(long quality)
+    {
+        double normalizedQuality = (Math.Clamp(quality, MinimumJpegQuality, MaximumJpegQuality) - MinimumJpegQuality) /
+            (double)(MaximumJpegQuality - MinimumJpegQuality);
+        return Math.Clamp((int)Math.Round(34D - normalizedQuality * 16D), 18, 34);
+    }
+
+    private int GetH264GroupOfPicturesSize()
+    {
+        return Math.Clamp(FramesPerSecond * 2, 30, 240);
+    }
+
+    private static async Task<bool> WaitForFileReadyAsync(string filePath, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; attempt < 80; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                FileInfo fileInfo = new(filePath);
+                if (fileInfo.Exists && fileInfo.Length > 16)
+                {
+                    return true;
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken).ConfigureAwait(false);
+        }
+
+        return false;
+    }
+
+    private static async Task<byte[]> ReadAllBytesSharedAsync(string filePath, CancellationToken cancellationToken)
+    {
+        await using FileStream fileStream = new(
+            filePath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete,
+            bufferSize: 1024 * 128,
+            useAsync: true);
+        using MemoryStream memoryStream = new();
+        await fileStream.CopyToAsync(memoryStream, cancellationToken).ConfigureAwait(false);
+        return memoryStream.ToArray();
+    }
+
+    private static async Task<string> ReadAllTextSharedAsync(string filePath, CancellationToken cancellationToken)
+    {
+        byte[] bytes = await ReadAllBytesSharedAsync(filePath, cancellationToken).ConfigureAwait(false);
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    private static string RewriteHlsPlaylist(string playlistText)
+    {
+        string[] lines = playlistText
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Split('\n');
+        StringBuilder rewrittenPlaylist = new();
+        foreach (string line in lines)
+        {
+            string trimmedLine = line.Trim();
+            if (trimmedLine.Length > 0 &&
+                !trimmedLine.StartsWith('#') &&
+                trimmedLine.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+            {
+                rewrittenPlaylist.Append("hls/");
+                rewrittenPlaylist.AppendLine(Path.GetFileName(trimmedLine));
+                continue;
+            }
+
+            rewrittenPlaylist.AppendLine(line);
+        }
+
+        return rewrittenPlaylist.ToString();
     }
 
     private static async Task WriteMjpegFrameAsync(
@@ -638,6 +1145,51 @@ screenImage.onerror = () => {
             .ConfigureAwait(false);
     }
 
+    private static async Task WriteFmp4ResponseHeaderAsync(
+        NetworkStream networkStream,
+        CancellationToken cancellationToken)
+    {
+        string header =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: video/mp4\r\n" +
+            "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
+            "Pragma: no-cache\r\n" +
+            "X-Robots-Tag: noindex, nofollow\r\n" +
+            "Connection: close\r\n" +
+            "\r\n";
+        await networkStream
+            .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private void TryDeleteHlsDirectory()
+    {
+        if (hlsDirectory is null)
+        {
+            return;
+        }
+
+        try
+        {
+            string workDirectoryFullPath = Path.GetFullPath(streamWorkDirectory);
+            string hlsDirectoryFullPath = Path.GetFullPath(hlsDirectory);
+            if (!hlsDirectoryFullPath.StartsWith(workDirectoryFullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                log($"HLS directory cleanup skipped because the path is outside the stream work directory. Path: {hlsDirectory}.", null);
+                return;
+            }
+
+            if (Directory.Exists(hlsDirectory))
+            {
+                Directory.Delete(hlsDirectory, recursive: true);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            log($"HLS directory cleanup failed. Path: {hlsDirectory}.", exception);
+        }
+    }
+
     private static void StopProcess(Process process, string processName, Action<string, Exception?> log)
     {
         try
@@ -663,19 +1215,26 @@ internal readonly record struct ScreenStreamOptions(
     ScreenCaptureTarget Target,
     int FramesPerSecond,
     long JpegQuality,
-    int MaxWidth)
+    int MaxWidth,
+    ScreenStreamMethod Method)
 {
+    public bool RequiresFfmpeg =>
+        Method != ScreenStreamMethod.Mjpeg ||
+        FramesPerSecond >= ScreenStreamingServer.MaximumFramesPerSecond;
+
     public static ScreenStreamOptions Create(
         ScreenCaptureTarget target,
         int framesPerSecond = ScreenStreamingServer.DefaultFramesPerSecond,
         long jpegQuality = ScreenStreamingServer.DefaultJpegQuality,
-        int maxWidth = ScreenStreamingServer.DefaultMaxWidth)
+        int maxWidth = ScreenStreamingServer.DefaultMaxWidth,
+        ScreenStreamMethod method = ScreenStreamMethod.Mjpeg)
     {
         return new ScreenStreamOptions(
             target,
             NormalizeFramesPerSecond(framesPerSecond),
             NormalizeJpegQuality(jpegQuality),
-            NormalizeMaxWidth(maxWidth));
+            NormalizeMaxWidth(maxWidth),
+            method);
     }
 
     public static int NormalizeFramesPerSecond(int framesPerSecond)
@@ -700,5 +1259,61 @@ internal readonly record struct ScreenStreamOptions(
             maxWidth,
             ScreenStreamingServer.MinimumMaxWidth,
             ScreenStreamingServer.MaximumMaxWidth);
+    }
+}
+
+internal enum ScreenStreamMethod
+{
+    Mjpeg,
+    H264Fmp4,
+    H264Hls
+}
+
+internal static class ScreenStreamMethodNames
+{
+    public const string Mjpeg = "mjpeg";
+    public const string H264Fmp4 = "h264-fmp4";
+    public const string H264Hls = "h264-hls";
+
+    public static bool TryParse(string? text, out ScreenStreamMethod method)
+    {
+        method = ScreenStreamMethod.Mjpeg;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (text.Equals(Mjpeg, StringComparison.OrdinalIgnoreCase))
+        {
+            method = ScreenStreamMethod.Mjpeg;
+            return true;
+        }
+
+        if (text.Equals(H264Fmp4, StringComparison.OrdinalIgnoreCase) ||
+            text.Equals("fmp4", StringComparison.OrdinalIgnoreCase) ||
+            text.Equals("mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            method = ScreenStreamMethod.H264Fmp4;
+            return true;
+        }
+
+        if (text.Equals(H264Hls, StringComparison.OrdinalIgnoreCase) ||
+            text.Equals("hls", StringComparison.OrdinalIgnoreCase))
+        {
+            method = ScreenStreamMethod.H264Hls;
+            return true;
+        }
+
+        return false;
+    }
+
+    public static string ToOptionValue(ScreenStreamMethod method)
+    {
+        return method switch
+        {
+            ScreenStreamMethod.H264Fmp4 => H264Fmp4,
+            ScreenStreamMethod.H264Hls => H264Hls,
+            _ => Mjpeg
+        };
     }
 }

@@ -34,6 +34,7 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         FramesPerSecond = streamingServer.FramesPerSecond;
         JpegQuality = streamingServer.JpegQuality;
         MaxWidth = streamingServer.MaxWidth;
+        Method = streamingServer.Method;
         EngineName = streamingServer.EngineName;
         StartedAtUtc = DateTimeOffset.UtcNow;
     }
@@ -45,6 +46,8 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
     public long JpegQuality { get; }
 
     public int MaxWidth { get; }
+
+    public ScreenStreamMethod Method { get; }
 
     public string EngineName { get; }
 
@@ -75,14 +78,15 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         try
         {
             string? ffmpegPath = null;
-            if (options.FramesPerSecond >= ScreenStreamingServer.MaximumFramesPerSecond)
+            if (options.RequiresFfmpeg)
             {
                 ffmpegPath = await FfmpegToolProvider
                     .ResolveFfmpegPathAsync(appPaths, log, cancellationToken)
                     .ConfigureAwait(false);
             }
 
-            streamingServer = ScreenStreamingServer.Start(options, ffmpegPath, log);
+            string streamWorkDirectory = Path.Combine(appPaths.DataDirectory, "streaming");
+            streamingServer = ScreenStreamingServer.Start(options, ffmpegPath, streamWorkDirectory, log);
             string cloudflaredPath = await ResolveCloudflaredPathAsync(appPaths, log, cancellationToken)
                 .ConfigureAwait(false);
             (tunnelProcess, string tunnelBaseUrl) = await StartQuickTunnelAsync(

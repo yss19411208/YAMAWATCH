@@ -204,6 +204,18 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-stream-h264-fmp4", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunStreamH264Fmp4Diagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-stream-h264-hls", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunStreamH264HlsDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-ffmpeg-tool", StringComparison.OrdinalIgnoreCase)))
         {
             RunFfmpegToolDiagnostic();
@@ -616,7 +628,8 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Stream slash command check: " +
                 $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status. Targets: full,valorant. " +
-                $"Options: fps,quality,width. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
+                $"Methods: {ScreenStreamMethodNames.H264Fmp4},{ScreenStreamMethodNames.H264Hls},{ScreenStreamMethodNames.Mjpeg}. " +
+                $"Options: method,fps,quality,width. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
@@ -800,6 +813,152 @@ static class Program
         }
     }
 
+    private static void RunStreamH264Fmp4Diagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        ScreenStreamingServer? server = null;
+
+        try
+        {
+            ScreenStreamOptions options = ScreenStreamOptions.Create(
+                ScreenCaptureTarget.FullScreen,
+                ScreenStreamingServer.MaximumFramesPerSecond,
+                90,
+                1280,
+                ScreenStreamMethod.H264Fmp4);
+            string ffmpegPath = ResolveFfmpegForDiagnostic(appPaths, logFilePath);
+            List<string> serverMessages = [];
+            server = ScreenStreamingServer.Start(
+                options,
+                ffmpegPath,
+                Path.Combine(appPaths.DataDirectory, "streaming"),
+                (message, exception) =>
+                {
+                    string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                    serverMessages.Add($"{message}{exceptionText}");
+                });
+
+            using HttpClient httpClient = new()
+            {
+                Timeout = TimeSpan.FromSeconds(30)
+            };
+            string pageUrl = $"{server.LocalOrigin}/{server.PublicPath}";
+            string streamUrl = $"{pageUrl}/stream.mp4";
+            string pageHtml = httpClient.GetStringAsync(pageUrl).GetAwaiter().GetResult();
+            using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(8));
+            using HttpResponseMessage response = httpClient
+                .GetAsync(streamUrl, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            response.EnsureSuccessStatusCode();
+
+            byte[] streamBytes = ReadSomeResponseBytes(response, minimumBytes: 1024 * 128, maximumBytes: 1024 * 1024, readTimeout.Token);
+            bool contentTypeLooksLikeMp4 = response.Content.Headers.ContentType?.MediaType
+                ?.Equals("video/mp4", StringComparison.OrdinalIgnoreCase) == true;
+            bool streamLooksLikeFragmentedMp4 =
+                ContainsAsciiToken(streamBytes, "ftyp") &&
+                (ContainsAsciiToken(streamBytes, "moov") || ContainsAsciiToken(streamBytes, "moof") || ContainsAsciiToken(streamBytes, "mdat"));
+            bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
+                contentTypeLooksLikeMp4 &&
+                streamLooksLikeFragmentedMp4 &&
+                options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream h264-fmp4 check: " +
+                $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
+                $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
+                $"Mp4ContentType: {contentTypeLooksLikeMp4}. ReadBytes: {streamBytes.Length}. " +
+                $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Stream h264-fmp4 check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            server?.Dispose();
+        }
+    }
+
+    private static void RunStreamH264HlsDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        ScreenStreamingServer? server = null;
+
+        try
+        {
+            ScreenStreamOptions options = ScreenStreamOptions.Create(
+                ScreenCaptureTarget.FullScreen,
+                ScreenStreamingServer.MaximumFramesPerSecond,
+                90,
+                1280,
+                ScreenStreamMethod.H264Hls);
+            string ffmpegPath = ResolveFfmpegForDiagnostic(appPaths, logFilePath);
+            List<string> serverMessages = [];
+            server = ScreenStreamingServer.Start(
+                options,
+                ffmpegPath,
+                Path.Combine(appPaths.DataDirectory, "streaming"),
+                (message, exception) =>
+                {
+                    string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                    serverMessages.Add($"{message}{exceptionText}");
+                });
+
+            using HttpClient httpClient = new()
+            {
+                Timeout = TimeSpan.FromSeconds(30)
+            };
+            string pageUrl = $"{server.LocalOrigin}/{server.PublicPath}";
+            string playlistUrl = $"{pageUrl}/stream.m3u8";
+            string pageHtml = httpClient.GetStringAsync(pageUrl).GetAwaiter().GetResult();
+            string playlistText = httpClient.GetStringAsync(playlistUrl).GetAwaiter().GetResult();
+            string? segmentPath = playlistText
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault(line => !line.StartsWith('#') && line.EndsWith(".ts", StringComparison.OrdinalIgnoreCase));
+            byte[] segmentBytes = segmentPath is null
+                ? []
+                : httpClient.GetByteArrayAsync($"{pageUrl}/{segmentPath}").GetAwaiter().GetResult();
+
+            bool playlistLooksLikeHls = playlistText.Contains("#EXTM3U", StringComparison.OrdinalIgnoreCase) &&
+                playlistText.Contains("#EXTINF", StringComparison.OrdinalIgnoreCase);
+            bool segmentLooksLikeTransportStream = segmentBytes.Length > 1024 && segmentBytes[0] == 0x47;
+            bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("stream.m3u8", StringComparison.OrdinalIgnoreCase) &&
+                playlistLooksLikeHls &&
+                segmentLooksLikeTransportStream &&
+                options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream h264-hls check: " +
+                $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
+                $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
+                $"PlaylistBytes: {Encoding.UTF8.GetByteCount(playlistText)}. SegmentBytes: {segmentBytes.Length}. " +
+                $"PlaylistHls: {playlistLooksLikeHls}. SegmentTs: {segmentLooksLikeTransportStream}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Stream h264-hls check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            server?.Dispose();
+        }
+    }
+
     private static void RunFfmpegToolDiagnostic()
     {
         AppPaths appPaths = AppPaths.CreateDefault();
@@ -832,6 +991,61 @@ static class Program
             TryWriteDiagnosticFailure(logFilePath, "FFmpeg tool check", exception);
             Environment.ExitCode = 1;
         }
+    }
+
+    private static string ResolveFfmpegForDiagnostic(AppPaths appPaths, string logFilePath)
+    {
+        return FfmpegToolProvider
+            .ResolveFfmpegPathAsync(
+                appPaths,
+                (message, exception) =>
+                {
+                    string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                    AppendDiagnosticLogLine(logFilePath, $"{DateTimeOffset.Now:O} [Diagnostics] FFmpeg setup: {message}{exceptionText}");
+                },
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+    }
+
+    private static byte[] ReadSomeResponseBytes(
+        HttpResponseMessage response,
+        int minimumBytes,
+        int maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        using Stream responseStream = response.Content
+            .ReadAsStreamAsync(cancellationToken)
+            .GetAwaiter()
+            .GetResult();
+        using MemoryStream memoryStream = new(capacity: Math.Min(maximumBytes, 1024 * 1024));
+        byte[] copyBuffer = new byte[64 * 1024];
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        while (memoryStream.Length < maximumBytes && stopwatch.Elapsed < TimeSpan.FromSeconds(6))
+        {
+            int readByteCount = responseStream
+                .ReadAsync(copyBuffer.AsMemory(0, Math.Min(copyBuffer.Length, maximumBytes - (int)memoryStream.Length)), cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+            if (readByteCount == 0)
+            {
+                break;
+            }
+
+            memoryStream.Write(copyBuffer, 0, readByteCount);
+            if (memoryStream.Length >= minimumBytes)
+            {
+                break;
+            }
+        }
+
+        return memoryStream.ToArray();
+    }
+
+    private static bool ContainsAsciiToken(ReadOnlySpan<byte> bytes, string token)
+    {
+        byte[] tokenBytes = Encoding.ASCII.GetBytes(token);
+        return bytes.IndexOf(tokenBytes) >= 0;
     }
 
     private static int CountJpegStartMarkers(ReadOnlySpan<byte> bytes)
