@@ -15,6 +15,8 @@ public sealed class AppPaths
         RuntimeLogCursorPath = Path.Combine(dataDirectory, "logs", "runtime-log-cursors.json");
         ScreenshotCommandStatePath = Path.Combine(dataDirectory, "state", "screenshot-command-enabled.txt");
         ScreenshotTempDirectory = Path.Combine(dataDirectory, "temp-screenshots");
+        ToolDirectory = Path.Combine(dataDirectory, "tools");
+        CloudflaredPath = Path.Combine(ToolDirectory, "cloudflared.exe");
         DurableEnvPath = Path.Combine(dataDirectory, "config", "settings.protected");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
         DiscordBotSampleConfigPath = Path.Combine(ConfigDirectory, "discord_bot.sample.json");
@@ -35,6 +37,10 @@ public sealed class AppPaths
     public string ScreenshotCommandStatePath { get; }
 
     public string ScreenshotTempDirectory { get; }
+
+    public string ToolDirectory { get; }
+
+    public string CloudflaredPath { get; }
 
     public string DurableEnvPath { get; }
 

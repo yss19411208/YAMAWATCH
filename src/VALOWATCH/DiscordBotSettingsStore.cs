@@ -100,7 +100,8 @@ public sealed class DiscordBotSettingsStore
             TranscriptionModelPath = string.Empty,
             TranscriptionChunkSeconds = 12,
             TranscriptionMinimumPeak = 0.006F,
-            ScreenshotCommandEnabled = false
+            ScreenshotCommandEnabled = false,
+            StreamCommandEnabled = true
         };
 
         Directory.CreateDirectory(appPaths.ConfigDirectory);
@@ -303,6 +304,15 @@ public sealed class DiscordBotSettingsStore
             settings.ScreenshotCommandEnabled = screenshotCommandEnabled;
         }
 
+        if (TryGetBoolean(
+            envValues,
+            out bool streamCommandEnabled,
+            "VALOWATCH_STREAM_COMMAND_ENABLED",
+            "DISCORD_STREAM_COMMAND_ENABLED"))
+        {
+            settings.StreamCommandEnabled = streamCommandEnabled;
+        }
+
     }
 
     private void EnsureEnvExample()
@@ -332,7 +342,8 @@ public sealed class DiscordBotSettingsStore
             "VALOWATCH_TRANSCRIPTION_MODEL_PATH=",
             "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS=12",
             "VALOWATCH_TRANSCRIPTION_MIN_PEAK=0.006",
-            "VALOWATCH_SCREENSHOT_COMMAND_ENABLED=false"
+            "VALOWATCH_SCREENSHOT_COMMAND_ENABLED=false",
+            "VALOWATCH_STREAM_COMMAND_ENABLED=true"
         ];
 
         if (!File.Exists(appPaths.EnvExamplePath))

@@ -186,6 +186,18 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-stream-command", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunStreamCommandDiagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-stream-server", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunStreamServerDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-identity", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateIdentityDiagnostic(args);
@@ -573,6 +585,82 @@ static class Program
         {
             TryWriteDiagnosticFailure(logFilePath, "Screenshot slash command check", exception);
             Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunStreamCommandDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            object builtCommand = DiscordBotVoiceRelay
+                .BuildStreamSlashCommandBuilder()
+                .Build();
+            bool ready = builtCommand is not null;
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream slash command check: " +
+                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status. Targets: full,valorant.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Stream slash command check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunStreamServerDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        ScreenStreamingServer? server = null;
+
+        try
+        {
+            List<string> serverMessages = [];
+            server = ScreenStreamingServer.Start(
+                ScreenCaptureTarget.FullScreen,
+                (message, exception) =>
+                {
+                    string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                    serverMessages.Add($"{message}{exceptionText}");
+                });
+
+            using HttpClient httpClient = new()
+            {
+                Timeout = TimeSpan.FromSeconds(20)
+            };
+            string pageUrl = $"{server.LocalOrigin}/{server.PublicPath}";
+            string frameUrl = $"{pageUrl}/frame.jpg";
+            string pageHtml = httpClient.GetStringAsync(pageUrl).GetAwaiter().GetResult();
+            byte[] frameBytes = httpClient.GetByteArrayAsync(frameUrl).GetAwaiter().GetResult();
+            bool frameLooksLikeJpeg = frameBytes.Length > 1024 &&
+                frameBytes[0] == 0xFF &&
+                frameBytes[1] == 0xD8;
+            bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
+                frameLooksLikeJpeg;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream server check: " +
+                $"{(ready ? "ready" : "failed")}. PageBytes: {Encoding.UTF8.GetByteCount(pageHtml)}. " +
+                $"FrameBytes: {frameBytes.Length}. FrameJpeg: {frameLooksLikeJpeg}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Stream server check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            server?.Dispose();
         }
     }
 

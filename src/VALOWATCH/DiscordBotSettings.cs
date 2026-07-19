@@ -58,4 +58,6 @@ public sealed class DiscordBotSettings
 
     public bool ScreenshotCommandEnabled { get; set; }
 
+    public bool StreamCommandEnabled { get; set; } = true;
+
 }

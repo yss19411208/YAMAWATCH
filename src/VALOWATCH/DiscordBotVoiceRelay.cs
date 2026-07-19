@@ -52,6 +52,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string ScreenshotSubcommandOnName = "on";
     private const string ScreenshotSubcommandOffName = "off";
     private const string ScreenshotSubcommandNowName = "now";
+    private const string StreamCommandName = "stream";
+    private const string StreamSubcommandOnName = "on";
+    private const string StreamSubcommandOffName = "off";
+    private const string StreamSubcommandStatusName = "status";
+    private const string StreamTargetOptionName = "target";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -66,6 +71,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly object discordNetworkWarningLock = new();
     private readonly SemaphoreSlim lifecycleSemaphore = new(1, 1);
     private readonly SemaphoreSlim runtimeLogSemaphore = new(1, 1);
+    private readonly SemaphoreSlim screenStreamSemaphore = new(1, 1);
 
     private DiscordSocketClient? discordClient;
     private IAudioClient? audioClient;
@@ -126,6 +132,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool discordProcessAudioRuntimeEnabled;
     private bool discordAudioCommandEnabled;
     private bool screenshotCommandEnabled;
+    private bool streamCommandEnabled = true;
+    private ScreenStreamSession? activeScreenStreamSession;
     private ulong currentMonitoredDiscordUserId;
     private ulong currentVoiceGuildId;
     private string currentVoiceGuildName = string.Empty;
@@ -215,11 +223,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .ConfigureAwait(false);
             ConfigureDiscordUserVoiceTracking(settings, gatewayContext.Guild);
             ConfigureScreenshotCommandState(settings);
+            ConfigureStreamCommandState(settings);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureScreenshotCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureStreamCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Client).ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
@@ -326,6 +336,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
             await EnsureScreenshotCommandAsync(guild).ConfigureAwait(false);
+            await EnsureStreamCommandAsync(guild, settings).ConfigureAwait(false);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
             startupStage = DiscordVoiceChannelConnectStartupStage;
@@ -677,6 +688,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
         }
 
+        await StopActiveScreenStreamAsync("VALOWATCH stopping", discordStatusTextChannel).ConfigureAwait(false);
         DisposeAudioObjects();
         await StopAudioTranscriptionWorkerAsync().ConfigureAwait(false);
         cancellationTokenSource?.Dispose();
@@ -1026,6 +1038,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (string.Equals(command.Data.Name, ScreenshotCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleScreenshotSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, StreamCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleStreamSlashCommandAsync(command).ConfigureAwait(false);
             return;
         }
 
@@ -1500,6 +1518,281 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private async Task HandleStreamSlashCommandAsync(SocketSlashCommand command)
+    {
+        bool deferred = false;
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("This command can only be used inside the configured Discord server.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+            if (settings is null)
+            {
+                await command
+                    .RespondAsync($"VALOWATCH settings are not usable: {statusText}", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
+            {
+                await command
+                    .RespondAsync("This server is not configured for VALOWATCH stream commands.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCH stream commands require server management permission.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!settings.StreamCommandEnabled || !IsStreamCommandEnabled())
+            {
+                await command
+                    .RespondAsync("VALOWATCH stream command is disabled by configuration.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            string actionName = command.Data.Options.FirstOrDefault()?.Name ?? string.Empty;
+            if (string.Equals(actionName, StreamSubcommandStatusName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command
+                    .RespondAsync(embed: BuildStreamStatusEmbed(), ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            IMessageChannel? targetChannel = ResolveStreamTargetChannel(command);
+            if (targetChannel is null)
+            {
+                await command
+                    .RespondAsync("Stream target channel is unavailable.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, StreamSubcommandOffName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+                deferred = true;
+                bool stopped = await StopActiveScreenStreamAsync("Discord /stream off", targetChannel)
+                    .ConfigureAwait(false);
+                await command
+                    .FollowupAsync(stopped ? "配信を停止しました。" : "配信はすでに停止しています。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!string.Equals(actionName, StreamSubcommandOnName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command
+                    .RespondAsync("Use /stream on, /stream off, or /stream status.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            ScreenCaptureTarget target = ParseStreamTarget(command);
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
+            await targetChannel
+                .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信開始準備中: {ScreenCaptureTargetNames.ToOptionValue(target)}"))
+                .ConfigureAwait(false);
+
+            using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(3));
+            ScreenStreamSession session = await StartOrReplaceScreenStreamAsync(target, timeout.Token)
+                .ConfigureAwait(false);
+
+            await targetChannel
+                .SendMessageAsync(embed: BuildStreamStartedEmbed(session))
+                .ConfigureAwait(false);
+            await command
+                .FollowupAsync($"配信を開始しました: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}", ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or TimeoutException or OperationCanceledException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("Stream slash command handling failed.", exception);
+            try
+            {
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync($"配信操作に失敗しました: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync($"配信操作に失敗しました: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Stream slash command error response failed.", responseException);
+            }
+        }
+    }
+
+    private bool IsStreamCommandEnabled()
+    {
+        lock (stateLock)
+        {
+            return streamCommandEnabled;
+        }
+    }
+
+    private ScreenCaptureTarget ParseStreamTarget(SocketSlashCommand command)
+    {
+        SocketSlashCommandDataOption? onOption = command.Data.Options.FirstOrDefault(option =>
+            string.Equals(option.Name, StreamSubcommandOnName, StringComparison.OrdinalIgnoreCase));
+        object? targetValue = onOption?.Options.FirstOrDefault(option =>
+            string.Equals(option.Name, StreamTargetOptionName, StringComparison.OrdinalIgnoreCase))?.Value;
+        string targetText = targetValue?.ToString() ?? ScreenCaptureTargetNames.FullScreen;
+        if (!ScreenCaptureTargetNames.TryParse(targetText, out ScreenCaptureTarget target))
+        {
+            throw new InvalidOperationException($"Unknown stream target: {targetText}");
+        }
+
+        return target;
+    }
+
+    private IMessageChannel? ResolveStreamTargetChannel(SocketSlashCommand command)
+    {
+        return command.Channel as IMessageChannel ?? discordStatusTextChannel;
+    }
+
+    private async Task<ScreenStreamSession> StartOrReplaceScreenStreamAsync(
+        ScreenCaptureTarget target,
+        CancellationToken cancellationToken)
+    {
+        await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (activeScreenStreamSession is not null)
+            {
+                await activeScreenStreamSession.DisposeAsync().ConfigureAwait(false);
+                activeScreenStreamSession = null;
+            }
+
+            ScreenStreamSession session = await ScreenStreamSession
+                .StartAsync(appPaths, target, WriteScreenStreamLog, cancellationToken)
+                .ConfigureAwait(false);
+            activeScreenStreamSession = session;
+            WriteLog(
+                "Screen stream started. " +
+                $"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}. " +
+                $"Url: {session.PublicUrl}.");
+            return session;
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+    }
+
+    private async Task<bool> StopActiveScreenStreamAsync(string reason, IMessageChannel? notifyChannel)
+    {
+        ScreenStreamSession? sessionToStop;
+        await screenStreamSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            sessionToStop = activeScreenStreamSession;
+            activeScreenStreamSession = null;
+        }
+        finally
+        {
+            screenStreamSemaphore.Release();
+        }
+
+        if (sessionToStop is null)
+        {
+            WriteLog($"Screen stream stop skipped because no stream was active. Reason: {reason}.");
+            return false;
+        }
+
+        string targetText = ScreenCaptureTargetNames.ToOptionValue(sessionToStop.Target);
+        string publicUrl = sessionToStop.PublicUrl;
+        await sessionToStop.DisposeAsync().ConfigureAwait(false);
+        WriteLog($"Screen stream stopped. Reason: {reason}. Target: {targetText}. Url: {publicUrl}.");
+        if (notifyChannel is not null)
+        {
+            try
+            {
+                await notifyChannel
+                    .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信停止: {targetText}"))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Screen stream stop notification failed.", exception);
+            }
+        }
+
+        return true;
+    }
+
+    private Embed BuildStreamStartedEmbed(ScreenStreamSession session)
+    {
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH 配信開始",
+            Description =
+                $"配信URL: {session.PublicUrl}{Environment.NewLine}" +
+                $"対象: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
+                "停止: /stream off",
+            Color = new Discord.Color(88, 166, 255),
+            Timestamp = DateTimeOffset.Now
+        };
+        return embedBuilder.Build();
+    }
+
+    private Embed BuildStreamStatusEmbed()
+    {
+        ScreenStreamSession? session;
+        lock (stateLock)
+        {
+            session = activeScreenStreamSession;
+        }
+
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH 配信状態",
+            Color = session is null ? new Discord.Color(139, 148, 158) : new Discord.Color(88, 166, 255),
+            Timestamp = DateTimeOffset.Now
+        };
+        if (session is null)
+        {
+            embedBuilder.Description = "配信は停止中です。";
+        }
+        else
+        {
+            embedBuilder.Description =
+                $"配信中: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
+                $"URL: {session.PublicUrl}{Environment.NewLine}" +
+                $"開始: {session.StartedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
+        }
+
+        return embedBuilder.Build();
+    }
+
+    private void WriteScreenStreamLog(string message, Exception? exception)
+    {
+        WriteLog($"[Stream] {message}", exception);
+    }
+
     private Task OnDiscordLogAsync(LogMessage logMessage)
     {
         if (IsTransientDiscordNetworkWarning(logMessage))
@@ -1865,6 +2158,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         discordProcessAudioRuntimeEnabled = settings.StreamDiscordAudioWhenRunning;
         discordAudioCommandEnabled = settings.DiscordAudioCommandEnabled;
         ConfigureScreenshotCommandState(settings);
+        ConfigureStreamCommandState(settings);
 
         WriteLog(
             "Discord conversation state configured. " +
@@ -1872,7 +2166,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Voice: {currentVoiceChannelName} ({voiceChannel.Id}). " +
             $"DiscordAudioDefault: {discordProcessAudioRuntimeEnabled}. " +
             $"DiscordAudioVolume: {currentDiscordAudioVolume:0.00}. " +
-            $"ScreenshotCommand: {screenshotCommandEnabled}.");
+            $"ScreenshotCommand: {screenshotCommandEnabled}. " +
+            $"StreamCommand: {streamCommandEnabled}.");
     }
 
     private void ConfigureScreenshotCommandState(DiscordBotSettings settings)
@@ -1884,6 +2179,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         WriteLog($"Screenshot slash command state configured. Enabled: {enabled}.");
+    }
+
+    private void ConfigureStreamCommandState(DiscordBotSettings settings)
+    {
+        lock (stateLock)
+        {
+            streamCommandEnabled = settings.StreamCommandEnabled;
+        }
+
+        WriteLog($"Stream slash command state configured. Enabled: {settings.StreamCommandEnabled}.");
     }
 
     private void ConfigureDiscordUserVoiceTracking(DiscordBotSettings settings, SocketGuild guild)
@@ -2128,6 +2433,81 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 new SlashCommandOptionBuilder()
                     .WithName(ScreenshotSubcommandNowName)
                     .WithDescription("Send one full-screen screenshot now")
+                    .WithType(ApplicationCommandOptionType.SubCommand));
+    }
+
+    private async Task EnsureStreamCommandAsync(SocketGuild guild, DiscordBotSettings settings)
+    {
+        if (!settings.StreamCommandEnabled)
+        {
+            WriteLog("Stream slash command registration is disabled.");
+            return;
+        }
+
+        const string description = "VALOWATCH stream controls v1";
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, StreamCommandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
+            {
+                if (string.Equals(existingCommand.Description, description, StringComparison.Ordinal))
+                {
+                    WriteLog($"Stream slash command already exists: /{StreamCommandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Stream slash command replaced: /{StreamCommandName}.");
+            }
+
+            SlashCommandBuilder commandBuilder = BuildStreamSlashCommandBuilder();
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Stream slash command registered: /{StreamCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Stream slash command could not be registered. " +
+                "The bot will retry registration on the next startup.",
+                exception);
+        }
+    }
+
+    internal static SlashCommandBuilder BuildStreamSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(StreamCommandName)
+            .WithDescription("VALOWATCH stream controls v1")
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandOnName)
+                    .WithDescription("Start link-based screen streaming")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(StreamTargetOptionName)
+                            .WithDescription("Capture target")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)
+                            .AddChoice("full", ScreenCaptureTargetNames.FullScreen)
+                            .AddChoice("valorant", ScreenCaptureTargetNames.Valorant)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandOffName)
+                    .WithDescription("Stop link-based screen streaming")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandStatusName)
+                    .WithDescription("Show current stream status")
                     .WithType(ApplicationCommandOptionType.SubCommand));
     }
 
