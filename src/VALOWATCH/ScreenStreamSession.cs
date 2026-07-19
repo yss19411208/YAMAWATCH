@@ -31,10 +31,19 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         TunnelBaseUrl = tunnelBaseUrl.TrimEnd('/');
         PublicUrl = $"{TunnelBaseUrl}/{streamingServer.PublicPath}";
         Target = streamingServer.Target;
+        FramesPerSecond = streamingServer.FramesPerSecond;
+        JpegQuality = streamingServer.JpegQuality;
+        MaxWidth = streamingServer.MaxWidth;
         StartedAtUtc = DateTimeOffset.UtcNow;
     }
 
     public ScreenCaptureTarget Target { get; }
+
+    public int FramesPerSecond { get; }
+
+    public long JpegQuality { get; }
+
+    public int MaxWidth { get; }
 
     public string TunnelBaseUrl { get; }
 
@@ -48,11 +57,21 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         Action<string, Exception?> log,
         CancellationToken cancellationToken)
     {
+        return await StartAsync(appPaths, ScreenStreamOptions.Create(target), log, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public static async Task<ScreenStreamSession> StartAsync(
+        AppPaths appPaths,
+        ScreenStreamOptions options,
+        Action<string, Exception?> log,
+        CancellationToken cancellationToken)
+    {
         ScreenStreamingServer? streamingServer = null;
         Process? tunnelProcess = null;
         try
         {
-            streamingServer = ScreenStreamingServer.Start(target, log);
+            streamingServer = ScreenStreamingServer.Start(options, log);
             string cloudflaredPath = await ResolveCloudflaredPathAsync(appPaths, log, cancellationToken)
                 .ConfigureAwait(false);
             (tunnelProcess, string tunnelBaseUrl) = await StartQuickTunnelAsync(

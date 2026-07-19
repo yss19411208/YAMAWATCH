@@ -60,4 +60,10 @@ public sealed class DiscordBotSettings
 
     public bool StreamCommandEnabled { get; set; } = true;
 
+    public int StreamDefaultFramesPerSecond { get; set; } = ScreenStreamingServer.DefaultFramesPerSecond;
+
+    public long StreamDefaultJpegQuality { get; set; } = ScreenStreamingServer.DefaultJpegQuality;
+
+    public int StreamDefaultMaxWidth { get; set; } = ScreenStreamingServer.DefaultMaxWidth;
+
 }

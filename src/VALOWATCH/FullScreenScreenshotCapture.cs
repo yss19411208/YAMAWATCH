@@ -8,7 +8,8 @@ namespace VALOWATCH;
 
 internal static class FullScreenScreenshotCapture
 {
-    private const long JpegQuality = 85L;
+    private const long DefaultJpegQuality = 85L;
+    private static readonly Lazy<ImageCodecInfo> JpegCodec = new(ResolveJpegCodec);
     private static readonly string[] ValorantProcessNames =
     [
         "VALORANT-Win64-Shipping",
@@ -40,13 +41,28 @@ internal static class FullScreenScreenshotCapture
 
     public static FullScreenScreenshotFrame CaptureToJpegBytes(ScreenCaptureTarget target)
     {
+        return CaptureToJpegBytes(target, DefaultJpegQuality);
+    }
+
+    public static FullScreenScreenshotFrame CaptureToJpegBytes(ScreenCaptureTarget target, long jpegQuality)
+    {
+        return CaptureToJpegBytes(target, jpegQuality, maxWidth: 0);
+    }
+
+    public static FullScreenScreenshotFrame CaptureToJpegBytes(ScreenCaptureTarget target, long jpegQuality, int maxWidth)
+    {
         if (!OperatingSystem.IsWindows())
         {
             throw new PlatformNotSupportedException("Full-screen screenshot capture is only supported on Windows.");
         }
 
-        CaptureRegion captureRegion = ResolveCaptureRegion(target);
-        byte[] jpegBytes = CaptureRegionToJpegBytes(captureRegion.Bounds);
+        ScreenCapturePlan capturePlan = CreateCapturePlan(target, maxWidth);
+        return CaptureToJpegBytes(capturePlan, jpegQuality);
+    }
+
+    public static FullScreenScreenshotFrame CaptureToJpegBytes(ScreenCapturePlan capturePlan, long jpegQuality)
+    {
+        byte[] jpegBytes = CaptureRegionToJpegBytes(capturePlan.Bounds, capturePlan.OutputSize, jpegQuality);
         if (jpegBytes.Length == 0)
         {
             throw new IOException("Screenshot capture produced an empty image buffer.");
@@ -54,11 +70,11 @@ internal static class FullScreenScreenshotCapture
 
         return new FullScreenScreenshotFrame(
             jpegBytes,
-            captureRegion.Bounds.Width,
-            captureRegion.Bounds.Height,
-            captureRegion.ScreenCount,
-            captureRegion.Description,
-            target);
+            capturePlan.OutputSize.Width,
+            capturePlan.OutputSize.Height,
+            capturePlan.ScreenCount,
+            capturePlan.Description,
+            capturePlan.Target);
     }
 
     public static void ValidateCaptureTarget(ScreenCaptureTarget target)
@@ -66,8 +82,30 @@ internal static class FullScreenScreenshotCapture
         ResolveCaptureRegion(target);
     }
 
-    private static byte[] CaptureRegionToJpegBytes(Rectangle bounds)
+    public static ScreenCapturePlan CreateCapturePlan(ScreenCaptureTarget target, int maxWidth)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("Full-screen screenshot capture is only supported on Windows.");
+        }
+
+        CaptureRegion captureRegion = ResolveCaptureRegion(target);
+        Size outputSize = ResolveOutputSize(captureRegion.Bounds, maxWidth);
+        return new ScreenCapturePlan(
+            captureRegion.Bounds,
+            outputSize,
+            captureRegion.ScreenCount,
+            captureRegion.Description,
+            target);
+    }
+
+    private static byte[] CaptureRegionToJpegBytes(Rectangle bounds, Size outputSize, long jpegQuality)
+    {
+        if (outputSize.Width != bounds.Width || outputSize.Height != bounds.Height)
+        {
+            return CaptureWithBitBlt(bounds, outputSize, jpegQuality);
+        }
+
         try
         {
             using Bitmap bitmap = new(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb);
@@ -80,12 +118,24 @@ internal static class FullScreenScreenshotCapture
                 bounds.Size,
                 CopyPixelOperation.SourceCopy);
 
-            return SaveJpegToBytes(bitmap);
+            return SaveJpegToBytes(bitmap, jpegQuality);
         }
         catch (ExternalException)
         {
-            return CaptureWithBitBlt(bounds);
+            return CaptureWithBitBlt(bounds, outputSize, jpegQuality);
         }
+    }
+
+    private static Size ResolveOutputSize(Rectangle bounds, int maxWidth)
+    {
+        if (maxWidth <= 0 || bounds.Width <= maxWidth)
+        {
+            return bounds.Size;
+        }
+
+        double scale = (double)maxWidth / bounds.Width;
+        int scaledHeight = Math.Max(1, (int)Math.Round(bounds.Height * scale));
+        return new Size(maxWidth, scaledHeight);
     }
 
     private static CaptureRegion ResolveCaptureRegion(ScreenCaptureTarget target)
@@ -141,24 +191,27 @@ internal static class FullScreenScreenshotCapture
 
     private static void SaveJpeg(Image image, string screenshotPath)
     {
-        File.WriteAllBytes(screenshotPath, SaveJpegToBytes(image));
+        File.WriteAllBytes(screenshotPath, SaveJpegToBytes(image, DefaultJpegQuality));
     }
 
-    private static byte[] SaveJpegToBytes(Image image)
+    private static byte[] SaveJpegToBytes(Image image, long jpegQuality)
     {
-        ImageCodecInfo jpegCodec = ImageCodecInfo
-            .GetImageEncoders()
-            .FirstOrDefault(codec => codec.FormatID == ImageFormat.Jpeg.Guid)
-            ?? throw new ExternalException("JPEG encoder is unavailable on this Windows installation.");
-
         using EncoderParameters encoderParameters = new(1);
-        encoderParameters.Param[0] = new EncoderParameter(Encoder.Quality, JpegQuality);
+        encoderParameters.Param[0] = new EncoderParameter(Encoder.Quality, Math.Clamp(jpegQuality, 1L, 100L));
         using MemoryStream imageStream = new();
-        image.Save(imageStream, jpegCodec, encoderParameters);
+        image.Save(imageStream, JpegCodec.Value, encoderParameters);
         return imageStream.ToArray();
     }
 
-    private static byte[] CaptureWithBitBlt(Rectangle bounds)
+    private static ImageCodecInfo ResolveJpegCodec()
+    {
+        return ImageCodecInfo
+            .GetImageEncoders()
+            .FirstOrDefault(codec => codec.FormatID == ImageFormat.Jpeg.Guid)
+            ?? throw new ExternalException("JPEG encoder is unavailable on this Windows installation.");
+    }
+
+    private static byte[] CaptureWithBitBlt(Rectangle bounds, Size outputSize, long jpegQuality)
     {
         IntPtr screenDeviceContext = GetDC(IntPtr.Zero);
         if (screenDeviceContext == IntPtr.Zero)
@@ -177,7 +230,7 @@ internal static class FullScreenScreenshotCapture
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CreateCompatibleDC failed.");
             }
 
-            bitmapHandle = CreateCompatibleBitmap(screenDeviceContext, bounds.Width, bounds.Height);
+            bitmapHandle = CreateCompatibleBitmap(screenDeviceContext, outputSize.Width, outputSize.Height);
             if (bitmapHandle == IntPtr.Zero)
             {
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CreateCompatibleBitmap failed.");
@@ -190,23 +243,45 @@ internal static class FullScreenScreenshotCapture
             }
 
             const int sourceCopyWithLayeredWindows = 0x00CC0020 | 0x40000000;
-            bool copied = BitBlt(
-                memoryDeviceContext,
-                0,
-                0,
-                bounds.Width,
-                bounds.Height,
-                screenDeviceContext,
-                bounds.Left,
-                bounds.Top,
-                sourceCopyWithLayeredWindows);
+            bool copied;
+            if (outputSize.Width == bounds.Width && outputSize.Height == bounds.Height)
+            {
+                copied = BitBlt(
+                    memoryDeviceContext,
+                    0,
+                    0,
+                    bounds.Width,
+                    bounds.Height,
+                    screenDeviceContext,
+                    bounds.Left,
+                    bounds.Top,
+                    sourceCopyWithLayeredWindows);
+            }
+            else
+            {
+                const int colorOnColorStretchMode = 3;
+                SetStretchBltMode(memoryDeviceContext, colorOnColorStretchMode);
+                copied = StretchBlt(
+                    memoryDeviceContext,
+                    0,
+                    0,
+                    outputSize.Width,
+                    outputSize.Height,
+                    screenDeviceContext,
+                    bounds.Left,
+                    bounds.Top,
+                    bounds.Width,
+                    bounds.Height,
+                    sourceCopyWithLayeredWindows);
+            }
+
             if (!copied)
             {
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "BitBlt failed.");
             }
 
             using Bitmap capturedBitmap = Image.FromHbitmap(bitmapHandle);
-            return SaveJpegToBytes(capturedBitmap);
+            return SaveJpegToBytes(capturedBitmap, jpegQuality);
         }
         finally
         {
@@ -357,6 +432,24 @@ internal static class FullScreenScreenshotCapture
 
     [DllImport("gdi32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool StretchBlt(
+        IntPtr destinationDeviceContext,
+        int destinationX,
+        int destinationY,
+        int destinationWidth,
+        int destinationHeight,
+        IntPtr sourceDeviceContext,
+        int sourceX,
+        int sourceY,
+        int sourceWidth,
+        int sourceHeight,
+        int rasterOperation);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    private static extern int SetStretchBltMode(IntPtr deviceContext, int stretchMode);
+
+    [DllImport("gdi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeleteObject(IntPtr gdiObject);
 
     [DllImport("gdi32.dll", SetLastError = true)]
@@ -465,6 +558,13 @@ internal sealed record FullScreenScreenshotFrame(
     byte[] JpegBytes,
     int Width,
     int Height,
+    int ScreenCount,
+    string Description,
+    ScreenCaptureTarget Target);
+
+internal readonly record struct ScreenCapturePlan(
+    Rectangle Bounds,
+    Size OutputSize,
     int ScreenCount,
     string Description,
     ScreenCaptureTarget Target);

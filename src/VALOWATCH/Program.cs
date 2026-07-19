@@ -198,6 +198,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-stream-60fps", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunStream60FpsDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-identity", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateIdentityDiagnostic(args);
@@ -603,7 +609,8 @@ static class Program
             AppendDiagnosticLogLine(
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Stream slash command check: " +
-                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status. Targets: full,valorant.");
+                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status. Targets: full,valorant. " +
+                $"Options: fps,quality,width. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
@@ -662,6 +669,130 @@ static class Program
         {
             server?.Dispose();
         }
+    }
+
+    private static void RunStream60FpsDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        ScreenStreamingServer? server = null;
+
+        try
+        {
+            ScreenStreamOptions options = ScreenStreamOptions.Create(
+                ScreenCaptureTarget.FullScreen,
+                ScreenStreamingServer.MaximumFramesPerSecond,
+                ScreenStreamingServer.MinimumJpegQuality,
+                ScreenStreamingServer.MinimumMaxWidth);
+            List<string> serverMessages = [];
+            server = ScreenStreamingServer.Start(
+                options,
+                (message, exception) =>
+                {
+                    string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                    serverMessages.Add($"{message}{exceptionText}");
+                });
+
+            using HttpClient httpClient = new()
+            {
+                Timeout = TimeSpan.FromSeconds(20)
+            };
+            string pageUrl = $"{server.LocalOrigin}/{server.PublicPath}";
+            string streamUrl = $"{pageUrl}/stream.mjpg";
+            string pageHtml = httpClient.GetStringAsync(pageUrl).GetAwaiter().GetResult();
+
+            using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(5));
+            using HttpResponseMessage response = httpClient
+                .GetAsync(streamUrl, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            response.EnsureSuccessStatusCode();
+
+            using Stream responseStream = response.Content
+                .ReadAsStreamAsync(readTimeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            byte[] streamBuffer = new byte[1024 * 1024];
+            int totalReadBytes = 0;
+            int jpegStartMarkers = 0;
+            Stopwatch readStopwatch = Stopwatch.StartNew();
+            while (readStopwatch.Elapsed < TimeSpan.FromSeconds(2) &&
+                   totalReadBytes < streamBuffer.Length &&
+                   jpegStartMarkers < 3)
+            {
+                int remainingBytes = streamBuffer.Length - totalReadBytes;
+                int readByteCount = responseStream
+                    .ReadAsync(
+                        streamBuffer.AsMemory(totalReadBytes, Math.Min(remainingBytes, 65536)),
+                        readTimeout.Token)
+                    .GetAwaiter()
+                    .GetResult();
+                if (readByteCount == 0)
+                {
+                    break;
+                }
+
+                totalReadBytes += readByteCount;
+                jpegStartMarkers = CountJpegStartMarkers(streamBuffer.AsSpan(0, totalReadBytes));
+            }
+
+            double burstCaptureFps = MeasureBurstCaptureFramesPerSecond(options, frameCount: 30);
+            bool contentTypeLooksLikeMjpeg = response.Content.Headers.ContentType?.MediaType
+                ?.Equals("multipart/x-mixed-replace", StringComparison.OrdinalIgnoreCase) == true;
+            bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
+                contentTypeLooksLikeMjpeg &&
+                jpegStartMarkers > 0 &&
+                options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream 60fps check: " +
+                $"{(ready ? "ready" : "failed")}. ConfiguredFPS: {options.FramesPerSecond}. " +
+                $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. MjpegContentType: {contentTypeLooksLikeMjpeg}. " +
+                $"ReadBytes: {totalReadBytes}. JpegMarkers: {jpegStartMarkers}. " +
+                $"BurstCaptureFPS: {burstCaptureFps.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Stream 60fps check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            server?.Dispose();
+        }
+    }
+
+    private static int CountJpegStartMarkers(ReadOnlySpan<byte> bytes)
+    {
+        int count = 0;
+        for (int index = 1; index < bytes.Length; index++)
+        {
+            if (bytes[index - 1] == 0xFF && bytes[index] == 0xD8)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private static double MeasureBurstCaptureFramesPerSecond(ScreenStreamOptions options, int frameCount)
+    {
+        ScreenCapturePlan capturePlan = FullScreenScreenshotCapture.CreateCapturePlan(options.Target, options.MaxWidth);
+        FullScreenScreenshotCapture.CaptureToJpegBytes(capturePlan, options.JpegQuality);
+        FullScreenScreenshotCapture.CaptureToJpegBytes(capturePlan, options.JpegQuality);
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        for (int frameIndex = 0; frameIndex < frameCount; frameIndex++)
+        {
+            FullScreenScreenshotCapture.CaptureToJpegBytes(capturePlan, options.JpegQuality);
+        }
+
+        stopwatch.Stop();
+        return frameCount / Math.Max(0.001D, stopwatch.Elapsed.TotalSeconds);
     }
 
     private static string FlattenRuntimeLogEmbeds(IEnumerable<Embed> embeds)

@@ -101,7 +101,10 @@ public sealed class DiscordBotSettingsStore
             TranscriptionChunkSeconds = 12,
             TranscriptionMinimumPeak = 0.006F,
             ScreenshotCommandEnabled = false,
-            StreamCommandEnabled = true
+            StreamCommandEnabled = true,
+            StreamDefaultFramesPerSecond = ScreenStreamingServer.DefaultFramesPerSecond,
+            StreamDefaultJpegQuality = ScreenStreamingServer.DefaultJpegQuality,
+            StreamDefaultMaxWidth = ScreenStreamingServer.DefaultMaxWidth
         };
 
         Directory.CreateDirectory(appPaths.ConfigDirectory);
@@ -313,6 +316,24 @@ public sealed class DiscordBotSettingsStore
             settings.StreamCommandEnabled = streamCommandEnabled;
         }
 
+        if (TryGetInt32(envValues, out int streamDefaultFramesPerSecond, "VALOWATCH_STREAM_DEFAULT_FPS"))
+        {
+            settings.StreamDefaultFramesPerSecond =
+                ScreenStreamOptions.NormalizeFramesPerSecond(streamDefaultFramesPerSecond);
+        }
+
+        if (TryGetInt32(envValues, out int streamDefaultJpegQuality, "VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY"))
+        {
+            settings.StreamDefaultJpegQuality =
+                ScreenStreamOptions.NormalizeJpegQuality(streamDefaultJpegQuality);
+        }
+
+        if (TryGetInt32(envValues, out int streamDefaultMaxWidth, "VALOWATCH_STREAM_DEFAULT_WIDTH"))
+        {
+            settings.StreamDefaultMaxWidth =
+                ScreenStreamOptions.NormalizeMaxWidth(streamDefaultMaxWidth);
+        }
+
     }
 
     private void EnsureEnvExample()
@@ -343,7 +364,10 @@ public sealed class DiscordBotSettingsStore
             "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS=12",
             "VALOWATCH_TRANSCRIPTION_MIN_PEAK=0.006",
             "VALOWATCH_SCREENSHOT_COMMAND_ENABLED=false",
-            "VALOWATCH_STREAM_COMMAND_ENABLED=true"
+            "VALOWATCH_STREAM_COMMAND_ENABLED=true",
+            $"VALOWATCH_STREAM_DEFAULT_FPS={ScreenStreamingServer.DefaultFramesPerSecond}",
+            $"VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY={ScreenStreamingServer.DefaultJpegQuality}",
+            $"VALOWATCH_STREAM_DEFAULT_WIDTH={ScreenStreamingServer.DefaultMaxWidth}"
         ];
 
         if (!File.Exists(appPaths.EnvExamplePath))
