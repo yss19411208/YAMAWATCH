@@ -174,6 +174,18 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-screenshot-capture", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunScreenshotCaptureDiagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-screenshot-command", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunScreenshotCommandDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-update-identity", StringComparison.OrdinalIgnoreCase)))
         {
             RunUpdateIdentityDiagnostic(args);
@@ -493,6 +505,73 @@ static class Program
         catch (Exception exception) when (exception is OperationCanceledException or IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             TryWriteDiagnosticFailure(logFilePath, "Self diagnostics slash command check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunScreenshotCaptureDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string screenshotPath = string.Empty;
+
+        try
+        {
+            FullScreenScreenshotResult screenshot = FullScreenScreenshotCapture.CaptureToJpeg(appPaths.ScreenshotTempDirectory);
+            screenshotPath = screenshot.FilePath;
+            bool fileLooksValid = File.Exists(screenshot.FilePath) && screenshot.FileBytes > 0;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Screenshot capture check: " +
+                $"{(fileLooksValid ? "ready" : "failed")}. " +
+                $"Size: {screenshot.Width}x{screenshot.Height}. Screens: {screenshot.ScreenCount}. " +
+                $"Bytes: {screenshot.FileBytes}. TemporaryFileDeletedAfterCheck: true.");
+            Environment.ExitCode = fileLooksValid ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or ExternalException or System.ComponentModel.Win32Exception)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Screenshot capture check", exception);
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(screenshotPath) && File.Exists(screenshotPath))
+                {
+                    File.Delete(screenshotPath);
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                TryWriteDiagnosticFailure(logFilePath, "Screenshot capture cleanup", exception);
+            }
+        }
+    }
+
+    private static void RunScreenshotCommandDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            object builtCommand = DiscordBotVoiceRelay
+                .BuildScreenshotSlashCommandBuilder()
+                .Build();
+            bool ready = builtCommand is not null;
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Screenshot slash command check: " +
+                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,now. DefaultState: off.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Screenshot slash command check", exception);
             Environment.ExitCode = 1;
         }
     }

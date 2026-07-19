@@ -13,6 +13,8 @@ public sealed class AppPaths
         UpdateCompletedNotificationPath = Path.Combine(dataDirectory, "update-completed.pending");
         PendingInstallerReportPath = Path.Combine(dataDirectory, "logs", "installer-result.pending.log");
         RuntimeLogCursorPath = Path.Combine(dataDirectory, "logs", "runtime-log-cursors.json");
+        ScreenshotCommandStatePath = Path.Combine(dataDirectory, "state", "screenshot-command-enabled.txt");
+        ScreenshotTempDirectory = Path.Combine(dataDirectory, "temp-screenshots");
         DurableEnvPath = Path.Combine(dataDirectory, "config", "settings.protected");
         DiscordBotConfigPath = Path.Combine(ConfigDirectory, "discord_bot.json");
         DiscordBotSampleConfigPath = Path.Combine(ConfigDirectory, "discord_bot.sample.json");
@@ -29,6 +31,10 @@ public sealed class AppPaths
     public string PendingInstallerReportPath { get; }
 
     public string RuntimeLogCursorPath { get; }
+
+    public string ScreenshotCommandStatePath { get; }
+
+    public string ScreenshotTempDirectory { get; }
 
     public string DurableEnvPath { get; }
 

@@ -48,10 +48,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
     private const string SelfDiagnosticsDownloadOptionName = "download";
+    private const string ScreenshotCommandName = "screenshot";
+    private const string ScreenshotSubcommandOnName = "on";
+    private const string ScreenshotSubcommandOffName = "off";
+    private const string ScreenshotSubcommandNowName = "now";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
     private readonly DiscordBotSettingsStore settingsStore;
+    private readonly ScreenshotCommandStateStore screenshotCommandStateStore;
     private readonly AppPaths appPaths;
     private readonly string logFilePath;
     private readonly object logLock = new();
@@ -120,6 +125,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private float currentDiscordAudioVolume;
     private bool discordProcessAudioRuntimeEnabled;
     private bool discordAudioCommandEnabled;
+    private bool screenshotCommandEnabled;
     private ulong currentMonitoredDiscordUserId;
     private ulong currentVoiceGuildId;
     private string currentVoiceGuildName = string.Empty;
@@ -137,6 +143,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         this.settingsStore = settingsStore;
         this.appPaths = appPaths;
+        screenshotCommandStateStore = new ScreenshotCommandStateStore(appPaths);
         logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         settingsStore.EnsureSampleConfig();
     }
@@ -207,10 +214,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             DiscordGatewayContext gatewayContext = await EnsureDiscordGatewayReadyAsync(settings)
                 .ConfigureAwait(false);
             ConfigureDiscordUserVoiceTracking(settings, gatewayContext.Guild);
+            ConfigureScreenshotCommandState(settings);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureScreenshotCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Client).ConfigureAwait(false);
             await SendPendingUpdateNotificationAsync().ConfigureAwait(false);
 
@@ -316,6 +325,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStartCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
+            await EnsureScreenshotCommandAsync(guild).ConfigureAwait(false);
 
             WriteLog($"Connecting to Discord voice channel {voiceChannel.Id}.");
             startupStage = DiscordVoiceChannelConnectStartupStage;
@@ -1013,6 +1023,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
+        if (string.Equals(command.Data.Name, ScreenshotCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleScreenshotSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (!string.Equals(command.Data.Name, DiscordAudioCommandName, StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -1285,6 +1301,202 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             {
                 WriteLog("Self diagnostics slash command error response failed.", responseException);
             }
+        }
+    }
+
+    private async Task HandleScreenshotSlashCommandAsync(SocketSlashCommand command)
+    {
+        bool deferred = false;
+        string screenshotPathToDelete = string.Empty;
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("This command can only be used inside the configured Discord server.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+            if (settings is null)
+            {
+                await command
+                    .RespondAsync($"VALOWATCH settings are not usable: {statusText}", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
+            {
+                await command
+                    .RespondAsync("This server is not configured for VALOWATCH screenshot commands.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCH screenshot commands require server management permission.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            string actionName = command.Data.Options.FirstOrDefault()?.Name ?? string.Empty;
+            if (string.Equals(actionName, ScreenshotSubcommandOnName, StringComparison.OrdinalIgnoreCase))
+            {
+                SetScreenshotCommandEnabled(enabled: true, $"Discord /{ScreenshotCommandName} {ScreenshotSubcommandOnName}");
+                await command
+                    .RespondAsync("スクショ送信をONにしました。必要な時だけ /screenshot now を実行してください。", ephemeral: true)
+                    .ConfigureAwait(false);
+                await SendScreenshotCommandStatusNoticeAsync(command, "スクショ送信: ON").ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, ScreenshotSubcommandOffName, StringComparison.OrdinalIgnoreCase))
+            {
+                SetScreenshotCommandEnabled(enabled: false, $"Discord /{ScreenshotCommandName} {ScreenshotSubcommandOffName}");
+                await command
+                    .RespondAsync("スクショ送信をOFFにしました。", ephemeral: true)
+                    .ConfigureAwait(false);
+                await SendScreenshotCommandStatusNoticeAsync(command, "スクショ送信: OFF").ConfigureAwait(false);
+                return;
+            }
+
+            if (!string.Equals(actionName, ScreenshotSubcommandNowName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command
+                    .RespondAsync("Use /screenshot on, /screenshot off, or /screenshot now.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!IsScreenshotCommandEnabled())
+            {
+                await command
+                    .RespondAsync("スクショ送信はOFFです。先に /screenshot on を実行してください。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            IMessageChannel? targetChannel = ResolveScreenshotTargetChannel(command);
+            if (targetChannel is null)
+            {
+                await command
+                    .RespondAsync("Screenshot target channel is unavailable.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
+            await targetChannel
+                .SendMessageAsync(embed: BuildStatusNotificationEmbed("スクショ送信中"))
+                .ConfigureAwait(false);
+
+            FullScreenScreenshotResult screenshot = FullScreenScreenshotCapture.CaptureToJpeg(appPaths.ScreenshotTempDirectory);
+            screenshotPathToDelete = screenshot.FilePath;
+            string fileMessage =
+                "スクショ送信中" +
+                Environment.NewLine +
+                $"画面: {screenshot.Width}x{screenshot.Height} / {screenshot.ScreenCount} screen(s)";
+
+            await targetChannel
+                .SendFileAsync(screenshot.FilePath, fileMessage)
+                .ConfigureAwait(false);
+
+            await command
+                .FollowupAsync("スクショを送信しました。", ephemeral: true)
+                .ConfigureAwait(false);
+            WriteLog(
+                "Screenshot slash command sent an image. " +
+                $"User: {command.User.Id}. Size: {screenshot.Width}x{screenshot.Height}. " +
+                $"Screens: {screenshot.ScreenCount}. Bytes: {screenshot.FileBytes}.");
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or ExternalException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("Screenshot slash command handling failed.", exception);
+            try
+            {
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync($"スクショ送信に失敗しました: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync($"スクショ送信に失敗しました: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Screenshot slash command error response failed.", responseException);
+            }
+        }
+        finally
+        {
+            DeleteTemporaryScreenshotFile(screenshotPathToDelete);
+        }
+    }
+
+    private bool IsScreenshotCommandEnabled()
+    {
+        lock (stateLock)
+        {
+            return screenshotCommandEnabled;
+        }
+    }
+
+    private void SetScreenshotCommandEnabled(bool enabled, string reason)
+    {
+        screenshotCommandStateStore.Save(enabled);
+        lock (stateLock)
+        {
+            screenshotCommandEnabled = enabled;
+        }
+
+        WriteLog($"Screenshot slash command state changed. Enabled: {enabled}. Reason: {reason}.");
+    }
+
+    private async Task SendScreenshotCommandStatusNoticeAsync(SocketSlashCommand command, string message)
+    {
+        IMessageChannel? targetChannel = ResolveScreenshotTargetChannel(command);
+        if (targetChannel is null)
+        {
+            WriteLog($"Screenshot command status notice skipped because no target channel was available. Message: {message}");
+            return;
+        }
+
+        await targetChannel.SendMessageAsync(embed: BuildStatusNotificationEmbed(message)).ConfigureAwait(false);
+    }
+
+    private IMessageChannel? ResolveScreenshotTargetChannel(SocketSlashCommand command)
+    {
+        return command.Channel as IMessageChannel ?? discordStatusTextChannel;
+    }
+
+    private void DeleteTemporaryScreenshotFile(string screenshotPath)
+    {
+        if (string.IsNullOrWhiteSpace(screenshotPath))
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(screenshotPath))
+            {
+                File.Delete(screenshotPath);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            WriteLog($"Temporary screenshot file could not be deleted: {screenshotPath}", exception);
         }
     }
 
@@ -1652,13 +1864,26 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         currentDiscordAudioVolume = Math.Clamp(settings.DiscordAudioVolume, 0.0F, 1.0F);
         discordProcessAudioRuntimeEnabled = settings.StreamDiscordAudioWhenRunning;
         discordAudioCommandEnabled = settings.DiscordAudioCommandEnabled;
+        ConfigureScreenshotCommandState(settings);
 
         WriteLog(
             "Discord conversation state configured. " +
             $"Guild: {currentVoiceGuildName} ({currentVoiceGuildId}). " +
             $"Voice: {currentVoiceChannelName} ({voiceChannel.Id}). " +
             $"DiscordAudioDefault: {discordProcessAudioRuntimeEnabled}. " +
-            $"DiscordAudioVolume: {currentDiscordAudioVolume:0.00}.");
+            $"DiscordAudioVolume: {currentDiscordAudioVolume:0.00}. " +
+            $"ScreenshotCommand: {screenshotCommandEnabled}.");
+    }
+
+    private void ConfigureScreenshotCommandState(DiscordBotSettings settings)
+    {
+        bool enabled = screenshotCommandStateStore.Load(settings.ScreenshotCommandEnabled);
+        lock (stateLock)
+        {
+            screenshotCommandEnabled = enabled;
+        }
+
+        WriteLog($"Screenshot slash command state configured. Enabled: {enabled}.");
     }
 
     private void ConfigureDiscordUserVoiceTracking(DiscordBotSettings settings, SocketGuild guild)
@@ -1842,6 +2067,68 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 "The bot will retry registration on the next startup.",
                 exception);
         }
+    }
+
+    private async Task EnsureScreenshotCommandAsync(SocketGuild guild)
+    {
+        const string description = "VALOWATCH screenshot controls";
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, ScreenshotCommandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
+            {
+                if (string.Equals(existingCommand.Description, description, StringComparison.Ordinal))
+                {
+                    WriteLog($"Screenshot slash command already exists: /{ScreenshotCommandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Screenshot slash command replaced: /{ScreenshotCommandName}.");
+            }
+
+            SlashCommandBuilder commandBuilder = BuildScreenshotSlashCommandBuilder();
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Screenshot slash command registered: /{ScreenshotCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Screenshot slash command could not be registered. " +
+                "The bot will retry registration on the next startup.",
+                exception);
+        }
+    }
+
+    internal static SlashCommandBuilder BuildScreenshotSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(ScreenshotCommandName)
+            .WithDescription("VALOWATCH screenshot controls")
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(ScreenshotSubcommandOnName)
+                    .WithDescription("Enable manual screenshot sending")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(ScreenshotSubcommandOffName)
+                    .WithDescription("Disable screenshot sending")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(ScreenshotSubcommandNowName)
+                    .WithDescription("Send one full-screen screenshot now")
+                    .WithType(ApplicationCommandOptionType.SubCommand));
     }
 
     private IMessageChannel? ResolveTranscriptionTextChannel(

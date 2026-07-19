@@ -99,7 +99,8 @@ public sealed class DiscordBotSettingsStore
             TranscriptionEngine = "vosk",
             TranscriptionModelPath = string.Empty,
             TranscriptionChunkSeconds = 12,
-            TranscriptionMinimumPeak = 0.006F
+            TranscriptionMinimumPeak = 0.006F,
+            ScreenshotCommandEnabled = false
         };
 
         Directory.CreateDirectory(appPaths.ConfigDirectory);
@@ -293,6 +294,15 @@ public sealed class DiscordBotSettingsStore
             settings.TranscriptionMinimumPeak = Math.Clamp(transcriptionMinimumPeak, 0.0F, 0.2F);
         }
 
+        if (TryGetBoolean(
+            envValues,
+            out bool screenshotCommandEnabled,
+            "VALOWATCH_SCREENSHOT_COMMAND_ENABLED",
+            "DISCORD_SCREENSHOT_COMMAND_ENABLED"))
+        {
+            settings.ScreenshotCommandEnabled = screenshotCommandEnabled;
+        }
+
     }
 
     private void EnsureEnvExample()
@@ -321,7 +331,8 @@ public sealed class DiscordBotSettingsStore
             "VALOWATCH_TRANSCRIPTION_ENGINE=vosk",
             "VALOWATCH_TRANSCRIPTION_MODEL_PATH=",
             "VALOWATCH_TRANSCRIPTION_CHUNK_SECONDS=12",
-            "VALOWATCH_TRANSCRIPTION_MIN_PEAK=0.006"
+            "VALOWATCH_TRANSCRIPTION_MIN_PEAK=0.006",
+            "VALOWATCH_SCREENSHOT_COMMAND_ENABLED=false"
         ];
 
         if (!File.Exists(appPaths.EnvExamplePath))

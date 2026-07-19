@@ -56,4 +56,6 @@ public sealed class DiscordBotSettings
 
     public float TranscriptionMinimumPeak { get; set; } = 0.006F;
 
+    public bool ScreenshotCommandEnabled { get; set; }
+
 }
