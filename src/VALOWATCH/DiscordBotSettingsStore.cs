@@ -354,11 +354,12 @@ public sealed class DiscordBotSettingsStore
         }
     }
 
-    private static float NormalizeLineAudioVolume(float lineAudioVolume)
+    internal static float NormalizeLineAudioVolume(float lineAudioVolume)
     {
-        float clampedLineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 1.0F);
+        float clampedLineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 2.0F);
         if (Math.Abs(clampedLineAudioVolume - DiscordBotSettings.LegacyDefaultLineAudioVolume) < 0.0001F ||
-            Math.Abs(clampedLineAudioVolume - DiscordBotSettings.PreviousDefaultLineAudioVolume) < 0.0001F)
+            Math.Abs(clampedLineAudioVolume - DiscordBotSettings.PreviousDefaultLineAudioVolume) < 0.0001F ||
+            Math.Abs(clampedLineAudioVolume - DiscordBotSettings.RecentDefaultLineAudioVolume) < 0.0001F)
         {
             return DiscordBotSettings.DefaultLineAudioVolume;
         }

@@ -1975,13 +1975,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         List<string> labels = [];
         LineProcessLoopbackWaveProvider? lineProvider = lineProcessLoopbackProvider;
-        if (lineProvider?.IsCapturing == true)
+        if (lineProvider?.HasRecentAudibleSignal == true)
         {
             labels.Add("LINE会話");
         }
 
         LineProcessLoopbackWaveProvider? discordProvider = discordProcessLoopbackProvider;
-        if (discordProcessAudioRuntimeEnabled && discordProvider?.IsCapturing == true)
+        if (discordProcessAudioRuntimeEnabled && discordProvider?.HasRecentAudibleSignal == true)
         {
             if (!string.IsNullOrWhiteSpace(currentDiscordConversationGuildName) &&
                 !string.IsNullOrWhiteSpace(currentDiscordConversationChannelName))
@@ -2695,7 +2695,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ISampleProvider lineLoopbackSampleProvider = CreateMono48KhzSampleProvider(lineLoopbackWaveProvider, "LINE loopback");
             lineLoopbackSampleProvider = new SimpleVolumeSampleProvider(
                 lineLoopbackSampleProvider,
-                Math.Clamp(lineLoopbackVolume, 0.0F, 1.0F));
+                Math.Clamp(lineLoopbackVolume, 0.0F, 2.0F));
             additionalSampleProviders.Add(lineLoopbackSampleProvider);
         }
 
@@ -3740,13 +3740,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private sealed class SimpleVolumeSampleProvider : ISampleProvider
     {
+        private const float MaximumGain = 2.0F;
         private readonly ISampleProvider sourceProvider;
         private readonly float volume;
 
         public SimpleVolumeSampleProvider(ISampleProvider sourceProvider, float volume)
         {
             this.sourceProvider = sourceProvider;
-            this.volume = Math.Clamp(volume, 0.0F, 1.0F);
+            this.volume = Math.Clamp(volume, 0.0F, MaximumGain);
         }
 
         public WaveFormat WaveFormat => sourceProvider.WaveFormat;

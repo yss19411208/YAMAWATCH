@@ -8,6 +8,7 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
     private static readonly TimeSpan ProcessRefreshInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan SilentCandidateSwitchInterval = TimeSpan.FromSeconds(12);
     private static readonly TimeSpan HealthLogInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RecentAudibleSignalDuration = TimeSpan.FromSeconds(6);
     private const float AudiblePeakThreshold = 0.003F;
 
     private readonly string[] processNames;
@@ -67,6 +68,18 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
             lock (sync)
             {
                 return activeCapture is not null;
+            }
+        }
+    }
+
+    public bool HasRecentAudibleSignal
+    {
+        get
+        {
+            lock (sync)
+            {
+                return lastAudibleCaptureAtUtc != DateTimeOffset.MinValue &&
+                    DateTimeOffset.UtcNow - lastAudibleCaptureAtUtc <= RecentAudibleSignalDuration;
             }
         }
     }
