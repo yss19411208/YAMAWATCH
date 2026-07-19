@@ -337,9 +337,7 @@ internal static class Program
             return false;
         }
 
-        string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
-            ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
-        string updateDirectory = CreateUpdateDirectory(installDirectory, "github-agent", preferExternal: true);
+        string updateDirectory = CreateUpdateDirectory(installDirectory, "github-agent");
         Directory.CreateDirectory(updateDirectory);
         string downloadedAgentPath = Path.Combine(
             updateDirectory,
@@ -500,7 +498,7 @@ internal static class Program
 
         if (!FileMatchesRelease(installedStartAgentPath, startAgentAsset.ExpectedSha256, out string currentStatus))
         {
-            string updateDirectory = CreateUpdateDirectory(installDirectory, "start-agent", preferExternal: true);
+            string updateDirectory = CreateUpdateDirectory(installDirectory, "start-agent");
             Directory.CreateDirectory(updateDirectory);
             string downloadedStartAgentPath = Path.Combine(
                 updateDirectory,
@@ -649,9 +647,17 @@ internal static class Program
             return installedAgentPath;
         }
 
-        string temporaryAgentPath = installedAgentPath + $".{Environment.ProcessId}.new";
-        File.Copy(sourceAgentPath, temporaryAgentPath, overwrite: true);
-        File.Move(temporaryAgentPath, installedAgentPath, overwrite: true);
+        string temporaryAgentPath = CreateWorkspaceStagingPath(installedAgentPath, "agent-install");
+        try
+        {
+            File.Copy(sourceAgentPath, temporaryAgentPath, overwrite: true);
+            File.Move(temporaryAgentPath, installedAgentPath, overwrite: true);
+        }
+        finally
+        {
+            TryDeleteFile(temporaryAgentPath, "temporary GITHUB agent install file");
+        }
+
         WriteLog($"GITHUB watch agent installed: {installedAgentPath}");
         return installedAgentPath;
     }
@@ -1036,7 +1042,7 @@ internal static class Program
 
     private static string CreateFallbackPartialPath(string destinationPath)
     {
-        string fallbackDirectory = CreateLocalAppDataDownloadDirectory(destinationPath);
+        string fallbackDirectory = CreateSiblingDownloadDirectory(destinationPath, "partials");
         string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
         return Path.Combine(
             fallbackDirectory,
@@ -1072,82 +1078,63 @@ internal static class Program
 
     private static string CreateEmergencyDownloadDirectory(string destinationPath)
     {
+        return CreateSiblingDownloadDirectory(destinationPath, "emergency");
+    }
+
+    private static string CreateSiblingDownloadDirectory(string destinationPath, string bucketName)
+    {
+        string updateDirectory = Path.GetDirectoryName(Path.GetFullPath(destinationPath))
+            ?? AppContext.BaseDirectory;
         string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
-        string emergencyDirectory = Path.Combine(
-            Path.GetTempPath(),
-            "VALOWATCH",
-            "updates",
+        string siblingDirectory = Path.Combine(
+            updateDirectory,
+            SanitizeFileName(bucketName),
             SanitizeFileName(fileNameWithoutExtension));
-        Directory.CreateDirectory(emergencyDirectory);
-        return emergencyDirectory;
+        Directory.CreateDirectory(siblingDirectory);
+        return siblingDirectory;
     }
 
-    private static string CreateLocalAppDataDownloadDirectory(string destinationPath)
+    private static string CreateUpdateDirectory(string installDirectory, string bucketName)
     {
-        try
-        {
-            string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            if (string.IsNullOrWhiteSpace(localAppDataDirectory))
-            {
-                return CreateEmergencyDownloadDirectory(destinationPath);
-            }
-
-            string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(destinationPath);
-            string fallbackDirectory = Path.Combine(
-                localAppDataDirectory,
-                "VALOWATCH",
-                "updates",
-                SanitizeFileName(fileNameWithoutExtension));
-            Directory.CreateDirectory(fallbackDirectory);
-            return fallbackDirectory;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
-        {
-            WriteLog(
-                "LocalAppData update directory could not be used; falling back to Temp. " +
-                SummarizeException(exception));
-            return CreateEmergencyDownloadDirectory(destinationPath);
-        }
-    }
-
-    private static string CreateUpdateDirectory(string installDirectory, string bucketName, bool preferExternal)
-    {
-        if (preferExternal)
-        {
-            try
-            {
-                string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                if (!string.IsNullOrWhiteSpace(localAppDataDirectory))
-                {
-                    string externalDirectory = Path.Combine(
-                        localAppDataDirectory,
-                        "VALOWATCH",
-                        "updates",
-                        SanitizeFileName(bucketName));
-                    Directory.CreateDirectory(externalDirectory);
-                    return externalDirectory;
-                }
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
-            {
-                WriteLog(
-                    "External LocalAppData update directory could not be used; falling back to Temp. " +
-                    SummarizeException(exception));
-                string tempDirectory = Path.Combine(
-                    Path.GetTempPath(),
-                    "VALOWATCH",
-                    "updates",
-                    SanitizeFileName(bucketName));
-                Directory.CreateDirectory(tempDirectory);
-                return tempDirectory;
-            }
-        }
-
         string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
             ?? throw new InvalidOperationException("VALOWATCH workspace root could not be resolved.");
         string workspaceUpdateDirectory = Path.Combine(workspaceRoot, "data", "updates", SanitizeFileName(bucketName));
         Directory.CreateDirectory(workspaceUpdateDirectory);
         return workspaceUpdateDirectory;
+    }
+
+    private static string CreateWorkspaceStagingPath(string targetPath, string bucketName)
+    {
+        string workspaceRoot = ResolveWorkspaceRootForPath(targetPath);
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(targetPath);
+        string stagingDirectory = Path.Combine(
+            workspaceRoot,
+            "data",
+            "updates",
+            SanitizeFileName(bucketName),
+            SanitizeFileName(fileNameWithoutExtension));
+        Directory.CreateDirectory(stagingDirectory);
+        return Path.Combine(
+            stagingDirectory,
+            $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.staged");
+    }
+
+    private static string ResolveWorkspaceRootForPath(string path)
+    {
+        DirectoryInfo? currentDirectory = new(Path.GetDirectoryName(Path.GetFullPath(path)) ?? AppContext.BaseDirectory);
+        while (currentDirectory is not null)
+        {
+            string directoryName = Path.GetFileName(
+                currentDirectory.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase))
+            {
+                return currentDirectory.FullName;
+            }
+
+            currentDirectory = currentDirectory.Parent;
+        }
+
+        return Path.GetDirectoryName(Path.GetFullPath(path)) ?? AppContext.BaseDirectory;
     }
 
     private static bool ValidateDownloadedApp(
@@ -1400,9 +1387,7 @@ internal static class Program
 
     private static int RunDownloadPathRecoveryDiagnostic()
     {
-        string diagnosticRoot = Path.Combine(
-            Path.GetTempPath(),
-            $"VALOWATCH-download-path-recovery-{Guid.NewGuid():N}");
+        string diagnosticRoot = CreateWorkspaceDiagnosticRoot("download-path-recovery");
         try
         {
             Directory.CreateDirectory(diagnosticRoot);
@@ -1418,11 +1403,11 @@ internal static class Program
                     StringComparison.OrdinalIgnoreCase) &&
                 downloadTarget.ExistingLength == 0 &&
                 Path.GetFullPath(downloadTarget.PartialPath)
-                    .Contains(
-                        Path.Combine("VALOWATCH", "updates"),
-                        StringComparison.OrdinalIgnoreCase);
+                    .StartsWith(Path.GetFullPath(diagnosticRoot), StringComparison.OrdinalIgnoreCase) &&
+                Path.GetFullPath(downloadTarget.PartialPath)
+                    .Contains($"{Path.DirectorySeparatorChar}partials{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
             string emergencyPartialPath = CreateEmergencyPartialPath(destinationPath);
-            string expectedEmergencyRoot = Path.Combine(Path.GetTempPath(), "VALOWATCH", "updates");
+            string expectedEmergencyRoot = Path.Combine(diagnosticRoot, "emergency");
             bool emergencyFallbackReady =
                 Path.GetFullPath(emergencyPartialPath)
                     .StartsWith(Path.GetFullPath(expectedEmergencyRoot), StringComparison.OrdinalIgnoreCase) &&
@@ -1441,6 +1426,29 @@ internal static class Program
         finally
         {
             TryDeleteDiagnosticDirectory(diagnosticRoot);
+        }
+    }
+
+    private static string CreateWorkspaceDiagnosticRoot(string diagnosticName)
+    {
+        try
+        {
+            string installDirectory = ResolveInstallDirectory(Array.Empty<string>());
+            string workspaceRoot = Directory.GetParent(Path.GetFullPath(installDirectory))?.FullName
+                ?? AppContext.BaseDirectory;
+            return Path.Combine(
+                workspaceRoot,
+                "data",
+                "diagnostics",
+                $"VALOWATCH-{SanitizeFileName(diagnosticName)}-{Guid.NewGuid():N}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
+        {
+            return Path.Combine(
+                AppContext.BaseDirectory,
+                "data",
+                "diagnostics",
+                $"VALOWATCH-{SanitizeFileName(diagnosticName)}-{Guid.NewGuid():N}");
         }
     }
 
@@ -1635,7 +1643,7 @@ internal static class Program
     {
         try
         {
-            string logDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
+            string logDirectory = ResolveLogDirectory();
             Directory.CreateDirectory(logDirectory);
             string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
             File.AppendAllText(
@@ -1646,6 +1654,57 @@ internal static class Program
         catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
         {
         }
+    }
+
+    private static string ResolveLogDirectory()
+    {
+        if (TryResolveWorkspaceRootFromCurrentProcess(out string workspaceRoot))
+        {
+            return Path.Combine(workspaceRoot, "data", "logs");
+        }
+
+        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (!string.IsNullOrWhiteSpace(documentsDirectory))
+        {
+            return Path.Combine(documentsDirectory, "VALOWATCH", "data", "logs");
+        }
+
+        return Path.Combine(AppContext.BaseDirectory, "data", "logs");
+    }
+
+    private static bool TryResolveWorkspaceRootFromCurrentProcess(out string workspaceRoot)
+    {
+        string startDirectory = Path.GetDirectoryName(Environment.ProcessPath ?? string.Empty)
+            ?? AppContext.BaseDirectory;
+        DirectoryInfo? currentDirectory = new(startDirectory);
+        while (currentDirectory is not null)
+        {
+            if (IsValowatchWorkspaceRoot(currentDirectory.FullName))
+            {
+                workspaceRoot = currentDirectory.FullName;
+                return true;
+            }
+
+            currentDirectory = currentDirectory.Parent;
+        }
+
+        workspaceRoot = string.Empty;
+        return false;
+    }
+
+    private static bool IsValowatchWorkspaceRoot(string directoryPath)
+    {
+        string directoryName = Path.GetFileName(
+            directoryPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (!directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return Directory.Exists(Path.Combine(directoryPath, "app")) ||
+            Directory.Exists(Path.Combine(directoryPath, "installer")) ||
+            File.Exists(Path.Combine(directoryPath, "GITHUB.exe")) ||
+            File.Exists(Path.Combine(directoryPath, "VALOWATCH.slnx"));
     }
 
     private sealed record ReleaseAppAsset(

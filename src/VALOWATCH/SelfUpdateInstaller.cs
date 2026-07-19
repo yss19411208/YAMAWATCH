@@ -160,7 +160,7 @@ internal static class SelfUpdateInstaller
     {
         string sourceExecutablePath = Environment.ProcessPath
             ?? throw new InvalidOperationException("Self update source executable path is unavailable.");
-        string temporaryPath = targetExecutablePath + $".{Environment.ProcessId}.new";
+        string temporaryPath = CreateWorkspaceStagingPath(targetExecutablePath, "self-update");
         string backupPath = targetExecutablePath + ".previous";
         string? activeBackupPath = null;
         File.Copy(sourceExecutablePath, temporaryPath, overwrite: true);
@@ -224,7 +224,7 @@ internal static class SelfUpdateInstaller
             }
 
             string targetPath = Path.Combine(installDirectory, fileName);
-            string temporaryPath = targetPath + $".{Environment.ProcessId}.new";
+            string temporaryPath = CreateWorkspaceStagingPath(targetPath, "native-resource");
             using (FileStream targetStream = new(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 resourceStream.CopyTo(targetStream);
@@ -282,7 +282,7 @@ internal static class SelfUpdateInstaller
             return;
         }
 
-        string temporaryPath = targetPath + $".{Environment.ProcessId}.{Guid.NewGuid():N}.new";
+        string temporaryPath = CreateWorkspaceStagingPath(targetPath, "embedded-agent");
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory);
@@ -682,11 +682,56 @@ internal static class SelfUpdateInstaller
         return TryValidateExecutableFileWithRetry(filePath, "diagnostic executable", out _);
     }
 
+    private static string CreateWorkspaceStagingPath(string targetPath, string bucketName)
+    {
+        string workspaceRoot = ResolveWorkspaceRootForPath(targetPath);
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(targetPath);
+        string stagingDirectory = Path.Combine(
+            workspaceRoot,
+            "data",
+            "updates",
+            SanitizeFileName(bucketName),
+            SanitizeFileName(fileNameWithoutExtension));
+        Directory.CreateDirectory(stagingDirectory);
+        return Path.Combine(
+            stagingDirectory,
+            $"{fileNameWithoutExtension}.{Environment.ProcessId}.{Guid.NewGuid():N}.staged");
+    }
+
+    private static string ResolveWorkspaceRootForPath(string path)
+    {
+        DirectoryInfo? currentDirectory = new(Path.GetDirectoryName(Path.GetFullPath(path)) ?? AppContext.BaseDirectory);
+        while (currentDirectory is not null)
+        {
+            string directoryName = Path.GetFileName(
+                currentDirectory.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            if (directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase))
+            {
+                return currentDirectory.FullName;
+            }
+
+            currentDirectory = currentDirectory.Parent;
+        }
+
+        return Path.GetDirectoryName(Path.GetFullPath(path)) ?? AppContext.BaseDirectory;
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        string sanitized = value.Trim();
+        foreach (char invalidCharacter in Path.GetInvalidFileNameChars())
+        {
+            sanitized = sanitized.Replace(invalidCharacter, '-');
+        }
+
+        return string.IsNullOrWhiteSpace(sanitized) ? "file" : sanitized;
+    }
+
     private static void WriteLog(string message, Exception? exception = null)
     {
         try
         {
-            string logDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
+            string logDirectory = ResolveLogDirectory();
             Directory.CreateDirectory(logDirectory);
             string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
             File.AppendAllText(
@@ -697,6 +742,57 @@ internal static class SelfUpdateInstaller
         catch (Exception logException) when (logException is IOException or UnauthorizedAccessException)
         {
         }
+    }
+
+    private static string ResolveLogDirectory()
+    {
+        if (TryResolveWorkspaceRootFromCurrentProcess(out string workspaceRoot))
+        {
+            return Path.Combine(workspaceRoot, "data", "logs");
+        }
+
+        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (!string.IsNullOrWhiteSpace(documentsDirectory))
+        {
+            return Path.Combine(documentsDirectory, "VALOWATCH", "data", "logs");
+        }
+
+        return Path.Combine(AppContext.BaseDirectory, "data", "logs");
+    }
+
+    private static bool TryResolveWorkspaceRootFromCurrentProcess(out string workspaceRoot)
+    {
+        string startDirectory = Path.GetDirectoryName(Environment.ProcessPath ?? string.Empty)
+            ?? AppContext.BaseDirectory;
+        DirectoryInfo? currentDirectory = new(startDirectory);
+        while (currentDirectory is not null)
+        {
+            if (IsValowatchWorkspaceRoot(currentDirectory.FullName))
+            {
+                workspaceRoot = currentDirectory.FullName;
+                return true;
+            }
+
+            currentDirectory = currentDirectory.Parent;
+        }
+
+        workspaceRoot = string.Empty;
+        return false;
+    }
+
+    private static bool IsValowatchWorkspaceRoot(string directoryPath)
+    {
+        string directoryName = Path.GetFileName(
+            directoryPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (!directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return Directory.Exists(Path.Combine(directoryPath, "app")) ||
+            Directory.Exists(Path.Combine(directoryPath, "installer")) ||
+            File.Exists(Path.Combine(directoryPath, "GITHUB.exe")) ||
+            File.Exists(Path.Combine(directoryPath, "VALOWATCH.slnx"));
     }
 
     private sealed record ReplacementResult(string TargetExecutablePath, string? BackupPath);

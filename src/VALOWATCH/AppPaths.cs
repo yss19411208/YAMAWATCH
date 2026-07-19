@@ -57,10 +57,9 @@ public sealed class AppPaths
             }
         }
 
-        string localAppDataDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string dataDirectory = string.IsNullOrWhiteSpace(localAppDataDirectory)
+        string dataDirectory = string.IsNullOrWhiteSpace(documentsDirectory)
             ? Path.Combine(AppContext.BaseDirectory, "data")
-            : Path.Combine(localAppDataDirectory, "VALOWATCH");
+            : Path.Combine(documentsDirectory, "VALOWATCH", "data");
 
         return new AppPaths(dataDirectory);
     }
