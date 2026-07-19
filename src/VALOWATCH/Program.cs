@@ -863,15 +863,21 @@ static class Program
             bool pageHasVideoControls = pageHtml.Contains(" controls", StringComparison.OrdinalIgnoreCase);
             string maximumLatencySecondsText = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds
                 .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            string latencyCheckIntervalMillisecondsText = ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
             bool pageHasLowLatencyController =
                 pageHtml.Contains("keepFmp4LatencyLow", StringComparison.OrdinalIgnoreCase) &&
-                pageHtml.Contains($"maximumLatencySeconds = {maximumLatencySecondsText}", StringComparison.OrdinalIgnoreCase);
+                pageHtml.Contains($"maximumLatencySeconds = {maximumLatencySecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"latencyCheckMilliseconds = {latencyCheckIntervalMillisecondsText}", StringComparison.OrdinalIgnoreCase);
+            bool fmp4LatencyLimitStaysUnderThreeSeconds = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds < 3D &&
+                ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds <= 100;
             bool fmp4FragmentDurationConfigured = serverMessages.Any(message =>
                 message.Contains($"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}", StringComparison.OrdinalIgnoreCase));
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
                 !pageHasVideoControls &&
                 pageHasLowLatencyController &&
+                fmp4LatencyLimitStaysUnderThreeSeconds &&
                 fmp4FragmentDurationConfigured &&
                 contentTypeLooksLikeMp4 &&
                 streamLooksLikeFragmentedMp4 &&
@@ -886,6 +892,8 @@ static class Program
                 $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. VideoControls: {pageHasVideoControls}. " +
                 $"LowLatencyController: {pageHasLowLatencyController}. " +
                 $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
+                $"LatencyCheckMs: {latencyCheckIntervalMillisecondsText}. " +
+                $"UnderThreeSecondGuard: {fmp4LatencyLimitStaysUnderThreeSeconds}. " +
                 $"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
