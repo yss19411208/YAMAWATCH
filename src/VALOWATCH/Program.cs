@@ -865,20 +865,31 @@ static class Program
                 .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
             string latencyCheckIntervalMillisecondsText = ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string seekCooldownMillisecondsText = ScreenStreamingServer.H264Fmp4SeekCooldownMilliseconds
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string reconnectStallMillisecondsText = ScreenStreamingServer.H264Fmp4ReconnectStallMilliseconds
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
             bool pageHasLowLatencyController =
                 pageHtml.Contains("keepFmp4LatencyLow", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains($"maximumLatencySeconds = {maximumLatencySecondsText}", StringComparison.OrdinalIgnoreCase) &&
-                pageHtml.Contains($"latencyCheckMilliseconds = {latencyCheckIntervalMillisecondsText}", StringComparison.OrdinalIgnoreCase);
+                pageHtml.Contains($"latencyCheckMilliseconds = {latencyCheckIntervalMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"seekCooldownMilliseconds = {seekCooldownMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"reconnectStallMilliseconds = {reconnectStallMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("reconnectFmp4Stream", StringComparison.OrdinalIgnoreCase);
             bool fmp4LatencyLimitStaysUnderThreeSeconds = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds < 3D &&
-                ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds <= 100;
+                ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds <= 100 &&
+                ScreenStreamingServer.H264Fmp4ReconnectStallMilliseconds <= 2000;
             bool fmp4FragmentDurationConfigured = serverMessages.Any(message =>
                 message.Contains($"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}", StringComparison.OrdinalIgnoreCase));
+            bool fmp4KeyframeIntervalConfigured = serverMessages.Any(message =>
+                message.Contains("GopFrames:", StringComparison.OrdinalIgnoreCase));
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
                 !pageHasVideoControls &&
                 pageHasLowLatencyController &&
                 fmp4LatencyLimitStaysUnderThreeSeconds &&
                 fmp4FragmentDurationConfigured &&
+                fmp4KeyframeIntervalConfigured &&
                 contentTypeLooksLikeMp4 &&
                 streamLooksLikeFragmentedMp4 &&
                 options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
@@ -893,8 +904,11 @@ static class Program
                 $"LowLatencyController: {pageHasLowLatencyController}. " +
                 $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
                 $"LatencyCheckMs: {latencyCheckIntervalMillisecondsText}. " +
+                $"SeekCooldownMs: {seekCooldownMillisecondsText}. " +
+                $"ReconnectStallMs: {reconnectStallMillisecondsText}. " +
                 $"UnderThreeSecondGuard: {fmp4LatencyLimitStaysUnderThreeSeconds}. " +
                 $"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}. " +
+                $"KeyframeIntervalConfigured: {fmp4KeyframeIntervalConfigured}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }

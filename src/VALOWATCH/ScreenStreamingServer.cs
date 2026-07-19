@@ -17,12 +17,15 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MinimumMaxWidth = 320;
     public const int DefaultMaxWidth = 960;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 1.25D;
-    public const double H264Fmp4CatchUpLatencySeconds = 1.6D;
-    public const double H264Fmp4MaximumLatencySeconds = 2.35D;
+    public const double H264Fmp4TargetLatencySeconds = 0.8D;
+    public const double H264Fmp4CatchUpLatencySeconds = 1.0D;
+    public const double H264Fmp4MaximumLatencySeconds = 2.65D;
     public const int H264Fmp4LatencyCheckIntervalMilliseconds = 100;
+    public const int H264Fmp4SeekCooldownMilliseconds = 1400;
+    public const int H264Fmp4ReconnectStallMilliseconds = 1800;
     public const int H264Fmp4FragmentDurationMicroseconds = 200000;
     public const int H264Fmp4MinimumFragmentDurationMicroseconds = 100000;
+    public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
 
     private readonly TcpListener listener;
@@ -376,6 +379,8 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string catchUpLatencySecondsText = H264Fmp4CatchUpLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string maximumLatencySecondsText = H264Fmp4MaximumLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string latencyCheckIntervalMillisecondsText = H264Fmp4LatencyCheckIntervalMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string seekCooldownMillisecondsText = H264Fmp4SeekCooldownMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string reconnectStallMillisecondsText = H264Fmp4ReconnectStallMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string mediaScript = Options.Method switch
         {
             ScreenStreamMethod.H264Hls => $$"""
@@ -397,14 +402,30 @@ if (window.Hls && Hls.isSupported()) {
             ScreenStreamMethod.H264Fmp4 => $$"""
 <script>
 const screenVideo = document.getElementById('screen');
+const streamPath = '{{streamPathJavaScript}}';
 const targetLatencySeconds = {{targetLatencySecondsText}};
 const catchUpLatencySeconds = {{catchUpLatencySecondsText}};
 const maximumLatencySeconds = {{maximumLatencySecondsText}};
 const latencyCheckMilliseconds = {{latencyCheckIntervalMillisecondsText}};
+const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
+const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
+let lastSeekAtMilliseconds = -seekCooldownMilliseconds;
+let lastPlayAttemptAtMilliseconds = 0;
+let lastReconnectAtMilliseconds = 0;
+let lastPlaybackTime = 0;
+let lastPlaybackMovedAtMilliseconds = performance.now();
+let reconnectNonce = 0;
+let frameMonitorScheduled = false;
 screenVideo.preload = 'auto';
 screenVideo.controls = false;
 screenVideo.muted = true;
 screenVideo.defaultPlaybackRate = 1;
+function markFmp4PlaybackMovement(nowMilliseconds) {
+  if (Math.abs(screenVideo.currentTime - lastPlaybackTime) > 0.015) {
+    lastPlaybackMovedAtMilliseconds = nowMilliseconds;
+    lastPlaybackTime = screenVideo.currentTime;
+  }
+}
 function readFmp4LatencySeconds() {
   if (!screenVideo.buffered || screenVideo.buffered.length === 0) {
     return null;
@@ -418,49 +439,141 @@ function readFmp4LatencySeconds() {
 
   return { bufferedEnd, latencySeconds };
 }
+function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds) {
+  if (nowMilliseconds - lastSeekAtMilliseconds < seekCooldownMilliseconds) {
+    return false;
+  }
+
+  const correctedTime = Math.max(0, bufferedEnd - targetLatencySeconds);
+  try {
+    if (typeof screenVideo.fastSeek === 'function') {
+      screenVideo.fastSeek(correctedTime);
+    } else {
+      screenVideo.currentTime = correctedTime;
+    }
+
+    lastSeekAtMilliseconds = nowMilliseconds;
+    lastPlaybackMovedAtMilliseconds = nowMilliseconds;
+    lastPlaybackTime = correctedTime;
+    return true;
+  } catch {
+    return false;
+  }
+}
+function reconnectFmp4Stream() {
+  const nowMilliseconds = performance.now();
+  if (nowMilliseconds - lastReconnectAtMilliseconds < Math.max(3000, reconnectStallMilliseconds)) {
+    return;
+  }
+
+  lastReconnectAtMilliseconds = nowMilliseconds;
+  lastPlaybackMovedAtMilliseconds = nowMilliseconds;
+  reconnectNonce += 1;
+  screenVideo.playbackRate = 1;
+  try {
+    screenVideo.pause();
+    screenVideo.removeAttribute('src');
+    screenVideo.load();
+  } catch {
+  }
+
+  screenVideo.src = streamPath + '?r=' + reconnectNonce + '&t=' + Date.now();
+  try {
+    screenVideo.load();
+  } catch {
+  }
+
+  keepFmp4Playing(true);
+}
 function keepFmp4LatencyLow() {
+  const nowMilliseconds = performance.now();
+  markFmp4PlaybackMovement(nowMilliseconds);
   const latencyState = readFmp4LatencySeconds();
   if (!latencyState) {
+    if (!screenVideo.paused && nowMilliseconds - lastPlaybackMovedAtMilliseconds > reconnectStallMilliseconds) {
+      reconnectFmp4Stream();
+    }
+
     return;
   }
 
   const { bufferedEnd, latencySeconds } = latencyState;
   if (latencySeconds > maximumLatencySeconds) {
-    try {
-      const correctedTime = Math.max(0, bufferedEnd - targetLatencySeconds);
-      if (Math.abs(screenVideo.currentTime - correctedTime) > 0.03) {
-        screenVideo.currentTime = correctedTime;
-      }
-    } catch {
-    }
-
-    screenVideo.playbackRate = 1;
+    const seeked = seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds);
+    screenVideo.playbackRate = seeked ? 1 : 1.35;
     return;
   }
 
-  screenVideo.playbackRate = latencySeconds > catchUpLatencySeconds ? 1.1 : 1;
+  if (!screenVideo.paused &&
+      screenVideo.readyState < 3 &&
+      nowMilliseconds - lastPlaybackMovedAtMilliseconds > reconnectStallMilliseconds) {
+    reconnectFmp4Stream();
+    return;
+  }
+
+  if (latencySeconds > catchUpLatencySeconds + 0.9) {
+    screenVideo.playbackRate = 1.25;
+  } else if (latencySeconds > catchUpLatencySeconds + 0.35) {
+    screenVideo.playbackRate = 1.15;
+  } else if (latencySeconds > catchUpLatencySeconds) {
+    screenVideo.playbackRate = 1.06;
+  } else {
+    screenVideo.playbackRate = 1;
+  }
 }
-async function keepFmp4Playing() {
+async function keepFmp4Playing(forcePlay = false) {
+  const nowMilliseconds = performance.now();
+  if (!forcePlay && !screenVideo.paused && !screenVideo.ended) {
+    return;
+  }
+
+  if (!forcePlay && nowMilliseconds - lastPlayAttemptAtMilliseconds < 1000) {
+    return;
+  }
+
+  lastPlayAttemptAtMilliseconds = nowMilliseconds;
   try {
     await screenVideo.play();
   } catch {
   }
 }
-screenVideo.addEventListener('loadedmetadata', keepFmp4Playing);
+function scheduleFmp4FrameMonitor() {
+  if (frameMonitorScheduled || typeof screenVideo.requestVideoFrameCallback !== 'function') {
+    return;
+  }
+
+  frameMonitorScheduled = true;
+  screenVideo.requestVideoFrameCallback(() => {
+    frameMonitorScheduled = false;
+    const nowMilliseconds = performance.now();
+    lastPlaybackMovedAtMilliseconds = nowMilliseconds;
+    lastPlaybackTime = screenVideo.currentTime;
+    keepFmp4LatencyLow();
+    scheduleFmp4FrameMonitor();
+  });
+}
+screenVideo.addEventListener('loadedmetadata', () => keepFmp4Playing(true));
 screenVideo.addEventListener('loadeddata', keepFmp4LatencyLow);
 screenVideo.addEventListener('canplay', keepFmp4Playing);
-screenVideo.addEventListener('playing', keepFmp4LatencyLow);
+screenVideo.addEventListener('playing', () => {
+  lastPlaybackMovedAtMilliseconds = performance.now();
+  scheduleFmp4FrameMonitor();
+  keepFmp4LatencyLow();
+});
 screenVideo.addEventListener('progress', keepFmp4LatencyLow);
 screenVideo.addEventListener('timeupdate', keepFmp4LatencyLow);
-screenVideo.addEventListener('waiting', keepFmp4LatencyLow);
-screenVideo.addEventListener('stalled', keepFmp4LatencyLow);
+screenVideo.addEventListener('waiting', () => window.setTimeout(keepFmp4LatencyLow, 250));
+screenVideo.addEventListener('stalled', reconnectFmp4Stream);
 screenVideo.addEventListener('seeked', keepFmp4LatencyLow);
+screenVideo.addEventListener('ended', reconnectFmp4Stream);
 window.setInterval(() => {
   keepFmp4LatencyLow();
-  keepFmp4Playing();
+  if (screenVideo.paused || screenVideo.ended) {
+    keepFmp4Playing();
+  }
 }, latencyCheckMilliseconds);
 screenVideo.onerror = () => {
-  document.getElementById('status').textContent += ' / video stream reconnect may be needed';
+  reconnectFmp4Stream();
 };
 </script>
 """,
@@ -851,11 +964,14 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
             $"CRF: {ToH264Crf(JpegQuality)}. " +
+            $"GopFrames: {GetH264GroupOfPicturesSize()}. " +
             $"FragmentDurationUs: {H264Fmp4FragmentDurationMicroseconds}. " +
             $"TargetLatencySeconds: {H264Fmp4TargetLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
             $"CatchUpLatencySeconds: {H264Fmp4CatchUpLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
             $"MaxLatencySeconds: {H264Fmp4MaximumLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
-            $"LatencyCheckMs: {H264Fmp4LatencyCheckIntervalMilliseconds}.",
+            $"LatencyCheckMs: {H264Fmp4LatencyCheckIntervalMilliseconds}. " +
+            $"SeekCooldownMs: {H264Fmp4SeekCooldownMilliseconds}. " +
+            $"ReconnectStallMs: {H264Fmp4ReconnectStallMilliseconds}.",
             null);
         return process;
     }
@@ -991,9 +1107,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("-c:v");
         startInfo.ArgumentList.Add("libx264");
         startInfo.ArgumentList.Add("-preset");
-        startInfo.ArgumentList.Add("veryfast");
+        startInfo.ArgumentList.Add("superfast");
         startInfo.ArgumentList.Add("-tune");
         startInfo.ArgumentList.Add("zerolatency");
+        startInfo.ArgumentList.Add("-x264-params");
+        startInfo.ArgumentList.Add("rc-lookahead=0:sync-lookahead=0:sliced-threads=1");
         startInfo.ArgumentList.Add("-pix_fmt");
         startInfo.ArgumentList.Add("yuv420p");
         startInfo.ArgumentList.Add("-r");
@@ -1055,7 +1173,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
     private int GetH264GroupOfPicturesSize()
     {
-        return Math.Clamp(FramesPerSecond * 2, 30, 240);
+        int calculatedKeyframeIntervalFrames = (int)Math.Round(FramesPerSecond * H264KeyframeIntervalSeconds);
+        return Math.Clamp(calculatedKeyframeIntervalFrames, 1, 120);
     }
 
     private static async Task<bool> WaitForFileReadyAsync(string filePath, CancellationToken cancellationToken)
