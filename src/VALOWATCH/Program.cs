@@ -861,9 +861,18 @@ static class Program
                 ContainsAsciiToken(streamBytes, "ftyp") &&
                 (ContainsAsciiToken(streamBytes, "moov") || ContainsAsciiToken(streamBytes, "moof") || ContainsAsciiToken(streamBytes, "mdat"));
             bool pageHasVideoControls = pageHtml.Contains(" controls", StringComparison.OrdinalIgnoreCase);
+            string maximumLatencySecondsText = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds
+                .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            bool pageHasLowLatencyController =
+                pageHtml.Contains("keepFmp4LatencyLow", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"maximumLatencySeconds = {maximumLatencySecondsText}", StringComparison.OrdinalIgnoreCase);
+            bool fmp4FragmentDurationConfigured = serverMessages.Any(message =>
+                message.Contains($"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}", StringComparison.OrdinalIgnoreCase));
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
                 !pageHasVideoControls &&
+                pageHasLowLatencyController &&
+                fmp4FragmentDurationConfigured &&
                 contentTypeLooksLikeMp4 &&
                 streamLooksLikeFragmentedMp4 &&
                 options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
@@ -875,6 +884,9 @@ static class Program
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"Mp4ContentType: {contentTypeLooksLikeMp4}. ReadBytes: {streamBytes.Length}. " +
                 $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. VideoControls: {pageHasVideoControls}. " +
+                $"LowLatencyController: {pageHasLowLatencyController}. " +
+                $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
+                $"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
