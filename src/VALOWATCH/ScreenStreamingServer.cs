@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace VALOWATCH;
@@ -18,18 +19,18 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MinimumMaxWidth = 320;
     public const int DefaultMaxWidth = 1920;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 0.75D;
-    public const double H264Fmp4CatchUpLatencySeconds = 0.95D;
-    public const double H264Fmp4MaximumLatencySeconds = 1.8D;
-    public const int H264Fmp4LatencyCheckIntervalMilliseconds = 100;
-    public const int H264Fmp4SeekCooldownMilliseconds = 850;
-    public const int H264Fmp4ReconnectStallMilliseconds = 1200;
-    public const int H264Fmp4FragmentDurationMicroseconds = 200000;
-    public const int H264Fmp4MinimumFragmentDurationMicroseconds = 100000;
-    public const int H264Fmp4InitialFragmentCount = 2;
-    public const int H264Fmp4RetainedFragmentCount = 18;
-    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 1200;
-    public const double H264KeyframeIntervalSeconds = 0.5D;
+    public const double H264Fmp4TargetLatencySeconds = 0.45D;
+    public const double H264Fmp4CatchUpLatencySeconds = 0.65D;
+    public const double H264Fmp4MaximumLatencySeconds = 1.25D;
+    public const int H264Fmp4LatencyCheckIntervalMilliseconds = 80;
+    public const int H264Fmp4SeekCooldownMilliseconds = 450;
+    public const int H264Fmp4ReconnectStallMilliseconds = 900;
+    public const int H264Fmp4FragmentDurationMicroseconds = 120000;
+    public const int H264Fmp4MinimumFragmentDurationMicroseconds = 80000;
+    public const int H264Fmp4InitialFragmentCount = 1;
+    public const int H264Fmp4RetainedFragmentCount = 24;
+    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 800;
+    public const double H264KeyframeIntervalSeconds = 0.25D;
     private const string MjpegBoundary = "valowatchframe";
     public const int MjpegFfmpegThresholdFramesPerSecond = 60;
     private const int FrameCaptureRetryCount = 3;
@@ -225,10 +226,10 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         await using NetworkStream networkStream = client.GetStream();
         using (client)
         {
-            string requestPath;
+            HttpRequestInfo request;
             try
             {
-                requestPath = await ReadRequestPathAsync(networkStream, cancellationToken).ConfigureAwait(false);
+                request = await ReadHttpRequestAsync(networkStream, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception exception) when (exception is IOException or InvalidDataException)
             {
@@ -236,6 +237,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
                 return;
             }
 
+            string requestPath = request.Path;
             if (IsWatchPagePath(requestPath))
             {
                 await WriteHtmlResponseAsync(networkStream, cancellationToken).ConfigureAwait(false);
@@ -272,6 +274,12 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
                 return;
             }
 
+            if (IsFmp4WebSocketPath(requestPath))
+            {
+                await WriteFmp4WebSocketStreamResponseAsync(networkStream, request.Headers, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             if (IsHlsPlaylistPath(requestPath))
             {
                 await WriteHlsFileResponseAsync(
@@ -303,7 +311,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         }
     }
 
-    private static async Task<string> ReadRequestPathAsync(
+    private static async Task<HttpRequestInfo> ReadHttpRequestAsync(
         NetworkStream networkStream,
         CancellationToken cancellationToken)
     {
@@ -320,12 +328,26 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             throw new InvalidDataException("HTTP request line was empty.");
         }
 
+        Dictionary<string, string> headers = new(StringComparer.OrdinalIgnoreCase);
         while (true)
         {
             string? headerLine = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
             if (headerLine is null || headerLine.Length == 0)
             {
                 break;
+            }
+
+            int separatorIndex = headerLine.IndexOf(':', StringComparison.Ordinal);
+            if (separatorIndex <= 0)
+            {
+                continue;
+            }
+
+            string headerName = headerLine[..separatorIndex].Trim();
+            string headerValue = headerLine[(separatorIndex + 1)..].Trim();
+            if (headerName.Length > 0)
+            {
+                headers[headerName] = headerValue;
             }
         }
 
@@ -337,7 +359,8 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
         string pathAndQuery = requestParts[1];
         int queryIndex = pathAndQuery.IndexOf('?', StringComparison.Ordinal);
-        return queryIndex >= 0 ? pathAndQuery[..queryIndex] : pathAndQuery;
+        string path = queryIndex >= 0 ? pathAndQuery[..queryIndex] : pathAndQuery;
+        return new HttpRequestInfo(path, headers);
     }
 
     private bool IsWatchPagePath(string requestPath)
@@ -364,6 +387,11 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private bool IsFmp4InitPath(string requestPath)
     {
         return string.Equals(requestPath, $"/{PublicPath}/live/init.mp4", StringComparison.Ordinal);
+    }
+
+    private bool IsFmp4WebSocketPath(string requestPath)
+    {
+        return string.Equals(requestPath, $"/{PublicPath}/live/ws", StringComparison.Ordinal);
     }
 
     private bool TryGetFmp4FragmentRequest(string requestPath, out long requestedFragmentSequence)
@@ -433,8 +461,10 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string streamPathJavaScript = streamPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
         string liveInitPath = $"/{PublicPath}/live/init.mp4";
         string liveFragmentPathPrefix = $"/{PublicPath}/live/fragment/";
+        string liveWebSocketPath = $"/{PublicPath}/live/ws";
         string liveInitPathJavaScript = liveInitPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
         string liveFragmentPathPrefixJavaScript = liveFragmentPathPrefix.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
+        string liveWebSocketPathJavaScript = liveWebSocketPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
         string h264MimeTypeJavaScript = $"video/mp4; codecs=\"{GetH264MimeCodec()}\"";
         string mediaElement = Options.Method == ScreenStreamMethod.Mjpeg
             ? $"<img id=\"screen\" src=\"{streamPathHtml}\" alt=\"VALOWATCH stream\">"
@@ -471,6 +501,7 @@ const screenVideo = document.getElementById('screen');
 const streamPath = '{{streamPathJavaScript}}';
 const liveInitPath = '{{liveInitPathJavaScript}}';
 const liveFragmentPathPrefix = '{{liveFragmentPathPrefixJavaScript}}';
+const liveWebSocketPath = '{{liveWebSocketPathJavaScript}}';
 const fmp4MimeType = '{{h264MimeTypeJavaScript}}';
 const targetLatencySeconds = {{targetLatencySecondsText}};
 const catchUpLatencySeconds = {{catchUpLatencySecondsText}};
@@ -494,6 +525,7 @@ let appendQueue = [];
 let nextFragmentSequence = 0;
 let activeStreamSession = 0;
 let activeFetchAbortController = null;
+let activeFmp4WebSocket = null;
 let directFallbackActive = false;
 screenVideo.preload = 'auto';
 screenVideo.controls = false;
@@ -522,6 +554,7 @@ function suspendFmp4ForHiddenPage() {
     } catch {
     }
   }
+  closeFmp4WebSocket();
 
   try {
     screenVideo.pause();
@@ -616,6 +649,7 @@ function reconnectFmp4Stream(forceReconnect = false) {
     } catch {
     }
   }
+  closeFmp4WebSocket();
 
   if (directFallbackActive) {
     screenVideo.src = streamPath + '?r=' + reconnectNonce + '&t=' + Date.now();
@@ -653,6 +687,7 @@ function releaseCurrentMediaSource() {
   mediaSource = null;
   sourceBuffer = null;
   sourceObjectUrl = '';
+  closeFmp4WebSocket();
   screenVideo.removeAttribute('src');
   try {
     screenVideo.load();
@@ -730,14 +765,45 @@ async function keepFmp4Playing(forcePlay = false) {
   } catch {
   }
 }
+function closeFmp4WebSocket() {
+  const socket = activeFmp4WebSocket;
+  activeFmp4WebSocket = null;
+  if (!socket) {
+    return;
+  }
+
+  try {
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    socket.close();
+  } catch {
+  }
+}
+function buildFmp4WebSocketUrl() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return protocol + '//' + location.host + liveWebSocketPath + '?t=' + Date.now();
+}
+function normalizeFmp4MessageBytes(messageData) {
+  if (messageData instanceof ArrayBuffer) {
+    return Promise.resolve(messageData);
+  }
+
+  if (messageData instanceof Blob) {
+    return messageData.arrayBuffer();
+  }
+
+  return Promise.resolve(null);
+}
 function queueFmp4Bytes(bytes) {
   if (!bytes || bytes.byteLength === 0) {
     return;
   }
 
   appendQueue.push(bytes);
-  if (appendQueue.length > 8) {
-    appendQueue.splice(0, appendQueue.length - 3);
+  if (appendQueue.length > 6) {
+    appendQueue.splice(1, appendQueue.length - 4);
   }
 
   pumpFmp4AppendQueue();
@@ -849,6 +915,79 @@ async function runFmp4FragmentLoop(session, abortSignal) {
     keepFmp4LatencyLow();
   }
 }
+async function startFetchFmp4Live(session) {
+  activeFetchAbortController = new AbortController();
+  try {
+    const initResult = await fetchFmp4ArrayBuffer(liveInitPath + '?t=' + Date.now(), activeFetchAbortController.signal);
+    if (session !== activeStreamSession || activeFetchAbortController.signal.aborted) {
+      return;
+    }
+
+    queueFmp4Bytes(initResult.bytes);
+    keepFmp4Playing(true);
+    await runFmp4FragmentLoop(session, activeFetchAbortController.signal);
+  } catch {
+    if (session === activeStreamSession && !isFmp4PageHidden()) {
+      window.setTimeout(() => reconnectFmp4Stream(true), 450);
+    }
+  }
+}
+function startWebSocketFmp4Live(session) {
+  if (!window.WebSocket) {
+    startFetchFmp4Live(session);
+    return;
+  }
+
+  let receivedMessages = 0;
+  let fallbackStarted = false;
+  closeFmp4WebSocket();
+  const socket = new WebSocket(buildFmp4WebSocketUrl());
+  activeFmp4WebSocket = socket;
+  socket.binaryType = 'arraybuffer';
+  socket.onmessage = async event => {
+    if (session !== activeStreamSession || isFmp4PageHidden()) {
+      try {
+        socket.close();
+      } catch {
+      }
+      return;
+    }
+
+    const bytes = await normalizeFmp4MessageBytes(event.data);
+    if (session !== activeStreamSession || isFmp4PageHidden()) {
+      return;
+    }
+
+    if (!bytes) {
+      return;
+    }
+
+    receivedMessages += 1;
+    lastFragmentReceivedAtMilliseconds = performance.now();
+    queueFmp4Bytes(bytes);
+    keepFmp4Playing(true);
+    keepFmp4LatencyLow();
+  };
+  socket.onerror = () => {
+  };
+  socket.onclose = () => {
+    if (activeFmp4WebSocket === socket) {
+      activeFmp4WebSocket = null;
+    }
+
+    if (session !== activeStreamSession || isFmp4PageHidden()) {
+      return;
+    }
+
+    if (receivedMessages === 0 && !fallbackStarted) {
+      fallbackStarted = true;
+      startFetchFmp4Live(session);
+      return;
+    }
+
+    window.setTimeout(() => reconnectFmp4Stream(true), 350);
+  };
+}
 async function startMseFmp4Live() {
   if (isFmp4PageHidden()) {
     return;
@@ -864,7 +1003,7 @@ async function startMseFmp4Live() {
   releaseCurrentMediaSource();
   appendQueue = [];
   nextFragmentSequence = 0;
-  activeFetchAbortController = new AbortController();
+  activeFetchAbortController = null;
   mediaSource = new MediaSource();
   sourceObjectUrl = URL.createObjectURL(mediaSource);
   screenVideo.src = sourceObjectUrl;
@@ -891,14 +1030,7 @@ async function startMseFmp4Live() {
       keepFmp4LatencyLow();
     });
     sourceBuffer.addEventListener('error', () => reconnectFmp4Stream(true));
-    const initResult = await fetchFmp4ArrayBuffer(liveInitPath + '?t=' + Date.now(), activeFetchAbortController.signal);
-    if (session !== activeStreamSession || activeFetchAbortController.signal.aborted) {
-      return;
-    }
-
-    queueFmp4Bytes(initResult.bytes);
-    keepFmp4Playing(true);
-    await runFmp4FragmentLoop(session, activeFetchAbortController.signal);
+    startWebSocketFmp4Live(session);
   } catch {
     if (session === activeStreamSession && !isFmp4PageHidden()) {
       window.setTimeout(() => reconnectFmp4Stream(true), 500);
@@ -1322,6 +1454,120 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 reasonPhrase: "Service Unavailable",
                 "fMP4 live fragment is unavailable.",
                 cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task WriteFmp4WebSocketStreamResponseAsync(
+        NetworkStream networkStream,
+        IReadOnlyDictionary<string, string> requestHeaders,
+        CancellationToken cancellationToken)
+    {
+        if (Options.Method != ScreenStreamMethod.H264Fmp4)
+        {
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 404,
+                reasonPhrase: "Not Found",
+                "fMP4 stream is not enabled for this session.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!TryBuildWebSocketAcceptKey(requestHeaders, out string acceptKey))
+        {
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 400,
+                reasonPhrase: "Bad Request",
+                "WebSocket upgrade headers are missing.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        long copiedBytes = 0;
+        int copiedMessages = 0;
+        DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
+        bool responseHeaderSent = false;
+        try
+        {
+            Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
+            Fmp4LiveSnapshot snapshot;
+            try
+            {
+                snapshot = await source
+                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or TimeoutException)
+            {
+                log("fMP4 WebSocket encoder did not produce an initial fragment; restarting it once.", exception);
+                ClearFmp4LiveFragmentSource(source);
+                source = GetOrStartFmp4LiveFragmentSource();
+                snapshot = await source
+                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            await WriteWebSocketSwitchingProtocolsResponseAsync(networkStream, acceptKey, cancellationToken).ConfigureAwait(false);
+            responseHeaderSent = true;
+            await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, snapshot.InitSegment, cancellationToken).ConfigureAwait(false);
+            copiedBytes += snapshot.InitSegment.Length;
+            copiedMessages++;
+
+            long nextFragmentSequence = snapshot.NextSequence;
+            foreach (Fmp4Fragment fragment in snapshot.Fragments)
+            {
+                await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
+                copiedBytes += fragment.Bytes.Length;
+                copiedMessages++;
+                nextFragmentSequence = Math.Max(nextFragmentSequence, fragment.Sequence + 1L);
+            }
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                Fmp4Fragment fragment = await source
+                    .WaitForFragmentAsync(nextFragmentSequence, TimeSpan.FromSeconds(3), cancellationToken)
+                    .ConfigureAwait(false);
+                await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
+                copiedBytes += fragment.Bytes.Length;
+                copiedMessages++;
+                nextFragmentSequence = fragment.Sequence + 1L;
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
+        {
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            log("fMP4 WebSocket screen stream connection stopped.", exception);
+            if (!responseHeaderSent)
+            {
+                try
+                {
+                    await WritePlainTextResponseAsync(
+                        networkStream,
+                        statusCode: 503,
+                        reasonPhrase: "Service Unavailable",
+                        "fMP4 WebSocket stream is unavailable.",
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception responseException) when (responseException is IOException or ObjectDisposedException or InvalidOperationException)
+                {
+                }
+            }
+        }
+        finally
+        {
+            double elapsedSeconds = Math.Max(0.001D, (DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds);
+            log(
+                "fMP4 WebSocket screen stream connection closed. " +
+                $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. " +
+                $"ConfiguredFPS: {FramesPerSecond}. MaxWidth: {MaxWidth}. CopiedBytes: {copiedBytes}. CopiedMessages: {copiedMessages}. " +
+                $"AverageBytesPerSecond: {(copiedBytes / elapsedSeconds).ToString("0", System.Globalization.CultureInfo.InvariantCulture)}.",
+                null);
         }
     }
 
@@ -2121,6 +2367,95 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             .ConfigureAwait(false);
     }
 
+    private static bool TryBuildWebSocketAcceptKey(
+        IReadOnlyDictionary<string, string> requestHeaders,
+        out string acceptKey)
+    {
+        acceptKey = string.Empty;
+        if (!requestHeaders.TryGetValue("Sec-WebSocket-Key", out string? clientKey) ||
+            string.IsNullOrWhiteSpace(clientKey))
+        {
+            return false;
+        }
+
+        string trimmedClientKey = clientKey.Trim();
+        byte[] acceptHash = SHA1.HashData(Encoding.ASCII.GetBytes(trimmedClientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"));
+        acceptKey = Convert.ToBase64String(acceptHash);
+        return true;
+    }
+
+    private static async Task WriteWebSocketSwitchingProtocolsResponseAsync(
+        NetworkStream networkStream,
+        string acceptKey,
+        CancellationToken cancellationToken)
+    {
+        string header =
+            "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            $"Sec-WebSocket-Accept: {acceptKey}\r\n" +
+            "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
+            "Pragma: no-cache\r\n" +
+            "X-Accel-Buffering: no\r\n" +
+            "X-Robots-Tag: noindex, nofollow\r\n" +
+            "\r\n";
+        await networkStream
+            .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
+            .ConfigureAwait(false);
+        await networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task WriteWebSocketBinaryMessageWithTimeoutAsync(
+        NetworkStream networkStream,
+        ReadOnlyMemory<byte> payload,
+        CancellationToken cancellationToken)
+    {
+        byte[] header = CreateWebSocketBinaryFrameHeader(payload.Length);
+        TimeSpan timeout = TimeSpan.FromMilliseconds(H264Fmp4NetworkWriteTimeoutMilliseconds);
+        await networkStream
+            .WriteAsync(header, cancellationToken)
+            .AsTask()
+            .WaitAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
+        await networkStream
+            .WriteAsync(payload, cancellationToken)
+            .AsTask()
+            .WaitAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
+        await networkStream
+            .FlushAsync(cancellationToken)
+            .WaitAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static byte[] CreateWebSocketBinaryFrameHeader(int payloadLength)
+    {
+        if (payloadLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(payloadLength), "WebSocket payload length cannot be negative.");
+        }
+
+        if (payloadLength < 126)
+        {
+            return [(byte)0x82, (byte)payloadLength];
+        }
+
+        if (payloadLength <= ushort.MaxValue)
+        {
+            byte[] header = new byte[4];
+            header[0] = 0x82;
+            header[1] = 126;
+            BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(2), (ushort)payloadLength);
+            return header;
+        }
+
+        byte[] largeHeader = new byte[10];
+        largeHeader[0] = 0x82;
+        largeHeader[1] = 127;
+        BinaryPrimitives.WriteUInt64BigEndian(largeHeader.AsSpan(2), (ulong)payloadLength);
+        return largeHeader;
+    }
+
     private static async Task WriteNetworkBytesWithTimeoutAsync(
         NetworkStream networkStream,
         ReadOnlyMemory<byte> bytes,
@@ -2659,6 +2994,19 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             process.Dispose();
         }
     }
+}
+
+internal sealed class HttpRequestInfo
+{
+    public HttpRequestInfo(string path, IReadOnlyDictionary<string, string> headers)
+    {
+        Path = path;
+        Headers = headers;
+    }
+
+    public string Path { get; }
+
+    public IReadOnlyDictionary<string, string> Headers { get; }
 }
 
 internal readonly record struct ScreenStreamOptions(

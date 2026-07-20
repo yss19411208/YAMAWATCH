@@ -1,8 +1,11 @@
+using System.Buffers.Binary;
 using Discord;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Diagnostics;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace VALOWATCH;
@@ -856,6 +859,7 @@ static class Program
             string streamUrl = $"{pageUrl}/stream.mp4";
             string liveInitUrl = $"{pageUrl}/live/init.mp4";
             string liveFragmentUrl = $"{pageUrl}/live/fragment/0.m4s";
+            string liveWebSocketPath = $"/{server.PublicPath}/live/ws";
             string pageHtml = httpClient.GetStringAsync(pageUrl).GetAwaiter().GetResult();
             using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(18));
             using HttpResponseMessage response = httpClient
@@ -894,6 +898,10 @@ static class Program
                 .GetResult();
             nextLiveFragmentResponse.EnsureSuccessStatusCode();
             byte[] nextLiveFragmentBytes = nextLiveFragmentResponse.Content.ReadAsByteArrayAsync(readTimeout.Token).GetAwaiter().GetResult();
+            Fmp4WebSocketDiagnosticResult webSocketResult = ReadFmp4WebSocketDiagnosticFrames(
+                server.LocalOrigin,
+                liveWebSocketPath,
+                readTimeout.Token);
             bool contentTypeLooksLikeMp4 = response.Content.Headers.ContentType?.MediaType
                 ?.Equals("video/mp4", StringComparison.OrdinalIgnoreCase) == true;
             bool liveInitContentTypeLooksLikeMp4 = liveInitResponse.Content.Headers.ContentType?.MediaType
@@ -950,6 +958,9 @@ static class Program
                 pageHtml.Contains("MediaSource", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("live/init.mp4", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("live/fragment/", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("live/ws", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("WebSocket", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("startWebSocketFmp4Live", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("queueFmp4Bytes", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("X-VALOWATCH-Sequence", StringComparison.OrdinalIgnoreCase);
             bool fmp4LatencyLimitStaysUnderThreeSeconds = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds < 3D &&
@@ -978,6 +989,9 @@ static class Program
                 nextLiveFragmentContentTypeLooksLikeSegment &&
                 liveFragmentSequenceAdvances &&
                 nextLiveFragmentLooksLikeMediaSegment &&
+                webSocketResult.Accepted &&
+                webSocketResult.InitLooksLikeInitializationSegment &&
+                webSocketResult.FragmentLooksLikeMediaSegment &&
                 options.FramesPerSecond >= 60;
 
             AppendDiagnosticLogLine(
@@ -995,6 +1009,9 @@ static class Program
                 $"LiveFragmentSequence: {firstLiveFragmentSequence}. LiveFragmentSequenceHeader: {liveFragmentHasSequenceHeader}. " +
                 $"NextLiveFragmentBytes: {nextLiveFragmentBytes.Length}. NextLiveFragmentOk: {nextLiveFragmentLooksLikeMediaSegment}. " +
                 $"NextLiveFragmentSequence: {nextLiveFragmentSequence}. SequenceAdvances: {liveFragmentSequenceAdvances}. " +
+                $"WebSocketAccepted: {webSocketResult.Accepted}. " +
+                $"WebSocketInitBytes: {webSocketResult.InitBytes}. WebSocketInitOk: {webSocketResult.InitLooksLikeInitializationSegment}. " +
+                $"WebSocketFragmentBytes: {webSocketResult.FragmentBytes}. WebSocketFragmentOk: {webSocketResult.FragmentLooksLikeMediaSegment}. " +
                 $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
                 $"LatencyCheckMs: {latencyCheckIntervalMillisecondsText}. " +
                 $"SeekCooldownMs: {seekCooldownMillisecondsText}. " +
@@ -1177,6 +1194,176 @@ static class Program
         }
 
         return memoryStream.ToArray();
+    }
+
+    private static Fmp4WebSocketDiagnosticResult ReadFmp4WebSocketDiagnosticFrames(
+        string localOrigin,
+        string webSocketPath,
+        CancellationToken cancellationToken)
+    {
+        Uri originUri = new(localOrigin);
+        using TcpClient client = new()
+        {
+            NoDelay = true
+        };
+        client
+            .ConnectAsync(originUri.Host, originUri.Port, cancellationToken)
+            .AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(5), cancellationToken)
+            .GetAwaiter()
+            .GetResult();
+
+        using NetworkStream networkStream = client.GetStream();
+        string clientKey = Convert.ToBase64String(RandomNumberGenerator.GetBytes(16));
+        string expectedAcceptKey = Convert.ToBase64String(
+            SHA1.HashData(Encoding.ASCII.GetBytes(clientKey + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")));
+        string request =
+            $"GET {webSocketPath} HTTP/1.1\r\n" +
+            $"Host: {originUri.Host}:{originUri.Port.ToString(System.Globalization.CultureInfo.InvariantCulture)}\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            $"Sec-WebSocket-Key: {clientKey}\r\n" +
+            "Sec-WebSocket-Version: 13\r\n" +
+            "\r\n";
+        byte[] requestBytes = Encoding.ASCII.GetBytes(request);
+        networkStream
+            .WriteAsync(requestBytes, cancellationToken)
+            .AsTask()
+            .WaitAsync(TimeSpan.FromSeconds(5), cancellationToken)
+            .GetAwaiter()
+            .GetResult();
+        networkStream
+            .FlushAsync(cancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(5), cancellationToken)
+            .GetAwaiter()
+            .GetResult();
+
+        string responseHeader = ReadHttpHeaderBlock(networkStream, cancellationToken);
+        bool accepted =
+            responseHeader.Contains(" 101 ", StringComparison.OrdinalIgnoreCase) &&
+            responseHeader.Contains("Upgrade: websocket", StringComparison.OrdinalIgnoreCase) &&
+            responseHeader.Contains($"Sec-WebSocket-Accept: {expectedAcceptKey}", StringComparison.OrdinalIgnoreCase);
+        byte[] initMessage = accepted
+            ? ReadWebSocketBinaryPayload(networkStream, cancellationToken)
+            : [];
+        byte[] fragmentMessage = accepted
+            ? ReadWebSocketBinaryPayload(networkStream, cancellationToken)
+            : [];
+        bool initLooksLikeInitializationSegment =
+            ContainsAsciiToken(initMessage, "ftyp") &&
+            ContainsAsciiToken(initMessage, "moov");
+        bool fragmentLooksLikeMediaSegment =
+            ContainsAsciiToken(fragmentMessage, "moof") &&
+            ContainsAsciiToken(fragmentMessage, "mdat");
+        return new Fmp4WebSocketDiagnosticResult(
+            accepted,
+            initMessage.Length,
+            fragmentMessage.Length,
+            initLooksLikeInitializationSegment,
+            fragmentLooksLikeMediaSegment);
+    }
+
+    private static string ReadHttpHeaderBlock(Stream stream, CancellationToken cancellationToken)
+    {
+        using MemoryStream headerBytes = new();
+        byte[] oneByteBuffer = new byte[1];
+        while (headerBytes.Length < 64 * 1024)
+        {
+            int readByteCount = stream
+                .ReadAsync(oneByteBuffer.AsMemory(0, 1), cancellationToken)
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(8), cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+            if (readByteCount == 0)
+            {
+                break;
+            }
+
+            headerBytes.WriteByte(oneByteBuffer[0]);
+            if (EndsWithHttpHeaderTerminator(headerBytes))
+            {
+                return Encoding.ASCII.GetString(headerBytes.ToArray());
+            }
+        }
+
+        throw new InvalidDataException("WebSocket HTTP upgrade header was not completed.");
+    }
+
+    private static bool EndsWithHttpHeaderTerminator(MemoryStream headerBytes)
+    {
+        if (headerBytes.Length < 4)
+        {
+            return false;
+        }
+
+        byte[] bytes = headerBytes.GetBuffer();
+        int endIndex = (int)headerBytes.Length;
+        return bytes[endIndex - 4] == '\r' &&
+            bytes[endIndex - 3] == '\n' &&
+            bytes[endIndex - 2] == '\r' &&
+            bytes[endIndex - 1] == '\n';
+    }
+
+    private static byte[] ReadWebSocketBinaryPayload(Stream stream, CancellationToken cancellationToken)
+    {
+        byte[] firstTwoBytes = ReadExactBytes(stream, 2, cancellationToken);
+        int opcode = firstTwoBytes[0] & 0x0F;
+        bool masked = (firstTwoBytes[1] & 0x80) != 0;
+        ulong payloadLength = (ulong)(firstTwoBytes[1] & 0x7F);
+        if (payloadLength == 126UL)
+        {
+            payloadLength = BinaryPrimitives.ReadUInt16BigEndian(ReadExactBytes(stream, 2, cancellationToken));
+        }
+        else if (payloadLength == 127UL)
+        {
+            payloadLength = BinaryPrimitives.ReadUInt64BigEndian(ReadExactBytes(stream, 8, cancellationToken));
+        }
+
+        if (payloadLength > int.MaxValue)
+        {
+            throw new InvalidDataException($"WebSocket diagnostic payload is too large: {payloadLength}.");
+        }
+
+        byte[] maskKey = masked ? ReadExactBytes(stream, 4, cancellationToken) : [];
+        byte[] payload = ReadExactBytes(stream, (int)payloadLength, cancellationToken);
+        if (masked)
+        {
+            for (int byteIndex = 0; byteIndex < payload.Length; byteIndex++)
+            {
+                payload[byteIndex] = (byte)(payload[byteIndex] ^ maskKey[byteIndex % 4]);
+            }
+        }
+
+        if (opcode != 2)
+        {
+            throw new InvalidDataException($"Expected a binary WebSocket frame, but received opcode {opcode}.");
+        }
+
+        return payload;
+    }
+
+    private static byte[] ReadExactBytes(Stream stream, int length, CancellationToken cancellationToken)
+    {
+        byte[] bytes = new byte[length];
+        int totalBytesRead = 0;
+        while (totalBytesRead < bytes.Length)
+        {
+            int readByteCount = stream
+                .ReadAsync(bytes.AsMemory(totalBytesRead, bytes.Length - totalBytesRead), cancellationToken)
+                .AsTask()
+                .WaitAsync(TimeSpan.FromSeconds(8), cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+            if (readByteCount == 0)
+            {
+                throw new EndOfStreamException("WebSocket diagnostic stream ended before the expected bytes were read.");
+            }
+
+            totalBytesRead += readByteCount;
+        }
+
+        return bytes;
     }
 
     private static bool ContainsAsciiToken(ReadOnlySpan<byte> bytes, string token)
@@ -2516,6 +2703,33 @@ static class Program
         }
 
         return pcmBytes;
+    }
+
+    private sealed class Fmp4WebSocketDiagnosticResult
+    {
+        public Fmp4WebSocketDiagnosticResult(
+            bool accepted,
+            int initBytes,
+            int fragmentBytes,
+            bool initLooksLikeInitializationSegment,
+            bool fragmentLooksLikeMediaSegment)
+        {
+            Accepted = accepted;
+            InitBytes = initBytes;
+            FragmentBytes = fragmentBytes;
+            InitLooksLikeInitializationSegment = initLooksLikeInitializationSegment;
+            FragmentLooksLikeMediaSegment = fragmentLooksLikeMediaSegment;
+        }
+
+        public bool Accepted { get; }
+
+        public int InitBytes { get; }
+
+        public int FragmentBytes { get; }
+
+        public bool InitLooksLikeInitializationSegment { get; }
+
+        public bool FragmentLooksLikeMediaSegment { get; }
     }
 
     private sealed class DiagnosticToneWaveProvider : IWaveProvider
