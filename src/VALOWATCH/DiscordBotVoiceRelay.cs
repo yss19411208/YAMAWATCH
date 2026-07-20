@@ -30,14 +30,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ScreenStreamHealthCheckInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ScreenStreamHealthRequestTimeout = TimeSpan.FromSeconds(8);
-    private static readonly TimeSpan ScreenStreamStartValidationTimeout = TimeSpan.FromSeconds(25);
-    private static readonly TimeSpan ScreenStreamStartValidationDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan ScreenStreamBackgroundStartTimeout = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan ScreenStreamStartValidationTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ScreenStreamStartValidationDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ScreenStreamRestartTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan ScreenStreamMonitorShutdownTimeout = TimeSpan.FromSeconds(3);
     private const int DiscordEmbedDescriptionLimit = 4096;
     private const int DiscordEmbedDescriptionSafetyMargin = 120;
     private const int ScreenStreamPublicUrlFailureThreshold = 2;
-    private const int ScreenStreamStartValidationAttempts = 3;
+    private const int ScreenStreamStartValidationAttempts = 6;
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan ScreenStreamRestartFailureNotificationCooldown = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan StartupNotificationCooldown = TimeSpan.FromMinutes(2);
@@ -1436,24 +1437,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed("スクショ送信中"))
                 .ConfigureAwait(false);
 
-            FullScreenScreenshotResult screenshot = FullScreenScreenshotCapture.CaptureToJpeg(appPaths.ScreenshotTempDirectory);
-            screenshotPathToDelete = screenshot.FilePath;
-            string fileMessage =
-                "スクショ送信中" +
-                Environment.NewLine +
-                $"画面: {screenshot.Width}x{screenshot.Height} / {screenshot.ScreenCount} screen(s)";
-
-            await targetChannel
-                .SendFileAsync(screenshot.FilePath, fileMessage)
-                .ConfigureAwait(false);
-
+            StartScreenshotSendInBackground(command.User.Id, targetChannel);
             await command
-                .FollowupAsync("スクショを送信しました。", ephemeral: true)
+                .FollowupAsync("スクショ送信を受け付けました。完了したらこのチャンネルに画像を送信します。", ephemeral: true)
                 .ConfigureAwait(false);
-            WriteLog(
-                "Screenshot slash command sent an image. " +
-                $"User: {command.User.Id}. Size: {screenshot.Width}x{screenshot.Height}. " +
-                $"Screens: {screenshot.ScreenCount}. Bytes: {screenshot.FileBytes}.");
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or ExternalException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
         {
@@ -1482,6 +1469,50 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             DeleteTemporaryScreenshotFile(screenshotPathToDelete);
         }
+    }
+
+    private void StartScreenshotSendInBackground(ulong userId, IMessageChannel targetChannel)
+    {
+        _ = Task.Run(async () =>
+        {
+            string screenshotPathToDelete = string.Empty;
+            try
+            {
+                FullScreenScreenshotResult screenshot = FullScreenScreenshotCapture.CaptureToJpeg(appPaths.ScreenshotTempDirectory);
+                screenshotPathToDelete = screenshot.FilePath;
+                string fileMessage =
+                    "スクショ送信中" +
+                    Environment.NewLine +
+                    $"画面: {screenshot.Width}x{screenshot.Height} / {screenshot.ScreenCount} screen(s)";
+
+                await targetChannel
+                    .SendFileAsync(screenshot.FilePath, fileMessage)
+                    .ConfigureAwait(false);
+
+                WriteLog(
+                    "Screenshot slash command sent an image. " +
+                    $"User: {userId}. Size: {screenshot.Width}x{screenshot.Height}. " +
+                    $"Screens: {screenshot.ScreenCount}. Bytes: {screenshot.FileBytes}.");
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or ExternalException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+            {
+                WriteLog("Screenshot background send failed.", exception);
+                try
+                {
+                    await targetChannel
+                        .SendMessageAsync(embed: BuildStatusNotificationEmbed($"スクショ送信に失敗しました: {exception.Message}"))
+                        .ConfigureAwait(false);
+                }
+                catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+                {
+                    WriteLog("Screenshot background error notification failed.", responseException);
+                }
+            }
+            finally
+            {
+                DeleteTemporaryScreenshotFile(screenshotPathToDelete);
+            }
+        });
     }
 
     private bool IsScreenshotCommandEnabled()
@@ -1636,18 +1667,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     ScreenStreamMethodNames.ToOptionValue(streamOptions.Method)))
                 .ConfigureAwait(false);
 
-            using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(3));
-            ScreenStreamSession session = await StartOrReplaceScreenStreamAsync(streamOptions, targetChannel, timeout.Token)
-                .ConfigureAwait(false);
-
-            await targetChannel
-                .SendMessageAsync(embed: BuildStreamStartedEmbed(session))
-                .ConfigureAwait(false);
+            StartScreenStreamCommandInBackground(streamOptions, targetChannel);
             await command
                 .FollowupAsync(
-                    "配信を開始しました: " +
-                    $"{ScreenCaptureTargetNames.ToOptionValue(session.Target)} / " +
-                    $"{session.FramesPerSecond}fps / {ScreenStreamMethodNames.ToOptionValue(session.Method)}",
+                    "配信開始処理を受け付けました。完了したらこのチャンネルに配信URLを送信します。",
                     ephemeral: true)
                 .ConfigureAwait(false);
         }
@@ -1749,44 +1772,137 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return command.Channel as IMessageChannel ?? discordStatusTextChannel;
     }
 
+    private void StartScreenStreamCommandInBackground(
+        ScreenStreamOptions streamOptions,
+        IMessageChannel targetChannel)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using CancellationTokenSource timeout = new(ScreenStreamBackgroundStartTimeout);
+                ScreenStreamSession session = await StartOrReplaceScreenStreamAsync(
+                        streamOptions,
+                        targetChannel,
+                        timeout.Token)
+                    .ConfigureAwait(false);
+
+                await targetChannel
+                    .SendMessageAsync(embed: BuildStreamStartedEmbed(session))
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or TimeoutException or OperationCanceledException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+            {
+                WriteLog("Stream background startup failed.", exception);
+                try
+                {
+                    await targetChannel
+                        .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信開始に失敗しました: {exception.Message}"))
+                        .ConfigureAwait(false);
+                }
+                catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+                {
+                    WriteLog("Stream background startup error notification failed.", responseException);
+                }
+            }
+        });
+    }
+
     private async Task<ScreenStreamSession> StartOrReplaceScreenStreamAsync(
         ScreenStreamOptions streamOptions,
         IMessageChannel notifyChannel,
         CancellationToken cancellationToken)
     {
         await StopScreenStreamMonitorAsync().ConfigureAwait(false);
+        ScreenStreamSession? previousSession;
+        int requestGenerationSnapshot;
         await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (activeScreenStreamSession is not null)
-            {
-                await activeScreenStreamSession.DisposeAsync().ConfigureAwait(false);
-                activeScreenStreamSession = null;
-            }
-
-            ScreenStreamSession session = await StartValidatedScreenStreamSessionAsync(
-                    streamOptions,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            activeScreenStreamSession = session;
+            previousSession = activeScreenStreamSession;
+            activeScreenStreamSession = null;
             requestedScreenStreamOptions = streamOptions;
             activeScreenStreamNotifyChannel = notifyChannel;
             screenStreamConsecutiveHealthFailures = 0;
-            screenStreamRestartInProgress = false;
+            screenStreamRestartInProgress = true;
             screenStreamRequestGeneration++;
-            WriteLog(
-                "Screen stream started. " +
-                $"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}. " +
-                $"FPS: {session.FramesPerSecond}. Quality: {session.JpegQuality}. Width: {session.MaxWidth}. " +
-                $"Method: {ScreenStreamMethodNames.ToOptionValue(session.Method)}. " +
-                $"Engine: {session.EngineName}. " +
-                $"Url: {session.PublicUrl}.");
-            EnsureScreenStreamMonitorStarted();
-            return session;
+            requestGenerationSnapshot = screenStreamRequestGeneration;
         }
         finally
         {
             screenStreamSemaphore.Release();
+        }
+
+        if (previousSession is not null)
+        {
+            await previousSession.DisposeAsync().ConfigureAwait(false);
+        }
+
+        ScreenStreamSession? startedSession = null;
+        try
+        {
+            startedSession = await StartValidatedScreenStreamSessionAsync(
+                    streamOptions,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            ScreenStreamSession acceptedSession;
+            await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (!requestedScreenStreamOptions.HasValue ||
+                    screenStreamRequestGeneration != requestGenerationSnapshot ||
+                    !requestedScreenStreamOptions.Value.Equals(streamOptions))
+                {
+                    throw new OperationCanceledException("Screen stream start was cancelled or replaced.");
+                }
+
+                activeScreenStreamSession = startedSession;
+                activeScreenStreamNotifyChannel = notifyChannel;
+                screenStreamConsecutiveHealthFailures = 0;
+                screenStreamRestartInProgress = false;
+                acceptedSession = startedSession;
+                startedSession = null;
+            }
+            finally
+            {
+                screenStreamSemaphore.Release();
+            }
+
+            WriteLog(
+                "Screen stream started. " +
+                $"Target: {ScreenCaptureTargetNames.ToOptionValue(acceptedSession.Target)}. " +
+                $"FPS: {acceptedSession.FramesPerSecond}. Quality: {acceptedSession.JpegQuality}. Width: {acceptedSession.MaxWidth}. " +
+                $"Method: {ScreenStreamMethodNames.ToOptionValue(acceptedSession.Method)}. " +
+                $"Engine: {acceptedSession.EngineName}. " +
+                $"Url: {acceptedSession.PublicUrl}.");
+            EnsureScreenStreamMonitorStarted();
+            return acceptedSession;
+        }
+        catch
+        {
+            if (startedSession is not null)
+            {
+                await startedSession.DisposeAsync().ConfigureAwait(false);
+            }
+
+            await screenStreamSemaphore.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (screenStreamRequestGeneration == requestGenerationSnapshot)
+                {
+                    requestedScreenStreamOptions = null;
+                    activeScreenStreamNotifyChannel = null;
+                    screenStreamConsecutiveHealthFailures = 0;
+                    screenStreamRestartInProgress = false;
+                }
+            }
+            finally
+            {
+                screenStreamSemaphore.Release();
+            }
+
+            throw;
         }
     }
 
