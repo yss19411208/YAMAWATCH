@@ -13,6 +13,7 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
 
     private const string CloudflaredWindowsAmd64DownloadUrl =
         "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
+    private static readonly TimeSpan QuickTunnelUrlReportTimeout = TimeSpan.FromSeconds(20);
 
     private readonly ScreenStreamingServer streamingServer;
     private readonly Process cloudflaredProcess;
@@ -335,7 +336,7 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
 
         try
         {
-            Task<string> tunnelUrlTask = tunnelUrlSource.Task.WaitAsync(TimeSpan.FromSeconds(45), cancellationToken);
+            Task<string> tunnelUrlTask = tunnelUrlSource.Task.WaitAsync(QuickTunnelUrlReportTimeout, cancellationToken);
             Task processExitTask = process.WaitForExitAsync(cancellationToken);
             Task completedTask = await Task.WhenAny(tunnelUrlTask, processExitTask).ConfigureAwait(false);
             if (ReferenceEquals(completedTask, tunnelUrlTask))
