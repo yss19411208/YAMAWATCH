@@ -3333,7 +3333,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     .AddOption(
                         new SlashCommandOptionBuilder()
                             .WithName(StreamWidthOptionName)
-                            .WithDescription("Maximum stream width: 320-3840. Lower is lighter")
+                            .WithDescription("Maximum stream width: 320-3840. Default 720 for smoother 60fps")
                             .WithType(ApplicationCommandOptionType.Integer)
                             .WithRequired(false)))
             .AddOption(

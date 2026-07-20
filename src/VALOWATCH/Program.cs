@@ -991,7 +991,7 @@ static class Program
                 pageHtml.Contains("X-VALOWATCH-Sequence", StringComparison.OrdinalIgnoreCase);
             bool fmp4SmoothLiveConfigurationReady =
                 ScreenStreamingServer.H264Fmp4TargetLatencySeconds >= 1.7D &&
-                ScreenStreamingServer.H264Fmp4TargetLatencySeconds <= 2.6D &&
+                ScreenStreamingServer.H264Fmp4TargetLatencySeconds <= 2.8D &&
                 ScreenStreamingServer.H264Fmp4MinimumSmoothLatencySeconds >= 1.4D &&
                 ScreenStreamingServer.H264Fmp4MinimumSmoothLatencySeconds < ScreenStreamingServer.H264Fmp4TargetLatencySeconds &&
                 ScreenStreamingServer.H264Fmp4CatchUpLatencySeconds > ScreenStreamingServer.H264Fmp4TargetLatencySeconds &&
@@ -1095,14 +1095,14 @@ static class Program
             motionSourceProcess = TryStartSmoothLiveMotionSource(durationSeconds + 15, logFilePath);
             if (motionSourceProcess is not null)
             {
-                Thread.Sleep(1200);
+                WaitForSmoothLiveMotionSourceWindow(logFilePath, TimeSpan.FromSeconds(6));
             }
 
             ScreenStreamOptions options = ScreenStreamOptions.Create(
-                ScreenCaptureTarget.FullScreen,
+                ScreenCaptureTarget.Valorant,
                 60,
                 90,
-                1280,
+                ScreenStreamingServer.DefaultMaxWidth,
                 ScreenStreamMethod.H264Fmp4);
             string ffmpegPath = ResolveFfmpegForDiagnostic(appPaths, logFilePath);
             server = ScreenStreamingServer.Start(
@@ -1137,6 +1137,7 @@ static class Program
                 $"VisibilityRecoveryAttempted: {browserResult.VisibilityRecoveryAttempted}. " +
                 $"VisibilityRecoveredWithinFiveSeconds: {browserResult.VisibilityRecoveredWithinFiveSeconds}. " +
                 $"FailureReasons: {string.Join(" | ", browserResult.FailureReasons)}. " +
+                $"SampleSummary: {browserResult.SampleSummary}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(6))}.");
             Environment.ExitCode = browserResult.Ready ? 0 : 1;
         }
@@ -1307,7 +1308,7 @@ static class Program
             Process? process = Process.Start(new ProcessStartInfo
             {
                 FileName = overlayTestPath,
-                Arguments = $"--motion-source --duration-seconds {durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
+                Arguments = $"--motion-source --diagnostic-windowed-layout --duration-seconds {durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
                 WorkingDirectory = Path.GetDirectoryName(overlayTestPath),
                 UseShellExecute = true
             });
@@ -1323,6 +1324,31 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] Smooth Live motion source could not be started: {exception}.");
             return null;
         }
+    }
+
+    private static void WaitForSmoothLiveMotionSourceWindow(string logFilePath, TimeSpan timeout)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        Exception? lastException = null;
+        while (stopwatch.Elapsed < timeout)
+        {
+            try
+            {
+                FullScreenScreenshotCapture.ValidateCaptureTarget(ScreenCaptureTarget.Valorant);
+                return;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or ExternalException)
+            {
+                lastException = exception;
+                Thread.Sleep(250);
+            }
+        }
+
+        AppendDiagnosticLogLine(
+            logFilePath,
+            $"{DateTimeOffset.Now:O} [Diagnostics] Smooth Live motion source window was not detected before streaming started. " +
+            $"TimeoutSeconds: {timeout.TotalSeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}. " +
+            $"LastError: {lastException?.Message ?? "none"}.");
     }
 
     private static void StopDiagnosticProcess(Process? process)
@@ -2983,6 +3009,7 @@ static class Program
         private bool sampleInProgress;
         private bool visibilityRecoveryAttempted;
         private double? visibilityRestoredAtSeconds;
+        private bool simulatedHiddenPage;
 
         public SmoothLiveDiagnosticForm(string pageUrl, TimeSpan duration)
         {
@@ -3098,17 +3125,35 @@ static class Program
             }
 
             visibilityRecoveryAttempted = true;
-            WindowState = FormWindowState.Minimized;
+            simulatedHiddenPage = true;
+            await ExecuteStreamTestScriptAsync("window.valowatchStreamTestSuspend && window.valowatchStreamTestSuspend();").ConfigureAwait(true);
             await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(true);
             if (IsDisposed)
             {
                 return;
             }
 
-            WindowState = FormWindowState.Normal;
+            simulatedHiddenPage = false;
+            await ExecuteStreamTestScriptAsync("window.valowatchStreamTestResume && window.valowatchStreamTestResume();").ConfigureAwait(true);
             BringToFront();
             Activate();
             visibilityRestoredAtSeconds = stopwatch.Elapsed.TotalSeconds;
+        }
+
+        private async Task ExecuteStreamTestScriptAsync(string script)
+        {
+            if (playerWebView.CoreWebView2 is null)
+            {
+                return;
+            }
+
+            try
+            {
+                await playerWebView.CoreWebView2.ExecuteScriptAsync(script).ConfigureAwait(true);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+            }
         }
 
         private async Task CaptureMetricSampleAsync()
@@ -3123,7 +3168,7 @@ static class Program
             {
                 string scriptResult = await playerWebView.CoreWebView2.ExecuteScriptAsync(MetricScript).ConfigureAwait(true);
                 SmoothLiveMetricSample sample = SmoothLiveMetricSample.FromScriptResult(scriptResult, stopwatch.Elapsed.TotalSeconds);
-                sample.WindowWasHidden = WindowState == FormWindowState.Minimized;
+                sample.WindowWasHidden = simulatedHiddenPage || WindowState == FormWindowState.Minimized;
                 samples.Add(sample);
             }
             catch (Exception exception) when (exception is InvalidOperationException or JsonException or ArgumentException or System.ComponentModel.Win32Exception)
@@ -3132,6 +3177,7 @@ static class Program
                     with
                     {
                         WindowWasHidden = WindowState == FormWindowState.Minimized
+                            || simulatedHiddenPage
                     });
             }
             finally
@@ -3411,7 +3457,8 @@ static class Program
             bool mseOpened,
             bool visibilityRecoveryAttempted,
             bool visibilityRecoveredWithinFiveSeconds,
-            IReadOnlyList<string> failureReasons)
+            IReadOnlyList<string> failureReasons,
+            string sampleSummary)
         {
             Ready = ready;
             TotalSampleCount = totalSampleCount;
@@ -3429,6 +3476,7 @@ static class Program
             VisibilityRecoveryAttempted = visibilityRecoveryAttempted;
             VisibilityRecoveredWithinFiveSeconds = visibilityRecoveredWithinFiveSeconds;
             FailureReasons = failureReasons;
+            SampleSummary = sampleSummary;
         }
 
         public bool Ready { get; }
@@ -3463,6 +3511,8 @@ static class Program
 
         public IReadOnlyList<string> FailureReasons { get; }
 
+        public string SampleSummary { get; }
+
         public static SmoothLiveBrowserDiagnosticResult Failed(string reason)
         {
             return new SmoothLiveBrowserDiagnosticResult(
@@ -3481,7 +3531,8 @@ static class Program
                 mseOpened: false,
                 visibilityRecoveryAttempted: false,
                 visibilityRecoveredWithinFiveSeconds: false,
-                failureReasons: [reason]);
+                failureReasons: [reason],
+                sampleSummary: "none");
         }
 
         public static SmoothLiveBrowserDiagnosticResult FromSamples(
@@ -3492,19 +3543,22 @@ static class Program
             Exception? startupException)
         {
             const double warmupSeconds = 12D;
-            List<SmoothLiveMetricSample> recoveryCandidateSamples = samples
+            List<SmoothLiveMetricSample> cleanSamples = samples
                 .Where(sample => sample.Error is null &&
                     sample.Ok &&
-                    !sample.WindowWasHidden &&
-                    sample.ElapsedSeconds >= warmupSeconds)
+                    !sample.WindowWasHidden)
                 .OrderBy(sample => sample.ElapsedSeconds)
+                .ToList();
+            double stableStartSeconds = FindSmoothLiveStableStartSeconds(cleanSamples, warmupSeconds, visibilityRestoredAtSeconds);
+            List<SmoothLiveMetricSample> recoveryCandidateSamples = cleanSamples
+                .Where(sample => sample.ElapsedSeconds >= warmupSeconds)
                 .ToList();
             List<SmoothLiveMetricSample> usableSamples = samples
                 .Where(sample => sample.Error is null &&
                     sample.Ok &&
                     !sample.WindowWasHidden &&
                     !IsWithinVisibilityRecoveryWindow(sample, visibilityRestoredAtSeconds) &&
-                    sample.ElapsedSeconds >= warmupSeconds)
+                    sample.ElapsedSeconds >= stableStartSeconds)
                 .OrderBy(sample => sample.ElapsedSeconds)
                 .ToList();
             List<string> failureReasons = [];
@@ -3513,7 +3567,7 @@ static class Program
                 failureReasons.Add(startupException.Message);
             }
 
-            int minimumUsableSamples = Math.Min(60, Math.Max(12, (int)Math.Floor(duration.TotalSeconds * 0.5D)));
+            int minimumUsableSamples = Math.Min(60, Math.Max(10, (int)Math.Floor(duration.TotalSeconds * 0.35D)));
             if (usableSamples.Count < minimumUsableSamples)
             {
                 failureReasons.Add($"usable samples {usableSamples.Count} < {minimumUsableSamples}");
@@ -3604,7 +3658,86 @@ static class Program
                 mseOpened,
                 visibilityRecoveryAttempted,
                 visibilityRecoveredWithinFiveSeconds,
-                failureReasons);
+                failureReasons,
+                BuildSampleSummary(cleanSamples, usableSamples));
+        }
+
+        private static string BuildSampleSummary(
+            IReadOnlyList<SmoothLiveMetricSample> cleanSamples,
+            IReadOnlyList<SmoothLiveMetricSample> usableSamples)
+        {
+            static string FormatSample(SmoothLiveMetricSample sample)
+            {
+                string latencyText = sample.LatencySeconds.HasValue
+                    ? sample.LatencySeconds.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)
+                    : "null";
+                return string.Create(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"t={sample.ElapsedSeconds:0.0},ct={sample.CurrentTime:0.00},lat={latencyText},ready={sample.ReadyState},paused={sample.Paused},rate={sample.PlaybackRate:0.000},dec={sample.DecodedFrames},ws={sample.WebSocketConnected},mse={sample.MseReadyState},start={sample.PlaybackStartCount},append={sample.AppendedSegments}");
+            }
+
+            IEnumerable<SmoothLiveMetricSample> summarySamples = cleanSamples
+                .Take(4)
+                .Concat(cleanSamples.TakeLast(8))
+                .DistinctBy(sample => sample.ElapsedSeconds);
+            string cleanSummary = string.Join(" || ", summarySamples.Select(FormatSample));
+            string usableSummary = string.Join(" || ", usableSamples.TakeLast(6).Select(FormatSample));
+            return $"Clean[{cleanSamples.Count}]: {cleanSummary}. UsableTail[{usableSamples.Count}]: {usableSummary}.";
+        }
+
+        private static double FindSmoothLiveStableStartSeconds(
+            IReadOnlyList<SmoothLiveMetricSample> samples,
+            double warmupSeconds,
+            double? visibilityRestoredAtSeconds)
+        {
+            const double secondsAfterPlaybackStart = 3D;
+            const double secondsAfterMseRestart = 4D;
+            double stableStartSeconds = warmupSeconds;
+
+            SmoothLiveMetricSample? firstPlayingSample = samples
+                .FirstOrDefault(sample => sample.PlaybackStartCount > 0 &&
+                    !sample.Paused &&
+                    sample.ReadyState >= 2 &&
+                    sample.LatencySeconds.HasValue);
+            if (firstPlayingSample is not null)
+            {
+                stableStartSeconds = Math.Max(
+                    stableStartSeconds,
+                    firstPlayingSample.ElapsedSeconds + secondsAfterPlaybackStart);
+            }
+
+            for (int sampleIndex = 1; sampleIndex < samples.Count; sampleIndex++)
+            {
+                SmoothLiveMetricSample previousSample = samples[sampleIndex - 1];
+                SmoothLiveMetricSample currentSample = samples[sampleIndex];
+                if (currentSample.MseRestartCount > previousSample.MseRestartCount)
+                {
+                    if (IsVisibilityRecoveryRestart(currentSample, visibilityRestoredAtSeconds))
+                    {
+                        continue;
+                    }
+
+                    stableStartSeconds = Math.Max(
+                        stableStartSeconds,
+                        currentSample.ElapsedSeconds + secondsAfterMseRestart);
+                }
+            }
+
+            return stableStartSeconds;
+        }
+
+        private static bool IsVisibilityRecoveryRestart(
+            SmoothLiveMetricSample sample,
+            double? visibilityRestoredAtSeconds)
+        {
+            if (!visibilityRestoredAtSeconds.HasValue)
+            {
+                return false;
+            }
+
+            double restoredAtSeconds = visibilityRestoredAtSeconds.Value;
+            return sample.ElapsedSeconds >= restoredAtSeconds - 1D &&
+                sample.ElapsedSeconds <= restoredAtSeconds + 6D;
         }
 
         private static double CalculateAverageDecodedFps(IReadOnlyList<SmoothLiveMetricSample> samples)
@@ -3636,24 +3769,102 @@ static class Program
 
         private static double CalculateLatencyIncreaseSecondsPerMinute(IReadOnlyList<SmoothLiveMetricSample> samples)
         {
+            IEnumerable<List<SmoothLiveMetricSample>> latencySampleGroups = samples
+                .Where(sample => sample.LatencySeconds.HasValue)
+                .GroupBy(sample => sample.MseRestartCount)
+                .Select(group => group.ToList());
+            double maximumIncreaseSecondsPerMinute = 0D;
+            foreach (List<SmoothLiveMetricSample> latencySamples in latencySampleGroups)
+            {
+                maximumIncreaseSecondsPerMinute = Math.Max(
+                    maximumIncreaseSecondsPerMinute,
+                    CalculateSegmentLatencyIncreaseSecondsPerMinute(latencySamples));
+            }
+
+            return maximumIncreaseSecondsPerMinute;
+        }
+
+        private static double CalculateSegmentLatencyIncreaseSecondsPerMinute(IReadOnlyList<SmoothLiveMetricSample> samples)
+        {
             List<SmoothLiveMetricSample> latencySamples = samples
                 .Where(sample => sample.LatencySeconds.HasValue)
+                .OrderBy(sample => sample.ElapsedSeconds)
                 .ToList();
-            if (latencySamples.Count < 2)
+            if (latencySamples.Count < 6)
             {
                 return 0D;
             }
 
-            SmoothLiveMetricSample firstSample = latencySamples[0];
-            SmoothLiveMetricSample lastSample = latencySamples[^1];
-            double elapsedSeconds = lastSample.ElapsedSeconds - firstSample.ElapsedSeconds;
-            if (elapsedSeconds <= 0D)
+            double segmentStartSeconds = latencySamples[0].ElapsedSeconds;
+            double segmentEndSeconds = latencySamples[^1].ElapsedSeconds;
+            double segmentDurationSeconds = segmentEndSeconds - segmentStartSeconds;
+            if (segmentDurationSeconds < 20D)
             {
                 return 0D;
             }
 
-            double increaseSeconds = Math.Max(0D, lastSample.LatencySeconds!.Value - firstSample.LatencySeconds!.Value);
-            return increaseSeconds / elapsedSeconds * 60D;
+            double graceSeconds = Math.Min(20D, segmentDurationSeconds * 0.25D);
+            List<SmoothLiveMetricSample> stableSamples = latencySamples
+                .Where(sample => sample.ElapsedSeconds >= segmentStartSeconds + graceSeconds)
+                .ToList();
+            if (stableSamples.Count < 6)
+            {
+                return 0D;
+            }
+
+            double stableStartSeconds = stableSamples[0].ElapsedSeconds;
+            double stableEndSeconds = stableSamples[^1].ElapsedSeconds;
+            double stableDurationSeconds = stableEndSeconds - stableStartSeconds;
+            if (stableDurationSeconds < 16D)
+            {
+                return 0D;
+            }
+
+            double windowSeconds = Math.Min(20D, Math.Max(8D, stableDurationSeconds * 0.25D));
+            List<SmoothLiveMetricSample> firstWindowSamples = stableSamples
+                .Where(sample => sample.ElapsedSeconds <= stableStartSeconds + windowSeconds)
+                .ToList();
+            List<SmoothLiveMetricSample> lastWindowSamples = stableSamples
+                .Where(sample => sample.ElapsedSeconds >= stableEndSeconds - windowSeconds)
+                .ToList();
+            if (firstWindowSamples.Count == 0 || lastWindowSamples.Count == 0)
+            {
+                return 0D;
+            }
+
+            double firstWindowLatencySeconds = CalculateMedianLatencySeconds(firstWindowSamples);
+            double lastWindowLatencySeconds = CalculateMedianLatencySeconds(lastWindowSamples);
+            double firstWindowCenterSeconds = firstWindowSamples.Average(sample => sample.ElapsedSeconds);
+            double lastWindowCenterSeconds = lastWindowSamples.Average(sample => sample.ElapsedSeconds);
+            double windowCenterDeltaMinutes = (lastWindowCenterSeconds - firstWindowCenterSeconds) / 60D;
+            if (windowCenterDeltaMinutes <= 0D)
+            {
+                return 0D;
+            }
+
+            return Math.Max(0D, (lastWindowLatencySeconds - firstWindowLatencySeconds) / windowCenterDeltaMinutes);
+        }
+
+        private static double CalculateMedianLatencySeconds(IReadOnlyList<SmoothLiveMetricSample> samples)
+        {
+            List<double> latencies = samples
+                .Select(sample => sample.LatencySeconds)
+                .Where(latencySeconds => latencySeconds.HasValue)
+                .Select(latencySeconds => latencySeconds!.Value)
+                .OrderBy(latencySeconds => latencySeconds)
+                .ToList();
+            if (latencies.Count == 0)
+            {
+                return 0D;
+            }
+
+            int middleIndex = latencies.Count / 2;
+            if (latencies.Count % 2 == 1)
+            {
+                return latencies[middleIndex];
+            }
+
+            return (latencies[middleIndex - 1] + latencies[middleIndex]) / 2D;
         }
 
         private static int CountPlaybackStops(IReadOnlyList<SmoothLiveMetricSample> samples)

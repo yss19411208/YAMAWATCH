@@ -130,12 +130,19 @@ internal static class FullScreenScreenshotCapture
     {
         if (maxWidth <= 0 || bounds.Width <= maxWidth)
         {
-            return bounds.Size;
+            return NormalizeVideoSafeSize(bounds.Size);
         }
 
         double scale = (double)maxWidth / bounds.Width;
         int scaledHeight = Math.Max(1, (int)Math.Round(bounds.Height * scale));
-        return new Size(maxWidth, scaledHeight);
+        return NormalizeVideoSafeSize(new Size(maxWidth, scaledHeight));
+    }
+
+    private static Size NormalizeVideoSafeSize(Size size)
+    {
+        int normalizedWidth = Math.Max(2, size.Width - size.Width % 2);
+        int normalizedHeight = Math.Max(2, size.Height - size.Height % 2);
+        return new Size(normalizedWidth, normalizedHeight);
     }
 
     private static CaptureRegion ResolveCaptureRegion(ScreenCaptureTarget target)

@@ -17,19 +17,19 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const long DefaultJpegQuality = 90L;
     public const long MaximumJpegQuality = 95L;
     public const int MinimumMaxWidth = 320;
-    public const int DefaultMaxWidth = 1920;
+    public const int DefaultMaxWidth = 720;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 2.5D;
-    public const double H264Fmp4MinimumSmoothLatencySeconds = 2.05D;
-    public const double H264Fmp4CatchUpLatencySeconds = 2.75D;
+    public const double H264Fmp4TargetLatencySeconds = 2.35D;
+    public const double H264Fmp4MinimumSmoothLatencySeconds = 1.9D;
+    public const double H264Fmp4CatchUpLatencySeconds = 2.55D;
     public const double H264Fmp4MaximumLatencySeconds = 3.0D;
     public const double H264Fmp4RestartLatencySeconds = 4.2D;
     public const int H264Fmp4LatencyCheckIntervalMilliseconds = 250;
     public const int H264Fmp4SeekCooldownMilliseconds = 1500;
-    public const int H264Fmp4ReconnectStallMilliseconds = 2500;
+    public const int H264Fmp4ReconnectStallMilliseconds = 7000;
     public const int H264Fmp4FragmentDurationMicroseconds = 500000;
     public const int H264Fmp4MinimumFragmentDurationMicroseconds = 250000;
-    public const int H264Fmp4InitialFragmentCount = 6;
+    public const int H264Fmp4InitialFragmentCount = 4;
     public const int H264Fmp4RetainedFragmentCount = 42;
     public const int H264Fmp4MaximumAppendQueueLength = 45;
     public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 1500;
@@ -520,7 +520,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             ? $"<img id=\"screen\" src=\"{streamPathHtml}\" alt=\"VALOWATCH stream\">"
             : Options.Method == ScreenStreamMethod.H264Hls
                 ? "<video id=\"screen\" autoplay muted playsinline></video>"
-                : "<video id=\"screen\" autoplay muted playsinline></video>";
+                : "<video id=\"screen\" muted playsinline></video>";
         string targetLatencySecondsText = H264Fmp4TargetLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string minimumSmoothLatencySecondsText = H264Fmp4MinimumSmoothLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string catchUpLatencySecondsText = H264Fmp4CatchUpLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
@@ -561,6 +561,7 @@ const minimumSmoothLatencySeconds = {{minimumSmoothLatencySecondsText}};
 const catchUpLatencySeconds = {{catchUpLatencySecondsText}};
 const maximumLatencySeconds = {{maximumLatencySecondsText}};
 const restartLatencySeconds = {{restartLatencySecondsText}};
+const startupBufferSeconds = Math.min(maximumLatencySeconds - 0.20, targetLatencySeconds);
 const latencyCheckMilliseconds = {{latencyCheckIntervalMillisecondsText}};
 const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
 const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
@@ -584,6 +585,7 @@ let activeStreamSession = 0;
 let activeFetchAbortController = null;
 let activeFmp4WebSocket = null;
 let directFallbackActive = false;
+let fmp4PlaybackHasStarted = false;
 const streamMetrics = window.valowatchStreamMetrics = {
   mode: 'smooth-live',
   targetLatencySeconds,
@@ -602,14 +604,15 @@ const streamMetrics = window.valowatchStreamMetrics = {
   lastPlaybackRate: 1
 };
 screenVideo.preload = 'auto';
+screenVideo.autoplay = false;
 screenVideo.controls = false;
 screenVideo.muted = true;
 screenVideo.defaultPlaybackRate = 1;
 function isFmp4PageHidden() {
   return document.hidden || document.visibilityState === 'hidden';
 }
-function suspendFmp4ForHiddenPage() {
-  if (!isFmp4PageHidden()) {
+function suspendFmp4ForHiddenPage(forceSuspend = false) {
+  if (!forceSuspend && !isFmp4PageHidden()) {
     return false;
   }
 
@@ -637,8 +640,8 @@ function suspendFmp4ForHiddenPage() {
 
   return true;
 }
-function resumeFmp4FromHiddenPage() {
-  if (isFmp4PageHidden()) {
+function resumeFmp4FromHiddenPage(forceResume = false) {
+  if (!forceResume && isFmp4PageHidden()) {
     return;
   }
 
@@ -698,7 +701,8 @@ function hasFmp4SmoothStartupBuffer() {
 
   const latencyState = readFmp4LatencySeconds();
   updateFmp4Metrics(latencyState);
-  return !!latencyState && latencyState.latencySeconds >= targetLatencySeconds;
+  const requiredLatencySeconds = fmp4PlaybackHasStarted ? targetLatencySeconds : startupBufferSeconds;
+  return !!latencyState && latencyState.latencySeconds >= requiredLatencySeconds;
 }
 function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds) {
   if (nowMilliseconds - lastSeekAtMilliseconds < seekCooldownMilliseconds) {
@@ -738,6 +742,7 @@ function reconnectFmp4Stream(forceReconnect = false) {
   streamMetrics.reconnectCount += 1;
   reconnectNonce += 1;
   screenVideo.playbackRate = 1;
+  fmp4PlaybackHasStarted = false;
   appendQueue = [];
   activeStreamSession += 1;
   if (activeFetchAbortController) {
@@ -809,6 +814,11 @@ function keepFmp4LatencyLow() {
   }
 
   const { bufferedEnd, latencySeconds } = latencyState;
+  if (!fmp4PlaybackHasStarted) {
+    keepFmp4Playing();
+    return;
+  }
+
   if (!directFallbackActive &&
       latencySeconds < Math.max(0.45, minimumSmoothLatencySeconds - 1.65) &&
       nowMilliseconds - lastUnderflowReconnectAtMilliseconds > Math.max(12000, reconnectStallMilliseconds + 9500)) {
@@ -842,23 +852,25 @@ function keepFmp4LatencyLow() {
   }
 
   if (!directFallbackActive &&
-      nowMilliseconds - lastFragmentReceivedAtMilliseconds > Math.max(3500, reconnectStallMilliseconds + 1000)) {
+      nowMilliseconds - lastFragmentReceivedAtMilliseconds > Math.max(8500, reconnectStallMilliseconds + 1000)) {
     reconnectFmp4Stream();
     return;
   }
 
   if (latencySeconds > catchUpLatencySeconds + 0.55) {
-    screenVideo.playbackRate = 1.04;
+    screenVideo.playbackRate = 1.03;
   } else if (latencySeconds > catchUpLatencySeconds + 0.15) {
     screenVideo.playbackRate = 1.02;
   } else if (latencySeconds > catchUpLatencySeconds) {
     screenVideo.playbackRate = 1.01;
+  } else if (latencySeconds > targetLatencySeconds + 0.15) {
+    screenVideo.playbackRate = 1.005;
   } else if (latencySeconds < minimumSmoothLatencySeconds - 1.25) {
     screenVideo.playbackRate = 0.82;
   } else if (latencySeconds < minimumSmoothLatencySeconds - 0.80) {
-    screenVideo.playbackRate = 0.90;
+    screenVideo.playbackRate = 0.88;
   } else if (latencySeconds < minimumSmoothLatencySeconds - 0.35) {
-    screenVideo.playbackRate = 0.96;
+    screenVideo.playbackRate = 0.94;
   } else if (latencySeconds < minimumSmoothLatencySeconds) {
     screenVideo.playbackRate = 0.985;
   } else {
@@ -887,6 +899,7 @@ async function keepFmp4Playing(forcePlay = false) {
   lastPlayAttemptAtMilliseconds = nowMilliseconds;
   try {
     await screenVideo.play();
+    fmp4PlaybackHasStarted = true;
     streamMetrics.playbackStartCount += 1;
   } catch {
   }
@@ -957,9 +970,9 @@ function trimFmp4Buffer() {
     return;
   }
 
-  const bufferedEnd = screenVideo.buffered.end(screenVideo.buffered.length - 1);
-  const removeBefore = bufferedEnd - Math.max(3.2, maximumLatencySeconds + targetLatencySeconds);
-  if (removeBefore <= 0) {
+  const keepBehindSeconds = Math.max(1800, restartLatencySeconds + targetLatencySeconds);
+  const removeBefore = screenVideo.currentTime - keepBehindSeconds;
+  if (!Number.isFinite(removeBefore) || removeBefore <= 0) {
     return;
   }
 
@@ -1217,9 +1230,11 @@ document.addEventListener('visibilitychange', () => {
     resumeFmp4FromHiddenPage();
   }
 });
-window.addEventListener('pageshow', resumeFmp4FromHiddenPage);
-window.addEventListener('focus', resumeFmp4FromHiddenPage);
-window.addEventListener('pagehide', suspendFmp4ForHiddenPage);
+window.addEventListener('pageshow', () => resumeFmp4FromHiddenPage());
+window.addEventListener('focus', () => resumeFmp4FromHiddenPage());
+window.addEventListener('pagehide', () => suspendFmp4ForHiddenPage());
+window.valowatchStreamTestSuspend = () => suspendFmp4ForHiddenPage(true);
+window.valowatchStreamTestResume = () => resumeFmp4FromHiddenPage(true);
 window.setInterval(() => {
   if (suspendFmp4ForHiddenPage()) {
     return;
@@ -1949,8 +1964,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
     private Process StartFfmpegFmp4Process()
     {
         ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: true);
-        AddFfmpegCaptureInputArguments(startInfo);
-        AddFfmpegH264OutputArguments(startInfo);
+        bool useDesktopDuplicationCapture = ShouldUseDesktopDuplicationCapture();
+        AddFfmpegH264CaptureInputArguments(startInfo, useDesktopDuplicationCapture);
+        AddFfmpegH264OutputArguments(startInfo, useDesktopDuplicationCapture);
         startInfo.ArgumentList.Add("-movflags");
         startInfo.ArgumentList.Add("+frag_keyframe+empty_moov+default_base_moof+dash");
         startInfo.ArgumentList.Add("-frag_duration");
@@ -1971,6 +1987,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         log(
             "FFmpeg fMP4 screen stream process started. " +
             $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
+            $"CaptureEngine: {(useDesktopDuplicationCapture ? "ddagrab" : "gdigrab")}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
             $"Encoder: {h264EncoderProfile.DisplayName}. " +
@@ -2030,8 +2047,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         string segmentPattern = Path.Combine(directory, "segment_%05d.ts");
 
         ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: false);
-        AddFfmpegCaptureInputArguments(startInfo);
-        AddFfmpegH264OutputArguments(startInfo);
+        bool useDesktopDuplicationCapture = ShouldUseDesktopDuplicationCapture();
+        AddFfmpegH264CaptureInputArguments(startInfo, useDesktopDuplicationCapture);
+        AddFfmpegH264OutputArguments(startInfo, useDesktopDuplicationCapture);
         startInfo.ArgumentList.Add("-flags");
         startInfo.ArgumentList.Add("+cgop");
         startInfo.ArgumentList.Add("-f");
@@ -2050,6 +2068,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         log(
             "FFmpeg HLS screen stream process started. " +
             $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
+            $"CaptureEngine: {(useDesktopDuplicationCapture ? "ddagrab" : "gdigrab")}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
             $"Encoder: {h264EncoderProfile.DisplayName}. {BuildH264QualityLogText()}. Playlist: {playlistPath}.",
@@ -2202,6 +2221,21 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
     }
 
+    private bool ShouldUseDesktopDuplicationCapture()
+    {
+        if (string.Equals(
+            Environment.GetEnvironmentVariable("VALOWATCH_DISABLE_DDAGRAB"),
+            "1",
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return capturePlan.ScreenCount == 1 &&
+            capturePlan.Bounds.Left >= 0 &&
+            capturePlan.Bounds.Top >= 0;
+    }
+
     private void AddFfmpegCaptureInputArguments(ProcessStartInfo startInfo)
     {
         startInfo.ArgumentList.Add("-f");
@@ -2220,9 +2254,34 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("desktop");
     }
 
-    private void AddFfmpegH264OutputArguments(ProcessStartInfo startInfo)
+    private void AddFfmpegH264CaptureInputArguments(ProcessStartInfo startInfo, bool useDesktopDuplicationCapture)
+    {
+        if (!useDesktopDuplicationCapture)
+        {
+            AddFfmpegCaptureInputArguments(startInfo);
+            return;
+        }
+
+        string inputFilter = string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"ddagrab=framerate={FramesPerSecond}:video_size={capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}:offset_x={capturePlan.Bounds.Left}:offset_y={capturePlan.Bounds.Top}:draw_mouse=1:dup_frames=1:output_fmt=bgra:allow_fallback=1");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("lavfi");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add(inputFilter);
+    }
+
+    private void AddFfmpegH264OutputArguments(ProcessStartInfo startInfo, bool useDesktopDuplicationCapture)
     {
         List<string> videoFilters = [];
+        if (useDesktopDuplicationCapture)
+        {
+            videoFilters.Add("hwdownload");
+            videoFilters.Add("format=bgra");
+        }
+
+        videoFilters.Add($"fps=fps={FramesPerSecond}:round=near");
+        videoFilters.Add($"setpts=N/({FramesPerSecond}*TB)");
         if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
             capturePlan.OutputSize.Height != capturePlan.Bounds.Height)
         {
@@ -2285,8 +2344,6 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add(levelText);
         startInfo.ArgumentList.Add("-pix_fmt");
         startInfo.ArgumentList.Add("yuv420p");
-        startInfo.ArgumentList.Add("-r");
-        startInfo.ArgumentList.Add(framesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
         startInfo.ArgumentList.Add("-g");
         startInfo.ArgumentList.Add(groupOfPicturesSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
         startInfo.ArgumentList.Add("-bf");

@@ -11,8 +11,10 @@ internal static class Program
         if (args.Any(argument => string.Equals(argument, "--motion-source", StringComparison.OrdinalIgnoreCase)))
         {
             int durationSeconds = ReadIntegerOption(args, "--duration-seconds", defaultValue: 90, minimumValue: 5, maximumValue: 900);
+            bool useDiagnosticWindowedLayout = args.Any(argument =>
+                string.Equals(argument, "--diagnostic-windowed-layout", StringComparison.OrdinalIgnoreCase));
             ApplicationConfiguration.Initialize();
-            using MotionSourceForm motionSourceForm = new(TimeSpan.FromSeconds(durationSeconds));
+            using MotionSourceForm motionSourceForm = new(TimeSpan.FromSeconds(durationSeconds), useDiagnosticWindowedLayout);
             Application.Run(motionSourceForm);
             Environment.ExitCode = 0;
             return;
@@ -353,6 +355,7 @@ internal sealed class FakeValorantForm : Form
 internal sealed class MotionSourceForm : Form
 {
     private readonly TimeSpan duration;
+    private readonly bool useDiagnosticWindowedLayout;
     private readonly Stopwatch stopwatch = new();
     private readonly System.Windows.Forms.Timer frameTimer = new()
     {
@@ -363,9 +366,10 @@ internal sealed class MotionSourceForm : Form
         Interval = 500
     };
 
-    public MotionSourceForm(TimeSpan duration)
+    public MotionSourceForm(TimeSpan duration, bool useDiagnosticWindowedLayout)
     {
         this.duration = duration;
+        this.useDiagnosticWindowedLayout = useDiagnosticWindowedLayout;
         BuildInterface();
         frameTimer.Tick += (_, _) => Invalidate();
         closeTimer.Tick += (_, _) =>
@@ -401,7 +405,27 @@ internal sealed class MotionSourceForm : Form
         Text = "VALOWATCH 60fps Motion Source";
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        Bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
+        Rectangle screenBounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
+        if (useDiagnosticWindowedLayout)
+        {
+            int reservedPlayerWidth = Math.Min(600, Math.Max(360, screenBounds.Width / 3));
+            int sourceWidth = Math.Max(640, screenBounds.Width - reservedPlayerWidth);
+            sourceWidth = Math.Min(sourceWidth, 960);
+            sourceWidth = Math.Min(sourceWidth, screenBounds.Width);
+            int sourceHeight = Math.Max(360, (int)Math.Round(sourceWidth * 9D / 16D));
+            if (sourceHeight > screenBounds.Height)
+            {
+                sourceHeight = screenBounds.Height;
+                sourceWidth = Math.Max(640, (int)Math.Round(sourceHeight * 16D / 9D));
+                sourceWidth = Math.Min(sourceWidth, screenBounds.Width);
+            }
+
+            Bounds = new Rectangle(screenBounds.Left, screenBounds.Top, sourceWidth, sourceHeight);
+        }
+        else
+        {
+            Bounds = screenBounds;
+        }
         BackColor = Color.FromArgb(8, 10, 14);
         ForeColor = Color.White;
         TopMost = true;
