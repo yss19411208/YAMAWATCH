@@ -2986,7 +2986,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     .AddOption(
                         new SlashCommandOptionBuilder()
                             .WithName(StreamMethodOptionName)
-                            .WithDescription("Stream method: h264-fmp4 is smoother, h264-hls is steadier")
+                            .WithDescription("Stream method: h264-fmp4 is high quality with live-edge correction")
                             .WithType(ApplicationCommandOptionType.String)
                             .WithRequired(false)
                             .AddChoice(ScreenStreamMethodNames.H264Fmp4, ScreenStreamMethodNames.H264Fmp4)
@@ -2995,7 +2995,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     .AddOption(
                         new SlashCommandOptionBuilder()
                             .WithName(StreamFramesPerSecondOptionName)
-                            .WithDescription("FPS: 1-60. 60 is heavy and may drop frames on some PCs")
+                            .WithDescription("FPS: 1-120. 60+ is heavy; old frames are dropped to stay synced")
                             .WithType(ApplicationCommandOptionType.Integer)
                             .WithRequired(false))
                     .AddOption(

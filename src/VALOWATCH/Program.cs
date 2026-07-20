@@ -649,8 +649,14 @@ static class Program
         try
         {
             List<string> serverMessages = [];
-            server = ScreenStreamingServer.Start(
+            ScreenStreamOptions options = ScreenStreamOptions.Create(
                 ScreenCaptureTarget.FullScreen,
+                15,
+                65,
+                960,
+                ScreenStreamMethod.Mjpeg);
+            server = ScreenStreamingServer.Start(
+                options,
                 (message, exception) =>
                 {
                     string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
@@ -699,11 +705,13 @@ static class Program
 
         try
         {
+            const int diagnosticFramesPerSecond = 60;
             ScreenStreamOptions options = ScreenStreamOptions.Create(
                 ScreenCaptureTarget.FullScreen,
-                ScreenStreamingServer.MaximumFramesPerSecond,
+                diagnosticFramesPerSecond,
                 ScreenStreamingServer.MinimumJpegQuality,
-                ScreenStreamingServer.MinimumMaxWidth);
+                ScreenStreamingServer.MinimumMaxWidth,
+                ScreenStreamMethod.Mjpeg);
             string ffmpegPath = FfmpegToolProvider
                 .ResolveFfmpegPathAsync(
                     appPaths,
@@ -789,7 +797,7 @@ static class Program
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 contentTypeLooksLikeMjpeg &&
                 jpegStartMarkers > 0 &&
-                options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
+                options.FramesPerSecond == diagnosticFramesPerSecond;
 
             AppendDiagnosticLogLine(
                 logFilePath,
@@ -824,7 +832,7 @@ static class Program
         {
             ScreenStreamOptions options = ScreenStreamOptions.Create(
                 ScreenCaptureTarget.FullScreen,
-                ScreenStreamingServer.MaximumFramesPerSecond,
+                60,
                 90,
                 1280,
                 ScreenStreamMethod.H264Fmp4);
@@ -898,7 +906,7 @@ static class Program
                 fmp4KeyframeIntervalConfigured &&
                 contentTypeLooksLikeMp4 &&
                 streamLooksLikeFragmentedMp4 &&
-                options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
+                options.FramesPerSecond >= 60;
 
             AppendDiagnosticLogLine(
                 logFilePath,
@@ -941,7 +949,7 @@ static class Program
         {
             ScreenStreamOptions options = ScreenStreamOptions.Create(
                 ScreenCaptureTarget.FullScreen,
-                ScreenStreamingServer.MaximumFramesPerSecond,
+                60,
                 90,
                 1280,
                 ScreenStreamMethod.H264Hls);
@@ -983,7 +991,7 @@ static class Program
                 !pageHasVideoControls &&
                 playlistLooksLikeHls &&
                 segmentLooksLikeTransportStream &&
-                options.FramesPerSecond == ScreenStreamingServer.MaximumFramesPerSecond;
+                options.FramesPerSecond >= 60;
 
             AppendDiagnosticLogLine(
                 logFilePath,

@@ -9,13 +9,13 @@ namespace VALOWATCH;
 internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 {
     public const int MinimumFramesPerSecond = 1;
-    public const int DefaultFramesPerSecond = 15;
-    public const int MaximumFramesPerSecond = 60;
+    public const int DefaultFramesPerSecond = 60;
+    public const int MaximumFramesPerSecond = 120;
     public const long MinimumJpegQuality = 30L;
-    public const long DefaultJpegQuality = 65L;
+    public const long DefaultJpegQuality = 90L;
     public const long MaximumJpegQuality = 95L;
     public const int MinimumMaxWidth = 320;
-    public const int DefaultMaxWidth = 960;
+    public const int DefaultMaxWidth = 1920;
     public const int MaximumMaxWidth = 3840;
     public const double H264Fmp4TargetLatencySeconds = 0.8D;
     public const double H264Fmp4CatchUpLatencySeconds = 1.0D;
@@ -27,6 +27,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int H264Fmp4MinimumFragmentDurationMicroseconds = 100000;
     public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
+    public const int MjpegFfmpegThresholdFramesPerSecond = 60;
+    private const int FrameCaptureRetryCount = 3;
+    private static readonly TimeSpan FrameCaptureRetryDelay = TimeSpan.FromMilliseconds(8);
 
     private readonly TcpListener listener;
     private readonly CancellationTokenSource cancellationTokenSource = new();
@@ -41,6 +44,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private Process? hlsProcess;
     private FullScreenScreenshotFrame? cachedFrame;
     private DateTimeOffset cachedFrameAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastCaptureFailureLoggedAtUtc = DateTimeOffset.MinValue;
     private Task? acceptTask;
 
     private ScreenStreamingServer(
@@ -94,7 +98,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
     public static ScreenStreamingServer Start(ScreenCaptureTarget target, Action<string, Exception?> log)
     {
-        return Start(ScreenStreamOptions.Create(target), log);
+        return Start(ScreenStreamOptions.Create(target, method: ScreenStreamMethod.Mjpeg), log);
     }
 
     public static ScreenStreamingServer Start(ScreenStreamOptions options, Action<string, Exception?> log)
@@ -862,6 +866,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 await networkStream
                     .WriteAsync(copyBuffer.AsMemory(0, readByteCount), cancellationToken)
                     .ConfigureAwait(false);
+                await networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
                 copiedBytes += readByteCount;
             }
         }
@@ -1357,17 +1362,66 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 return cachedFrame;
             }
 
-            FullScreenScreenshotFrame nextFrame = await Task
-                .Run(() => FullScreenScreenshotCapture.CaptureToJpegBytes(capturePlan, JpegQuality), cancellationToken)
-                .ConfigureAwait(false);
-            cachedFrame = nextFrame;
-            cachedFrameAtUtc = DateTimeOffset.UtcNow;
-            return nextFrame;
+            Exception? captureException = null;
+            for (int attempt = 1; attempt <= FrameCaptureRetryCount; attempt++)
+            {
+                try
+                {
+                    FullScreenScreenshotFrame nextFrame = await Task
+                        .Run(() => FullScreenScreenshotCapture.CaptureToJpegBytes(capturePlan, JpegQuality), cancellationToken)
+                        .ConfigureAwait(false);
+                    cachedFrame = nextFrame;
+                    cachedFrameAtUtc = DateTimeOffset.UtcNow;
+                    return nextFrame;
+                }
+                catch (Exception exception) when (IsTransientCaptureException(exception))
+                {
+                    captureException = exception;
+                    if (attempt < FrameCaptureRetryCount)
+                    {
+                        await Task.Delay(FrameCaptureRetryDelay, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+
+            if (cachedFrame is not null)
+            {
+                cachedFrameAtUtc = DateTimeOffset.UtcNow;
+                LogCaptureFailureThrottled(
+                    "Screen capture failed after retries; reusing the last captured frame to keep the stream connected.",
+                    captureException);
+
+                return cachedFrame;
+            }
+
+            if (captureException is not null)
+            {
+                throw captureException;
+            }
+
+            throw new InvalidOperationException("Screen capture failed without a captured frame.");
         }
         finally
         {
             frameSemaphore.Release();
         }
+    }
+
+    private static bool IsTransientCaptureException(Exception exception)
+    {
+        return exception is InvalidOperationException or ExternalException or System.ComponentModel.Win32Exception;
+    }
+
+    private void LogCaptureFailureThrottled(string message, Exception? exception)
+    {
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc - lastCaptureFailureLoggedAtUtc <= TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+
+        lastCaptureFailureLoggedAtUtc = nowUtc;
+        log(message, exception);
     }
 
     private static async Task WritePlainTextResponseAsync(
@@ -1408,6 +1462,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         await networkStream
             .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
             .ConfigureAwait(false);
+        await networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task WriteMjpegResponseHeaderAsync(
@@ -1518,15 +1573,15 @@ internal readonly record struct ScreenStreamOptions(
     ScreenStreamMethod Method)
 {
     public bool RequiresFfmpeg =>
-        Method != ScreenStreamMethod.Mjpeg ||
-        FramesPerSecond >= ScreenStreamingServer.MaximumFramesPerSecond;
+        Method is ScreenStreamMethod.H264Fmp4 or ScreenStreamMethod.H264Hls ||
+        Method == ScreenStreamMethod.Mjpeg && FramesPerSecond >= ScreenStreamingServer.MjpegFfmpegThresholdFramesPerSecond;
 
     public static ScreenStreamOptions Create(
         ScreenCaptureTarget target,
         int framesPerSecond = ScreenStreamingServer.DefaultFramesPerSecond,
         long jpegQuality = ScreenStreamingServer.DefaultJpegQuality,
         int maxWidth = ScreenStreamingServer.DefaultMaxWidth,
-        ScreenStreamMethod method = ScreenStreamMethod.Mjpeg)
+        ScreenStreamMethod method = ScreenStreamMethod.H264Fmp4)
     {
         return new ScreenStreamOptions(
             target,
@@ -1576,7 +1631,7 @@ internal static class ScreenStreamMethodNames
 
     public static bool TryParse(string? text, out ScreenStreamMethod method)
     {
-        method = ScreenStreamMethod.Mjpeg;
+        method = ScreenStreamMethod.H264Fmp4;
         if (string.IsNullOrWhiteSpace(text))
         {
             return false;

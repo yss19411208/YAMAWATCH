@@ -131,9 +131,9 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 
 Cloudflare Quick TunnelのURLは一時URLです。`trycloudflare.com` がNXDOMAINになるなど公開URLへ到達できなくなった場合、VALOWATCHは15秒ごとに疎通確認し、2回連続で失敗したら同じ配信設定でトンネルを作り直します。新しいURLはDiscordへ「VALOWATCH 配信URL更新」として送信されるため、古いURLではなく最新メッセージのURLを開いてください。
 
-配信方式は `method` で選べます。指定しない場合は高画質・低遅延向けの `h264-fmp4` です。回線が不安定な場合は少し遅延が増えますが `h264-hls` を使ってください。HLSページはブラウザ互換用に `hls.js` をCDNから読み込みます。古いブラウザやH.264がうまく再生されない場合だけ互換用の `mjpeg` を使います。
+配信方式は `method` で選べます。指定しない場合は、高画質・60fps以上・低遅延補正を優先する `h264-fmp4` です。fMP4ページは100msごとにライブ端との差を見て、遅延が増えた場合は再生速度補正、ライブ端へのシーク、または再接続で古いバッファを捨てます。少し遅延が増えても安定寄りにしたい場合は `h264-hls` を使ってください。HLSページはブラウザ互換用に `hls.js` をCDNから読み込みます。古いブラウザやH.264がうまく再生されない場合だけ互換用の `mjpeg` を使います。
 
-高画質寄りの例は `/stream on target:valorant method:h264-fmp4 fps:60 quality:90 width:1920` です。安定寄りの例は `/stream on target:valorant method:h264-hls fps:60 quality:90 width:1920` です。軽くしたい場合は `width:1280` や `fps:30` に下げてください。互換用MJPEGは `/stream on target:valorant method:mjpeg fps:60 quality:30 width:320` です。指定しない場合は `.env` の `VALOWATCH_STREAM_DEFAULT_FPS`、`VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY`、`VALOWATCH_STREAM_DEFAULT_WIDTH` を使い、未設定なら15fps/品質65/横幅960pxで開始します。
+高画質・同期優先の例は `/stream on target:valorant method:h264-fmp4 fps:60 quality:90 width:1920` です。PCと回線に余裕がある場合は `fps:120` まで指定できます。安定寄りの例は `/stream on target:valorant method:h264-hls fps:60 quality:90 width:1920` です。軽くしたい場合は `width:1280` や `fps:30` に下げてください。互換用MJPEGは `/stream on target:valorant method:mjpeg fps:60 quality:30 width:320` です。指定しない場合は `.env` の `VALOWATCH_STREAM_DEFAULT_FPS`、`VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY`、`VALOWATCH_STREAM_DEFAULT_WIDTH` を使い、未設定なら60fps/品質90/横幅1920pxの `h264-fmp4` で開始します。
 
 配布先PCにFFmpegが入っていなくても、GitHub Actionsで作る更新版 `VALOWATCH_App.exe` にはWindows用FFmpegが埋め込まれます。`h264-fmp4`、`h264-hls`、または `mjpeg fps:60` で開始するとVALOWATCHが埋め込みFFmpegを `data\tools\ffmpeg\ffmpeg.exe` へ展開します。H.264配信はFFmpegの `gdigrab` と `libx264` を使い、MJPEGより滑らかさと画質を優先します。ローカル開発版など埋め込みFFmpegが無い場合だけ、Windows用FFmpeg essentials ZIPを取得してSHA-256確認後に配置します。
 
