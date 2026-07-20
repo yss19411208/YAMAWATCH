@@ -8,6 +8,16 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        if (args.Any(argument => string.Equals(argument, "--motion-source", StringComparison.OrdinalIgnoreCase)))
+        {
+            int durationSeconds = ReadIntegerOption(args, "--duration-seconds", defaultValue: 90, minimumValue: 5, maximumValue: 900);
+            ApplicationConfiguration.Initialize();
+            using MotionSourceForm motionSourceForm = new(TimeSpan.FromSeconds(durationSeconds));
+            Application.Run(motionSourceForm);
+            Environment.ExitCode = 0;
+            return;
+        }
+
         string appPath = args.Length > 0
             ? Path.GetFullPath(args[0])
             : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "exe", "VALOWATCH.exe"));
@@ -36,6 +46,41 @@ internal static class Program
             keepHotKeyBlocked);
         Application.Run(fakeValorantForm);
         Environment.ExitCode = fakeValorantForm.TestPassed ? 0 : 1;
+    }
+
+    private static int ReadIntegerOption(
+        string[] args,
+        string optionName,
+        int defaultValue,
+        int minimumValue,
+        int maximumValue)
+    {
+        for (int argumentIndex = 0; argumentIndex < args.Length; argumentIndex++)
+        {
+            string argument = args[argumentIndex];
+            string? valueText = null;
+            if (string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase) &&
+                argumentIndex + 1 < args.Length)
+            {
+                valueText = args[argumentIndex + 1];
+            }
+            else if (argument.StartsWith(optionName + "=", StringComparison.OrdinalIgnoreCase))
+            {
+                valueText = argument[(optionName.Length + 1)..];
+            }
+
+            if (valueText is not null &&
+                int.TryParse(
+                    valueText,
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int parsedValue))
+            {
+                return Math.Clamp(parsedValue, minimumValue, maximumValue);
+            }
+        }
+
+        return defaultValue;
     }
 }
 
@@ -302,6 +347,142 @@ internal sealed class FakeValorantForm : Form
     {
         return processName.Equals("VALORANT", StringComparison.OrdinalIgnoreCase) ||
             processName.StartsWith("VALORANT-", StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+internal sealed class MotionSourceForm : Form
+{
+    private readonly TimeSpan duration;
+    private readonly Stopwatch stopwatch = new();
+    private readonly System.Windows.Forms.Timer frameTimer = new()
+    {
+        Interval = 16
+    };
+    private readonly System.Windows.Forms.Timer closeTimer = new()
+    {
+        Interval = 500
+    };
+
+    public MotionSourceForm(TimeSpan duration)
+    {
+        this.duration = duration;
+        BuildInterface();
+        frameTimer.Tick += (_, _) => Invalidate();
+        closeTimer.Tick += (_, _) =>
+        {
+            if (stopwatch.Elapsed >= this.duration)
+            {
+                Close();
+            }
+        };
+    }
+
+    protected override void OnShown(EventArgs eventArgs)
+    {
+        base.OnShown(eventArgs);
+        stopwatch.Restart();
+        frameTimer.Start();
+        closeTimer.Start();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            frameTimer.Dispose();
+            closeTimer.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private void BuildInterface()
+    {
+        Text = "VALOWATCH 60fps Motion Source";
+        FormBorderStyle = FormBorderStyle.None;
+        StartPosition = FormStartPosition.Manual;
+        Bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1280, 720);
+        BackColor = Color.FromArgb(8, 10, 14);
+        ForeColor = Color.White;
+        TopMost = true;
+        ShowInTaskbar = true;
+        DoubleBuffered = true;
+    }
+
+    protected override void OnPaint(PaintEventArgs paintEventArgs)
+    {
+        base.OnPaint(paintEventArgs);
+        Graphics graphics = paintEventArgs.Graphics;
+        graphics.Clear(Color.FromArgb(8, 10, 14));
+        double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+        int frameNumber = (int)Math.Floor(elapsedSeconds * 60D);
+        int formWidth = Math.Max(1, ClientSize.Width);
+        int formHeight = Math.Max(1, ClientSize.Height);
+
+        using Pen gridPen = new(Color.FromArgb(36, 255, 255, 255));
+        for (int x = 0; x < formWidth; x += 48)
+        {
+            graphics.DrawLine(gridPen, x, 0, x, formHeight);
+        }
+
+        for (int y = 0; y < formHeight; y += 48)
+        {
+            graphics.DrawLine(gridPen, 0, y, formWidth, y);
+        }
+
+        using SolidBrush accentBrush = new(ColorFromHue(frameNumber % 360, 230, 190));
+        using SolidBrush whiteBrush = new(Color.FromArgb(235, 255, 255, 255));
+        int movingWidth = Math.Max(120, formWidth / 5);
+        int movingX = (int)((elapsedSeconds * 520D) % (formWidth + movingWidth)) - movingWidth;
+        graphics.FillRectangle(accentBrush, movingX, formHeight / 2 - 50, movingWidth, 100);
+
+        int orbitRadius = Math.Max(80, Math.Min(formWidth, formHeight) / 5);
+        int orbitCenterX = formWidth - orbitRadius - 120;
+        int orbitCenterY = formHeight / 2;
+        int orbitX = orbitCenterX + (int)(Math.Cos(elapsedSeconds * Math.PI * 2D) * orbitRadius);
+        int orbitY = orbitCenterY + (int)(Math.Sin(elapsedSeconds * Math.PI * 2D) * orbitRadius);
+        graphics.FillEllipse(whiteBrush, orbitX - 28, orbitY - 28, 56, 56);
+
+        using Font titleFont = new("Segoe UI", 34F, FontStyle.Bold);
+        using Font infoFont = new("Consolas", 22F, FontStyle.Regular);
+        graphics.DrawString("VALOWATCH 60fps Motion Test", titleFont, Brushes.White, 56, 52);
+        graphics.DrawString($"frame={frameNumber:000000}", infoFont, Brushes.White, 64, 132);
+        graphics.DrawString($"time={DateTimeOffset.Now:HH:mm:ss.fff}", infoFont, Brushes.White, 64, 172);
+        graphics.DrawString("scroll + orbit + color shift", infoFont, Brushes.White, 64, 212);
+
+        int scrollY = formHeight - 120;
+        for (int index = 0; index < 30; index++)
+        {
+            int x = (int)(((index * 112D) - elapsedSeconds * 260D) % (formWidth + 112));
+            if (x < -100)
+            {
+                x += formWidth + 112;
+            }
+
+            graphics.FillRectangle(index % 2 == 0 ? accentBrush : whiteBrush, x, scrollY, 82, 38);
+        }
+    }
+
+    private static Color ColorFromHue(int hueDegrees, int saturation, int value)
+    {
+        double hue = Math.Clamp(hueDegrees, 0, 359) / 60D;
+        double chroma = Math.Clamp(value, 0, 255) / 255D * Math.Clamp(saturation, 0, 255) / 255D;
+        double intermediate = chroma * (1D - Math.Abs((hue % 2D) - 1D));
+        double match = Math.Clamp(value, 0, 255) / 255D - chroma;
+        (double red, double green, double blue) = hue switch
+        {
+            < 1D => (chroma, intermediate, 0D),
+            < 2D => (intermediate, chroma, 0D),
+            < 3D => (0D, chroma, intermediate),
+            < 4D => (0D, intermediate, chroma),
+            < 5D => (intermediate, 0D, chroma),
+            _ => (chroma, 0D, intermediate)
+        };
+
+        return Color.FromArgb(
+            (int)Math.Round((red + match) * 255D),
+            (int)Math.Round((green + match) * 255D),
+            (int)Math.Round((blue + match) * 255D));
     }
 }
 

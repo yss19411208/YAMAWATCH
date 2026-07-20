@@ -2495,6 +2495,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
+                $"{BuildStreamSmoothLiveStatusText(session)}" +
                 $"{BuildStreamPublicUrlStatusText(session)}{Environment.NewLine}" +
                 "停止: /stream off",
             Color = new Discord.Color(88, 166, 255),
@@ -2514,6 +2515,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"対象: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                $"{BuildStreamSmoothLiveStatusText(session)}" +
                 BuildStreamPublicUrlStatusText(session),
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
@@ -2549,12 +2551,25 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 $"URL: {session.PublicUrl}{Environment.NewLine}" +
+                $"{BuildStreamSmoothLiveStatusText(session)}" +
                 $"{BuildStreamPublicUrlStatusText(session)}{Environment.NewLine}" +
                 $"トンネル: {session.TunnelProcessStatusText}{Environment.NewLine}" +
                 $"開始: {session.StartedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
         }
 
         return embedBuilder.Build();
+    }
+
+    private static string BuildStreamSmoothLiveStatusText(ScreenStreamSession session)
+    {
+        if (session.Method != ScreenStreamMethod.H264Fmp4)
+        {
+            return string.Empty;
+        }
+
+        return
+            $"遅延目標: {ScreenStreamingServer.H264Fmp4TargetLatencySeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}秒固定 / Smooth Live{Environment.NewLine}" +
+            $"{session.SmoothLiveStatusText}{Environment.NewLine}";
     }
 
     private static string BuildStreamPublicUrlStatusText(ScreenStreamSession session)

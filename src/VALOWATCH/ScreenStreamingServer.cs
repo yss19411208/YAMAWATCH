@@ -19,24 +19,37 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MinimumMaxWidth = 320;
     public const int DefaultMaxWidth = 1920;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 0.45D;
-    public const double H264Fmp4CatchUpLatencySeconds = 0.65D;
-    public const double H264Fmp4MaximumLatencySeconds = 1.25D;
-    public const int H264Fmp4LatencyCheckIntervalMilliseconds = 80;
-    public const int H264Fmp4SeekCooldownMilliseconds = 450;
-    public const int H264Fmp4ReconnectStallMilliseconds = 900;
-    public const int H264Fmp4FragmentDurationMicroseconds = 120000;
-    public const int H264Fmp4MinimumFragmentDurationMicroseconds = 80000;
-    public const int H264Fmp4InitialFragmentCount = 1;
-    public const int H264Fmp4RetainedFragmentCount = 24;
-    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 800;
-    public const double H264KeyframeIntervalSeconds = 0.25D;
+    public const double H264Fmp4TargetLatencySeconds = 2.5D;
+    public const double H264Fmp4MinimumSmoothLatencySeconds = 2.05D;
+    public const double H264Fmp4CatchUpLatencySeconds = 2.75D;
+    public const double H264Fmp4MaximumLatencySeconds = 3.0D;
+    public const double H264Fmp4RestartLatencySeconds = 4.2D;
+    public const int H264Fmp4LatencyCheckIntervalMilliseconds = 250;
+    public const int H264Fmp4SeekCooldownMilliseconds = 1500;
+    public const int H264Fmp4ReconnectStallMilliseconds = 2500;
+    public const int H264Fmp4FragmentDurationMicroseconds = 500000;
+    public const int H264Fmp4MinimumFragmentDurationMicroseconds = 250000;
+    public const int H264Fmp4InitialFragmentCount = 6;
+    public const int H264Fmp4RetainedFragmentCount = 42;
+    public const int H264Fmp4MaximumAppendQueueLength = 45;
+    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 1500;
+    public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
     public const int MjpegFfmpegThresholdFramesPerSecond = 60;
     private const int FrameCaptureRetryCount = 3;
     private const long MaximumFmp4BoxBytes = 64L * 1024L * 1024L;
     private static readonly TimeSpan FrameCaptureRetryDelay = TimeSpan.FromMilliseconds(8);
     private static readonly TimeSpan Fmp4StartupTimeout = TimeSpan.FromSeconds(8);
+    private static readonly object H264EncoderSelectionSyncRoot = new();
+    private static readonly H264EncoderProfile Libx264EncoderProfile = new("libx264", "libx264", UsesCrf: true, []);
+    private static readonly H264EncoderProfile[] HardwareH264EncoderProfiles =
+    [
+        new("h264_amf", "h264_amf", UsesCrf: false, ["-usage", "lowlatency", "-quality", "speed"]),
+        new("h264_qsv", "h264_qsv", UsesCrf: false, ["-preset", "veryfast"]),
+        new("h264_nvenc", "h264_nvenc", UsesCrf: false, ["-preset", "p1"])
+    ];
+    private static bool h264EncoderSelectionWasTested;
+    private static H264EncoderProfile? selectedHardwareH264EncoderProfile;
 
     private readonly TcpListener listener;
     private readonly CancellationTokenSource cancellationTokenSource = new();
@@ -47,10 +60,13 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly TimeSpan frameInterval;
     private readonly ScreenCapturePlan capturePlan;
     private readonly string? ffmpegPath;
+    private readonly H264EncoderProfile h264EncoderProfile;
     private readonly string streamWorkDirectory;
     private readonly string? hlsDirectory;
     private Process? hlsProcess;
     private Fmp4LiveFragmentSource? fmp4LiveFragmentSource;
+    private int activeFmp4WebSocketClientCount;
+    private long lastFmp4FragmentSequence = -1L;
     private FullScreenScreenshotFrame? cachedFrame;
     private DateTimeOffset cachedFrameAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastCaptureFailureLoggedAtUtc = DateTimeOffset.MinValue;
@@ -70,6 +86,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         this.ffmpegPath = string.IsNullOrWhiteSpace(ffmpegPath) ? null : ffmpegPath;
         this.streamWorkDirectory = streamWorkDirectory;
         this.log = log;
+        h264EncoderProfile = options.Method is ScreenStreamMethod.H264Fmp4 or ScreenStreamMethod.H264Hls
+            ? SelectH264EncoderProfile(this.ffmpegPath, log)
+            : Libx264EncoderProfile;
         token = Guid.NewGuid().ToString("N");
         hlsDirectory = options.Method == ScreenStreamMethod.H264Hls
             ? Path.Combine(streamWorkDirectory, $"hls-{token}")
@@ -104,6 +123,37 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public string LocalOrigin { get; }
 
     public string PublicPath { get; }
+
+    public string SmoothLiveStatusText
+    {
+        get
+        {
+            if (Options.Method != ScreenStreamMethod.H264Fmp4)
+            {
+                return "Smooth Live: disabled";
+            }
+
+            int activeWebSocketClients = Volatile.Read(ref activeFmp4WebSocketClientCount);
+            long latestSequence = Volatile.Read(ref lastFmp4FragmentSequence);
+            int bufferedFragments = 0;
+            lock (fmp4LiveStreamSyncRoot)
+            {
+                if (fmp4LiveFragmentSource is not null)
+                {
+                    latestSequence = Math.Max(latestSequence, fmp4LiveFragmentSource.LatestSequence);
+                    bufferedFragments = fmp4LiveFragmentSource.BufferedFragmentCount;
+                }
+            }
+
+            string latestSequenceText = latestSequence >= 0
+                ? latestSequence.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "warming-up";
+            return
+                $"Smooth Live: {H264Fmp4TargetLatencySeconds.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}s fixed. " +
+                $"WebSocket: {activeWebSocketClients}. MSE: enabled. " +
+                $"BufferedFragments: {bufferedFragments}. LatestFragment: {latestSequenceText}.";
+        }
+    }
 
     public static ScreenStreamingServer Start(ScreenCaptureTarget target, Action<string, Exception?> log)
     {
@@ -472,11 +522,14 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
                 ? "<video id=\"screen\" autoplay muted playsinline></video>"
                 : "<video id=\"screen\" autoplay muted playsinline></video>";
         string targetLatencySecondsText = H264Fmp4TargetLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+        string minimumSmoothLatencySecondsText = H264Fmp4MinimumSmoothLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string catchUpLatencySecondsText = H264Fmp4CatchUpLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string maximumLatencySecondsText = H264Fmp4MaximumLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+        string restartLatencySecondsText = H264Fmp4RestartLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string latencyCheckIntervalMillisecondsText = H264Fmp4LatencyCheckIntervalMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string seekCooldownMillisecondsText = H264Fmp4SeekCooldownMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string reconnectStallMillisecondsText = H264Fmp4ReconnectStallMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string maximumAppendQueueLengthText = H264Fmp4MaximumAppendQueueLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string mediaScript = Options.Method switch
         {
             ScreenStreamMethod.H264Hls => $$"""
@@ -504,14 +557,18 @@ const liveFragmentPathPrefix = '{{liveFragmentPathPrefixJavaScript}}';
 const liveWebSocketPath = '{{liveWebSocketPathJavaScript}}';
 const fmp4MimeType = '{{h264MimeTypeJavaScript}}';
 const targetLatencySeconds = {{targetLatencySecondsText}};
+const minimumSmoothLatencySeconds = {{minimumSmoothLatencySecondsText}};
 const catchUpLatencySeconds = {{catchUpLatencySecondsText}};
 const maximumLatencySeconds = {{maximumLatencySecondsText}};
+const restartLatencySeconds = {{restartLatencySecondsText}};
 const latencyCheckMilliseconds = {{latencyCheckIntervalMillisecondsText}};
 const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
 const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
+const maximumAppendQueueLength = {{maximumAppendQueueLengthText}};
 let lastSeekAtMilliseconds = -seekCooldownMilliseconds;
 let lastPlayAttemptAtMilliseconds = 0;
 let lastReconnectAtMilliseconds = 0;
+let lastUnderflowReconnectAtMilliseconds = 0;
 let lastPlaybackTime = 0;
 let lastPlaybackMovedAtMilliseconds = performance.now();
 let lastFragmentReceivedAtMilliseconds = performance.now();
@@ -527,6 +584,23 @@ let activeStreamSession = 0;
 let activeFetchAbortController = null;
 let activeFmp4WebSocket = null;
 let directFallbackActive = false;
+const streamMetrics = window.valowatchStreamMetrics = {
+  mode: 'smooth-live',
+  targetLatencySeconds,
+  minimumSmoothLatencySeconds,
+  maximumLatencySeconds,
+  websocketConnected: false,
+  appendedSegments: 0,
+  reconnectCount: 0,
+  mseRestartCount: 0,
+  queueOverflowCount: 0,
+  stallCount: 0,
+  waitingCount: 0,
+  playbackStartCount: 0,
+  lastLatencySeconds: null,
+  maxLatencySecondsSeen: 0,
+  lastPlaybackRate: 1
+};
 screenVideo.preload = 'auto';
 screenVideo.controls = false;
 screenVideo.muted = true;
@@ -604,6 +678,28 @@ function readFmp4LatencySeconds() {
 
   return { bufferedEnd, latencySeconds };
 }
+function updateFmp4Metrics(latencyState = readFmp4LatencySeconds()) {
+  if (latencyState) {
+    streamMetrics.lastLatencySeconds = latencyState.latencySeconds;
+    streamMetrics.maxLatencySecondsSeen = Math.max(streamMetrics.maxLatencySecondsSeen || 0, latencyState.latencySeconds);
+  }
+
+  streamMetrics.lastPlaybackRate = screenVideo.playbackRate;
+  streamMetrics.paused = screenVideo.paused;
+  streamMetrics.readyState = screenVideo.readyState;
+  streamMetrics.queueLength = appendQueue.length;
+  streamMetrics.mseReadyState = mediaSource ? mediaSource.readyState : 'none';
+  streamMetrics.sourceBufferUpdating = !!(sourceBuffer && sourceBuffer.updating);
+}
+function hasFmp4SmoothStartupBuffer() {
+  if (directFallbackActive) {
+    return true;
+  }
+
+  const latencyState = readFmp4LatencySeconds();
+  updateFmp4Metrics(latencyState);
+  return !!latencyState && latencyState.latencySeconds >= targetLatencySeconds;
+}
 function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds) {
   if (nowMilliseconds - lastSeekAtMilliseconds < seekCooldownMilliseconds) {
     return false;
@@ -639,6 +735,7 @@ function reconnectFmp4Stream(forceReconnect = false) {
   lastReconnectAtMilliseconds = nowMilliseconds;
   lastPlaybackMovedAtMilliseconds = nowMilliseconds;
   lastFragmentReceivedAtMilliseconds = nowMilliseconds;
+  streamMetrics.reconnectCount += 1;
   reconnectNonce += 1;
   screenVideo.playbackRate = 1;
   appendQueue = [];
@@ -702,6 +799,7 @@ function keepFmp4LatencyLow() {
   const nowMilliseconds = performance.now();
   markFmp4PlaybackMovement(nowMilliseconds);
   const latencyState = readFmp4LatencySeconds();
+  updateFmp4Metrics(latencyState);
   if (!latencyState) {
     if (!screenVideo.paused && nowMilliseconds - lastPlaybackMovedAtMilliseconds > reconnectStallMilliseconds) {
       reconnectFmp4Stream();
@@ -711,14 +809,28 @@ function keepFmp4LatencyLow() {
   }
 
   const { bufferedEnd, latencySeconds } = latencyState;
+  if (!directFallbackActive &&
+      latencySeconds < Math.max(0.45, minimumSmoothLatencySeconds - 1.65) &&
+      nowMilliseconds - lastUnderflowReconnectAtMilliseconds > Math.max(12000, reconnectStallMilliseconds + 9500)) {
+    lastUnderflowReconnectAtMilliseconds = nowMilliseconds;
+    reconnectFmp4Stream(true);
+    return;
+  }
+
+  if (latencySeconds > restartLatencySeconds && !directFallbackActive) {
+    reconnectFmp4Stream(true);
+    return;
+  }
+
   if (latencySeconds > maximumLatencySeconds) {
     const seeked = seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds);
-    if (!seeked && !directFallbackActive) {
+    if (!seeked && !directFallbackActive && latencySeconds > restartLatencySeconds) {
       reconnectFmp4Stream();
       return;
     }
 
-    screenVideo.playbackRate = seeked ? 1 : 1.30;
+    screenVideo.playbackRate = seeked ? 1 : 1.04;
+    updateFmp4Metrics(latencyState);
     return;
   }
 
@@ -730,20 +842,29 @@ function keepFmp4LatencyLow() {
   }
 
   if (!directFallbackActive &&
-      nowMilliseconds - lastFragmentReceivedAtMilliseconds > Math.max(1600, reconnectStallMilliseconds + 450)) {
+      nowMilliseconds - lastFragmentReceivedAtMilliseconds > Math.max(3500, reconnectStallMilliseconds + 1000)) {
     reconnectFmp4Stream();
     return;
   }
 
-  if (latencySeconds > catchUpLatencySeconds + 0.9) {
-    screenVideo.playbackRate = 1.25;
-  } else if (latencySeconds > catchUpLatencySeconds + 0.35) {
-    screenVideo.playbackRate = 1.15;
+  if (latencySeconds > catchUpLatencySeconds + 0.55) {
+    screenVideo.playbackRate = 1.04;
+  } else if (latencySeconds > catchUpLatencySeconds + 0.15) {
+    screenVideo.playbackRate = 1.02;
   } else if (latencySeconds > catchUpLatencySeconds) {
-    screenVideo.playbackRate = 1.06;
+    screenVideo.playbackRate = 1.01;
+  } else if (latencySeconds < minimumSmoothLatencySeconds - 1.25) {
+    screenVideo.playbackRate = 0.82;
+  } else if (latencySeconds < minimumSmoothLatencySeconds - 0.80) {
+    screenVideo.playbackRate = 0.90;
+  } else if (latencySeconds < minimumSmoothLatencySeconds - 0.35) {
+    screenVideo.playbackRate = 0.96;
+  } else if (latencySeconds < minimumSmoothLatencySeconds) {
+    screenVideo.playbackRate = 0.985;
   } else {
     screenVideo.playbackRate = 1;
   }
+  updateFmp4Metrics(latencyState);
 }
 async function keepFmp4Playing(forcePlay = false) {
   if (isFmp4PageHidden()) {
@@ -759,15 +880,21 @@ async function keepFmp4Playing(forcePlay = false) {
     return;
   }
 
+  if (!hasFmp4SmoothStartupBuffer()) {
+    return;
+  }
+
   lastPlayAttemptAtMilliseconds = nowMilliseconds;
   try {
     await screenVideo.play();
+    streamMetrics.playbackStartCount += 1;
   } catch {
   }
 }
 function closeFmp4WebSocket() {
   const socket = activeFmp4WebSocket;
   activeFmp4WebSocket = null;
+  streamMetrics.websocketConnected = false;
   if (!socket) {
     return;
   }
@@ -802,8 +929,11 @@ function queueFmp4Bytes(bytes) {
   }
 
   appendQueue.push(bytes);
-  if (appendQueue.length > 6) {
-    appendQueue.splice(1, appendQueue.length - 4);
+  streamMetrics.queueLength = appendQueue.length;
+  if (appendQueue.length > maximumAppendQueueLength) {
+    streamMetrics.queueOverflowCount += 1;
+    reconnectFmp4Stream(true);
+    return;
   }
 
   pumpFmp4AppendQueue();
@@ -816,6 +946,8 @@ function pumpFmp4AppendQueue() {
   const nextBytes = appendQueue.shift();
   try {
     sourceBuffer.appendBuffer(nextBytes);
+    streamMetrics.appendedSegments += 1;
+    streamMetrics.queueLength = appendQueue.length;
   } catch {
     reconnectFmp4Stream(true);
   }
@@ -944,6 +1076,9 @@ function startWebSocketFmp4Live(session) {
   const socket = new WebSocket(buildFmp4WebSocketUrl());
   activeFmp4WebSocket = socket;
   socket.binaryType = 'arraybuffer';
+  socket.onopen = () => {
+    streamMetrics.websocketConnected = true;
+  };
   socket.onmessage = async event => {
     if (session !== activeStreamSession || isFmp4PageHidden()) {
       try {
@@ -965,7 +1100,7 @@ function startWebSocketFmp4Live(session) {
     receivedMessages += 1;
     lastFragmentReceivedAtMilliseconds = performance.now();
     queueFmp4Bytes(bytes);
-    keepFmp4Playing(true);
+    keepFmp4Playing();
     keepFmp4LatencyLow();
   };
   socket.onerror = () => {
@@ -974,6 +1109,7 @@ function startWebSocketFmp4Live(session) {
     if (activeFmp4WebSocket === socket) {
       activeFmp4WebSocket = null;
     }
+    streamMetrics.websocketConnected = false;
 
     if (session !== activeStreamSession || isFmp4PageHidden()) {
       return;
@@ -1004,6 +1140,8 @@ async function startMseFmp4Live() {
   appendQueue = [];
   nextFragmentSequence = 0;
   activeFetchAbortController = null;
+  streamMetrics.mseRestartCount += 1;
+  streamMetrics.queueLength = 0;
   mediaSource = new MediaSource();
   sourceObjectUrl = URL.createObjectURL(mediaSource);
   screenVideo.src = sourceObjectUrl;
@@ -1062,8 +1200,14 @@ screenVideo.addEventListener('playing', () => {
 });
 screenVideo.addEventListener('progress', keepFmp4LatencyLow);
 screenVideo.addEventListener('timeupdate', keepFmp4LatencyLow);
-screenVideo.addEventListener('waiting', () => window.setTimeout(keepFmp4LatencyLow, 250));
-screenVideo.addEventListener('stalled', reconnectFmp4Stream);
+screenVideo.addEventListener('waiting', () => {
+  streamMetrics.waitingCount += 1;
+  window.setTimeout(keepFmp4LatencyLow, 500);
+});
+screenVideo.addEventListener('stalled', () => {
+  streamMetrics.stallCount += 1;
+  window.setTimeout(keepFmp4LatencyLow, 700);
+});
 screenVideo.addEventListener('seeked', keepFmp4LatencyLow);
 screenVideo.addEventListener('ended', reconnectFmp4Stream);
 document.addEventListener('visibilitychange', () => {
@@ -1488,6 +1632,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         int copiedMessages = 0;
         DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
         bool responseHeaderSent = false;
+        bool activeClientCountIncremented = false;
         try
         {
             Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
@@ -1510,6 +1655,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
             await WriteWebSocketSwitchingProtocolsResponseAsync(networkStream, acceptKey, cancellationToken).ConfigureAwait(false);
             responseHeaderSent = true;
+            Interlocked.Increment(ref activeFmp4WebSocketClientCount);
+            activeClientCountIncremented = true;
             await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, snapshot.InitSegment, cancellationToken).ConfigureAwait(false);
             copiedBytes += snapshot.InitSegment.Length;
             copiedMessages++;
@@ -1518,6 +1665,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             foreach (Fmp4Fragment fragment in snapshot.Fragments)
             {
                 await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
+                Volatile.Write(ref lastFmp4FragmentSequence, Math.Max(Volatile.Read(ref lastFmp4FragmentSequence), fragment.Sequence));
                 copiedBytes += fragment.Bytes.Length;
                 copiedMessages++;
                 nextFragmentSequence = Math.Max(nextFragmentSequence, fragment.Sequence + 1L);
@@ -1529,6 +1677,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                     .WaitForFragmentAsync(nextFragmentSequence, TimeSpan.FromSeconds(3), cancellationToken)
                     .ConfigureAwait(false);
                 await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
+                Volatile.Write(ref lastFmp4FragmentSequence, fragment.Sequence);
                 copiedBytes += fragment.Bytes.Length;
                 copiedMessages++;
                 nextFragmentSequence = fragment.Sequence + 1L;
@@ -1561,6 +1710,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
         finally
         {
+            if (activeClientCountIncremented)
+            {
+                Interlocked.Decrement(ref activeFmp4WebSocketClientCount);
+            }
+
             double elapsedSeconds = Math.Max(0.001D, (DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds);
             log(
                 "fMP4 WebSocket screen stream connection closed. " +
@@ -1819,7 +1973,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
-            $"CRF: {ToH264Crf(JpegQuality)}. " +
+            $"Encoder: {h264EncoderProfile.DisplayName}. " +
+            $"{BuildH264QualityLogText()}. " +
             $"Profile: high. Level: {GetH264LevelText()}. MimeCodec: {GetH264MimeCodec()}. " +
             $"GopFrames: {GetH264GroupOfPicturesSize()}. " +
             $"FragmentDurationUs: {H264Fmp4FragmentDurationMicroseconds}. " +
@@ -1832,6 +1987,16 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"RetainedFragments: {H264Fmp4RetainedFragmentCount}. InitialFragments: {H264Fmp4InitialFragmentCount}.",
             null);
         return process;
+    }
+
+    private string BuildH264QualityLogText()
+    {
+        if (h264EncoderProfile.UsesCrf)
+        {
+            return $"CRF: {ToH264Crf(JpegQuality)}";
+        }
+
+        return $"BitrateKbps: {ToH264HardwareBitrateKbps(JpegQuality, FramesPerSecond)}";
     }
 
     private void StartHlsEncoder()
@@ -1887,7 +2052,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
-            $"CRF: {ToH264Crf(JpegQuality)}. Playlist: {playlistPath}.",
+            $"Encoder: {h264EncoderProfile.DisplayName}. {BuildH264QualityLogText()}. Playlist: {playlistPath}.",
             null);
         return process;
     }
@@ -1907,12 +2072,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("-loglevel");
         startInfo.ArgumentList.Add("warning");
         startInfo.ArgumentList.Add("-nostdin");
-        startInfo.ArgumentList.Add("-fflags");
-        startInfo.ArgumentList.Add("nobuffer");
         startInfo.ArgumentList.Add("-probesize");
-        startInfo.ArgumentList.Add("32");
+        startInfo.ArgumentList.Add("1000000");
         startInfo.ArgumentList.Add("-analyzeduration");
-        startInfo.ArgumentList.Add("0");
+        startInfo.ArgumentList.Add("1000000");
         return startInfo;
     }
 
@@ -1929,6 +2092,114 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
 
         return process;
+    }
+
+    private static H264EncoderProfile SelectH264EncoderProfile(string? ffmpegPath, Action<string, Exception?> log)
+    {
+        if (string.IsNullOrWhiteSpace(ffmpegPath))
+        {
+            return Libx264EncoderProfile;
+        }
+
+        if (!string.Equals(Environment.GetEnvironmentVariable("VALOWATCH_ENABLE_HARDWARE_H264"), "1", StringComparison.OrdinalIgnoreCase))
+        {
+            return Libx264EncoderProfile;
+        }
+
+        lock (H264EncoderSelectionSyncRoot)
+        {
+            if (h264EncoderSelectionWasTested)
+            {
+                return selectedHardwareH264EncoderProfile ?? Libx264EncoderProfile;
+            }
+
+            foreach (H264EncoderProfile hardwareProfile in HardwareH264EncoderProfiles)
+            {
+                if (CanUseH264EncoderProfile(ffmpegPath, hardwareProfile, log))
+                {
+                    selectedHardwareH264EncoderProfile = hardwareProfile;
+                    h264EncoderSelectionWasTested = true;
+                    log($"H.264 hardware encoder selected for Smooth Live streaming. Encoder: {hardwareProfile.DisplayName}.", null);
+                    return hardwareProfile;
+                }
+            }
+
+            h264EncoderSelectionWasTested = true;
+            log("H.264 hardware encoder was not available; Smooth Live streaming will use libx264.", null);
+            return Libx264EncoderProfile;
+        }
+    }
+
+    private static bool CanUseH264EncoderProfile(
+        string ffmpegPath,
+        H264EncoderProfile encoderProfile,
+        Action<string, Exception?> log)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+
+        process.StartInfo.ArgumentList.Add("-hide_banner");
+        process.StartInfo.ArgumentList.Add("-loglevel");
+        process.StartInfo.ArgumentList.Add("error");
+        process.StartInfo.ArgumentList.Add("-nostdin");
+        process.StartInfo.ArgumentList.Add("-f");
+        process.StartInfo.ArgumentList.Add("lavfi");
+        process.StartInfo.ArgumentList.Add("-i");
+        process.StartInfo.ArgumentList.Add("testsrc2=size=640x360:rate=60:duration=0.35");
+        process.StartInfo.ArgumentList.Add("-frames:v");
+        process.StartInfo.ArgumentList.Add("12");
+        process.StartInfo.ArgumentList.Add("-vf");
+        process.StartInfo.ArgumentList.Add("format=yuv420p");
+        process.StartInfo.ArgumentList.Add("-an");
+        AddH264EncoderArguments(process.StartInfo, encoderProfile, jpegQuality: 85, framesPerSecond: 60, groupOfPicturesSize: 30, levelText: "4.2");
+        process.StartInfo.ArgumentList.Add("-f");
+        process.StartInfo.ArgumentList.Add("null");
+        process.StartInfo.ArgumentList.Add("-");
+
+        try
+        {
+            if (!process.Start())
+            {
+                return false;
+            }
+
+            if (!process.WaitForExit(5000))
+            {
+                TryKillProcess(process);
+                log($"H.264 hardware encoder test timed out. Encoder: {encoderProfile.DisplayName}.", null);
+                return false;
+            }
+
+            return process.ExitCode == 0;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            log($"H.264 hardware encoder test failed. Encoder: {encoderProfile.DisplayName}.", exception);
+            return false;
+        }
+    }
+
+    private static void TryKillProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+        }
     }
 
     private void AddFfmpegCaptureInputArguments(ProcessStartInfo startInfo)
@@ -1962,32 +2233,80 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("-vf");
         startInfo.ArgumentList.Add(string.Join(",", videoFilters));
         startInfo.ArgumentList.Add("-an");
+        AddH264EncoderArguments(
+            startInfo,
+            h264EncoderProfile,
+            JpegQuality,
+            FramesPerSecond,
+            GetH264GroupOfPicturesSize(),
+            GetH264LevelText());
+    }
+
+    private static void AddH264EncoderArguments(
+        ProcessStartInfo startInfo,
+        H264EncoderProfile encoderProfile,
+        long jpegQuality,
+        int framesPerSecond,
+        int groupOfPicturesSize,
+        string levelText)
+    {
         startInfo.ArgumentList.Add("-c:v");
-        startInfo.ArgumentList.Add("libx264");
-        startInfo.ArgumentList.Add("-preset");
-        startInfo.ArgumentList.Add("superfast");
-        startInfo.ArgumentList.Add("-tune");
-        startInfo.ArgumentList.Add("zerolatency");
-        startInfo.ArgumentList.Add("-x264-params");
-        startInfo.ArgumentList.Add("rc-lookahead=0:sync-lookahead=0:sliced-threads=1");
+        startInfo.ArgumentList.Add(encoderProfile.EncoderName);
+        foreach (string argument in encoderProfile.ExtraArguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        if (encoderProfile.UsesCrf)
+        {
+            startInfo.ArgumentList.Add("-preset");
+            startInfo.ArgumentList.Add("ultrafast");
+            startInfo.ArgumentList.Add("-tune");
+            startInfo.ArgumentList.Add("zerolatency");
+            startInfo.ArgumentList.Add("-x264-params");
+            startInfo.ArgumentList.Add("rc-lookahead=0:sync-lookahead=0:sliced-threads=1");
+            startInfo.ArgumentList.Add("-crf");
+            startInfo.ArgumentList.Add(ToH264Crf(jpegQuality).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            int bitrateKbps = ToH264HardwareBitrateKbps(jpegQuality, framesPerSecond);
+            startInfo.ArgumentList.Add("-b:v");
+            startInfo.ArgumentList.Add($"{bitrateKbps}k");
+            startInfo.ArgumentList.Add("-maxrate");
+            startInfo.ArgumentList.Add($"{bitrateKbps}k");
+            startInfo.ArgumentList.Add("-bufsize");
+            startInfo.ArgumentList.Add($"{bitrateKbps * 2}k");
+        }
+
         startInfo.ArgumentList.Add("-profile:v");
         startInfo.ArgumentList.Add("high");
         startInfo.ArgumentList.Add("-level:v");
-        startInfo.ArgumentList.Add(GetH264LevelText());
+        startInfo.ArgumentList.Add(levelText);
         startInfo.ArgumentList.Add("-pix_fmt");
         startInfo.ArgumentList.Add("yuv420p");
         startInfo.ArgumentList.Add("-r");
-        startInfo.ArgumentList.Add(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add(framesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
         startInfo.ArgumentList.Add("-g");
-        startInfo.ArgumentList.Add(GetH264GroupOfPicturesSize().ToString(System.Globalization.CultureInfo.InvariantCulture));
-        startInfo.ArgumentList.Add("-keyint_min");
-        startInfo.ArgumentList.Add(GetH264GroupOfPicturesSize().ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add(groupOfPicturesSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
         startInfo.ArgumentList.Add("-bf");
         startInfo.ArgumentList.Add("0");
-        startInfo.ArgumentList.Add("-sc_threshold");
-        startInfo.ArgumentList.Add("0");
-        startInfo.ArgumentList.Add("-crf");
-        startInfo.ArgumentList.Add(ToH264Crf(JpegQuality).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (encoderProfile.UsesCrf)
+        {
+            startInfo.ArgumentList.Add("-keyint_min");
+            startInfo.ArgumentList.Add(groupOfPicturesSize.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add("-sc_threshold");
+            startInfo.ArgumentList.Add("0");
+        }
+    }
+
+    private static int ToH264HardwareBitrateKbps(long jpegQuality, int framesPerSecond)
+    {
+        long clampedQuality = Math.Clamp(jpegQuality, MinimumJpegQuality, MaximumJpegQuality);
+        double qualityScale = (clampedQuality - MinimumJpegQuality) / (double)(MaximumJpegQuality - MinimumJpegQuality);
+        double frameRateScale = Math.Clamp(framesPerSecond, MinimumFramesPerSecond, MaximumFramesPerSecond) / 60D;
+        double bitrateKbps = 4500D + (qualityScale * 6500D);
+        return (int)Math.Round(Math.Clamp(bitrateKbps * Math.Max(0.75D, frameRateScale), 3000D, 18000D));
     }
 
     private string GetH264LevelText()
@@ -2502,6 +2821,28 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 lock (syncRoot)
                 {
                     return !disposed && !completed && !process.HasExited;
+                }
+            }
+        }
+
+        public long LatestSequence
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return fragments.Count == 0 ? nextSequence - 1L : fragments[^1].Sequence;
+                }
+            }
+        }
+
+        public int BufferedFragmentCount
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return fragments.Count;
                 }
             }
         }
@@ -3059,6 +3400,12 @@ internal readonly record struct ScreenStreamOptions(
             ScreenStreamingServer.MaximumMaxWidth);
     }
 }
+
+internal sealed record H264EncoderProfile(
+    string EncoderName,
+    string DisplayName,
+    bool UsesCrf,
+    IReadOnlyList<string> ExtraArguments);
 
 internal enum ScreenStreamMethod
 {

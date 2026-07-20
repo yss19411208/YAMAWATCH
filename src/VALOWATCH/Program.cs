@@ -1,5 +1,7 @@
 using System.Buffers.Binary;
 using Discord;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using System.Diagnostics;
@@ -7,6 +9,8 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using Color = System.Drawing.Color;
 
 namespace VALOWATCH;
 
@@ -210,6 +214,12 @@ static class Program
         if (args.Any(argument => string.Equals(argument, "--check-stream-h264-fmp4", StringComparison.OrdinalIgnoreCase)))
         {
             RunStreamH264Fmp4Diagnostic();
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--check-stream-smooth-live", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunStreamSmoothLiveDiagnostic(args);
             return;
         }
 
@@ -934,7 +944,13 @@ static class Program
                 ContainsAsciiToken(nextLiveFragmentBytes, "moof") &&
                 ContainsAsciiToken(nextLiveFragmentBytes, "mdat");
             bool pageHasVideoControls = pageHtml.Contains(" controls", StringComparison.OrdinalIgnoreCase);
+            string targetLatencySecondsText = ScreenStreamingServer.H264Fmp4TargetLatencySeconds
+                .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            string minimumSmoothLatencySecondsText = ScreenStreamingServer.H264Fmp4MinimumSmoothLatencySeconds
+                .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
             string maximumLatencySecondsText = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds
+                .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            string restartLatencySecondsText = ScreenStreamingServer.H264Fmp4RestartLatencySeconds
                 .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
             string latencyCheckIntervalMillisecondsText = ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -942,12 +958,22 @@ static class Program
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
             string reconnectStallMillisecondsText = ScreenStreamingServer.H264Fmp4ReconnectStallMilliseconds
                 .ToString(System.Globalization.CultureInfo.InvariantCulture);
-            bool pageHasLowLatencyController =
+            string maximumAppendQueueLengthText = ScreenStreamingServer.H264Fmp4MaximumAppendQueueLength
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            bool pageHasSmoothLiveController =
                 pageHtml.Contains("keepFmp4LatencyLow", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("smooth-live", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("valowatchStreamMetrics", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"targetLatencySeconds = {targetLatencySecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"minimumSmoothLatencySeconds = {minimumSmoothLatencySecondsText}", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains($"maximumLatencySeconds = {maximumLatencySecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"restartLatencySeconds = {restartLatencySecondsText}", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains($"latencyCheckMilliseconds = {latencyCheckIntervalMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains($"seekCooldownMilliseconds = {seekCooldownMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains($"reconnectStallMilliseconds = {reconnectStallMillisecondsText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains($"maximumAppendQueueLength = {maximumAppendQueueLengthText}", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("hasFmp4SmoothStartupBuffer", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("queueOverflowCount", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("reconnectFmp4Stream", StringComparison.OrdinalIgnoreCase);
             bool pageHasVisibilityRecovery =
                 pageHtml.Contains("visibilitychange", StringComparison.OrdinalIgnoreCase) &&
@@ -963,9 +989,21 @@ static class Program
                 pageHtml.Contains("startWebSocketFmp4Live", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("queueFmp4Bytes", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("X-VALOWATCH-Sequence", StringComparison.OrdinalIgnoreCase);
-            bool fmp4LatencyLimitStaysUnderThreeSeconds = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds < 3D &&
-                ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds <= 100 &&
-                ScreenStreamingServer.H264Fmp4ReconnectStallMilliseconds <= 2000;
+            bool fmp4SmoothLiveConfigurationReady =
+                ScreenStreamingServer.H264Fmp4TargetLatencySeconds >= 1.7D &&
+                ScreenStreamingServer.H264Fmp4TargetLatencySeconds <= 2.6D &&
+                ScreenStreamingServer.H264Fmp4MinimumSmoothLatencySeconds >= 1.4D &&
+                ScreenStreamingServer.H264Fmp4MinimumSmoothLatencySeconds < ScreenStreamingServer.H264Fmp4TargetLatencySeconds &&
+                ScreenStreamingServer.H264Fmp4CatchUpLatencySeconds > ScreenStreamingServer.H264Fmp4TargetLatencySeconds &&
+                ScreenStreamingServer.H264Fmp4MaximumLatencySeconds <= 3.0D &&
+                ScreenStreamingServer.H264Fmp4RestartLatencySeconds <= 4.5D &&
+                ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds >= 450000 &&
+                ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds <= 550000 &&
+                ScreenStreamingServer.H264Fmp4InitialFragmentCount >= 4 &&
+                ScreenStreamingServer.H264Fmp4RetainedFragmentCount >= 30 &&
+                ScreenStreamingServer.H264Fmp4MaximumAppendQueueLength >= 12 &&
+                ScreenStreamingServer.H264KeyframeIntervalSeconds >= 0.45D &&
+                ScreenStreamingServer.H264KeyframeIntervalSeconds <= 0.55D;
             bool fmp4FragmentDurationConfigured = serverMessages.Any(message =>
                 message.Contains($"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}", StringComparison.OrdinalIgnoreCase));
             bool fmp4KeyframeIntervalConfigured = serverMessages.Any(message =>
@@ -973,10 +1011,10 @@ static class Program
             bool ready = pageHtml.Contains("VALOWATCH stream", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("stream.mp4", StringComparison.OrdinalIgnoreCase) &&
                 !pageHasVideoControls &&
-                pageHasLowLatencyController &&
+                pageHasSmoothLiveController &&
                 pageHasVisibilityRecovery &&
                 pageHasMseLiveController &&
-                fmp4LatencyLimitStaysUnderThreeSeconds &&
+                fmp4SmoothLiveConfigurationReady &&
                 fmp4FragmentDurationConfigured &&
                 fmp4KeyframeIntervalConfigured &&
                 contentTypeLooksLikeMp4 &&
@@ -1001,7 +1039,7 @@ static class Program
                 $"Quality: {options.JpegQuality}. Width: {options.MaxWidth}. Engine: {server.EngineName}. " +
                 $"Mp4ContentType: {contentTypeLooksLikeMp4}. ReadBytes: {streamBytes.Length}. " +
                 $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. VideoControls: {pageHasVideoControls}. " +
-                $"LowLatencyController: {pageHasLowLatencyController}. " +
+                $"SmoothLiveController: {pageHasSmoothLiveController}. " +
                 $"VisibilityRecovery: {pageHasVisibilityRecovery}. " +
                 $"MseLiveController: {pageHasMseLiveController}. " +
                 $"LiveInitBytes: {liveInitBytes.Length}. LiveInitOk: {liveInitLooksLikeInitializationSegment}. " +
@@ -1012,11 +1050,17 @@ static class Program
                 $"WebSocketAccepted: {webSocketResult.Accepted}. " +
                 $"WebSocketInitBytes: {webSocketResult.InitBytes}. WebSocketInitOk: {webSocketResult.InitLooksLikeInitializationSegment}. " +
                 $"WebSocketFragmentBytes: {webSocketResult.FragmentBytes}. WebSocketFragmentOk: {webSocketResult.FragmentLooksLikeMediaSegment}. " +
+                $"TargetLatencySeconds: {targetLatencySecondsText}. " +
+                $"MinimumSmoothLatencySeconds: {minimumSmoothLatencySecondsText}. " +
                 $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
+                $"RestartLatencySeconds: {restartLatencySecondsText}. " +
                 $"LatencyCheckMs: {latencyCheckIntervalMillisecondsText}. " +
                 $"SeekCooldownMs: {seekCooldownMillisecondsText}. " +
                 $"ReconnectStallMs: {reconnectStallMillisecondsText}. " +
-                $"UnderThreeSecondGuard: {fmp4LatencyLimitStaysUnderThreeSeconds}. " +
+                $"InitialFragments: {ScreenStreamingServer.H264Fmp4InitialFragmentCount}. " +
+                $"RetainedFragments: {ScreenStreamingServer.H264Fmp4RetainedFragmentCount}. " +
+                $"MaximumAppendQueueLength: {maximumAppendQueueLengthText}. " +
+                $"SmoothLiveConfiguration: {fmp4SmoothLiveConfigurationReady}. " +
                 $"FragmentDurationUs: {ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds}. " +
                 $"KeyframeIntervalConfigured: {fmp4KeyframeIntervalConfigured}. " +
                 $"Messages: {string.Join(" | ", serverMessages.TakeLast(4))}.");
@@ -1033,6 +1077,81 @@ static class Program
         finally
         {
             server?.Dispose();
+        }
+    }
+
+    private static void RunStreamSmoothLiveDiagnostic(string[] args)
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        ScreenStreamingServer? server = null;
+        Process? motionSourceProcess = null;
+        List<string> serverMessages = [];
+
+        try
+        {
+            int durationSeconds = ReadIntegerOption(args, "--duration-seconds", defaultValue: 90, minimumValue: 20, maximumValue: 900);
+            motionSourceProcess = TryStartSmoothLiveMotionSource(durationSeconds + 15, logFilePath);
+            if (motionSourceProcess is not null)
+            {
+                Thread.Sleep(1200);
+            }
+
+            ScreenStreamOptions options = ScreenStreamOptions.Create(
+                ScreenCaptureTarget.FullScreen,
+                60,
+                90,
+                1280,
+                ScreenStreamMethod.H264Fmp4);
+            string ffmpegPath = ResolveFfmpegForDiagnostic(appPaths, logFilePath);
+            server = ScreenStreamingServer.Start(
+                options,
+                ffmpegPath,
+                Path.Combine(appPaths.DataDirectory, "streaming"),
+                (message, exception) =>
+                {
+                    string exceptionText = exception is null ? string.Empty : $" Exception: {exception.Message}";
+                    serverMessages.Add($"{message}{exceptionText}");
+                });
+
+            string pageUrl = $"{server.LocalOrigin}/{server.PublicPath}";
+            ApplicationConfiguration.Initialize();
+            using SmoothLiveDiagnosticForm diagnosticForm = new(pageUrl, TimeSpan.FromSeconds(durationSeconds));
+            Application.Run(diagnosticForm);
+            SmoothLiveBrowserDiagnosticResult browserResult = diagnosticForm.Result;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream smooth-live browser check: " +
+                $"{(browserResult.Ready ? "ready" : "failed")}. DurationSeconds: {durationSeconds}. " +
+                $"ConfiguredFPS: {options.FramesPerSecond}. TargetLatencySeconds: {ScreenStreamingServer.H264Fmp4TargetLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
+                $"AverageDecodedFPS: {browserResult.AverageDecodedFps.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}. " +
+                $"AverageLatencySeconds: {browserResult.AverageLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
+                $"MaxLatencySeconds: {browserResult.MaximumLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
+                $"LatencyIncreasePerMinute: {browserResult.LatencyIncreaseSecondsPerMinute.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture)}. " +
+                $"Samples: {browserResult.UsableSampleCount}/{browserResult.TotalSampleCount}. " +
+                $"PlaybackStops: {browserResult.PlaybackStopCount}. StallEvents: {browserResult.StallEventCount}. " +
+                $"QueueOverflowEvents: {browserResult.QueueOverflowEventCount}. MseRestarts: {browserResult.MseRestartCount}. " +
+                $"WebSocketConnected: {browserResult.WebSocketConnected}. MseOpened: {browserResult.MseOpened}. " +
+                $"VisibilityRecoveryAttempted: {browserResult.VisibilityRecoveryAttempted}. " +
+                $"VisibilityRecoveredWithinFiveSeconds: {browserResult.VisibilityRecoveredWithinFiveSeconds}. " +
+                $"FailureReasons: {string.Join(" | ", browserResult.FailureReasons)}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(6))}.");
+            Environment.ExitCode = browserResult.Ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
+        {
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream smooth-live browser check failed: {exception}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(8))}.");
+            Environment.ExitCode = 1;
+        }
+        finally
+        {
+            server?.Dispose();
+            StopDiagnosticProcess(motionSourceProcess);
         }
     }
 
@@ -1160,6 +1279,80 @@ static class Program
                 CancellationToken.None)
             .GetAwaiter()
             .GetResult();
+    }
+
+    private static Process? TryStartSmoothLiveMotionSource(int durationSeconds, string logFilePath)
+    {
+        string overlayTestPath = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory,
+            "..",
+            "..",
+            "..",
+            "..",
+            "VALOWATCH.OverlayTest",
+            "bin",
+            "Release",
+            "net8.0-windows",
+            "VALORANT.exe"));
+        if (!File.Exists(overlayTestPath))
+        {
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Smooth Live motion source was skipped because OverlayTest executable was not found. Path: {overlayTestPath}.");
+            return null;
+        }
+
+        try
+        {
+            Process? process = Process.Start(new ProcessStartInfo
+            {
+                FileName = overlayTestPath,
+                Arguments = $"--motion-source --duration-seconds {durationSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
+                WorkingDirectory = Path.GetDirectoryName(overlayTestPath),
+                UseShellExecute = true
+            });
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Smooth Live motion source started. Path: {overlayTestPath}. DurationSeconds: {durationSeconds}.");
+            return process;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
+        {
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Smooth Live motion source could not be started: {exception}.");
+            return null;
+        }
+    }
+
+    private static void StopDiagnosticProcess(Process? process)
+    {
+        if (process is null)
+        {
+            return;
+        }
+
+        try
+        {
+            if (process.HasExited)
+            {
+                return;
+            }
+
+            process.CloseMainWindow();
+            if (!process.WaitForExit(1500))
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(3000);
+            }
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+        }
+        finally
+        {
+            process.Dispose();
+        }
     }
 
     private static byte[] ReadSomeResponseBytes(
@@ -1460,6 +1653,41 @@ static class Program
         {
             failedChecks.Add(failureMessage);
         }
+    }
+
+    private static int ReadIntegerOption(
+        string[] args,
+        string optionName,
+        int defaultValue,
+        int minimumValue,
+        int maximumValue)
+    {
+        for (int argumentIndex = 0; argumentIndex < args.Length; argumentIndex++)
+        {
+            string argument = args[argumentIndex];
+            string? valueText = null;
+            if (string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase) &&
+                argumentIndex + 1 < args.Length)
+            {
+                valueText = args[argumentIndex + 1];
+            }
+            else if (argument.StartsWith(optionName + "=", StringComparison.OrdinalIgnoreCase))
+            {
+                valueText = argument[(optionName.Length + 1)..];
+            }
+
+            if (valueText is not null &&
+                int.TryParse(
+                    valueText,
+                    System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int parsedValue))
+            {
+                return Math.Clamp(parsedValue, minimumValue, maximumValue);
+            }
+        }
+
+        return defaultValue;
     }
 
     private static void RunAltTHotKeyInputDiagnostic()
@@ -2703,6 +2931,833 @@ static class Program
         }
 
         return pcmBytes;
+    }
+
+    private sealed class SmoothLiveDiagnosticForm : Form
+    {
+        private const string MetricScript = """
+(() => {
+  const video = document.getElementById('screen');
+  const quality = video && typeof video.getVideoPlaybackQuality === 'function'
+    ? video.getVideoPlaybackQuality()
+    : null;
+  const metrics = window.valowatchStreamMetrics || {};
+  let latencySeconds = null;
+  if (video && video.buffered && video.buffered.length > 0) {
+    latencySeconds = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+    if (!Number.isFinite(latencySeconds) || latencySeconds < 0) {
+      latencySeconds = null;
+    }
+  }
+
+  return {
+    ok: !!video,
+    currentTime: video ? video.currentTime : 0,
+    readyState: video ? video.readyState : 0,
+    paused: video ? video.paused : true,
+    playbackRate: video ? video.playbackRate : 0,
+    decodedFrames: quality ? quality.totalVideoFrames : 0,
+    droppedFrames: quality ? quality.droppedVideoFrames : 0,
+    latencySeconds,
+    websocketConnected: !!metrics.websocketConnected,
+    mseReadyState: metrics.mseReadyState || 'none',
+    reconnectCount: metrics.reconnectCount || 0,
+    mseRestartCount: metrics.mseRestartCount || 0,
+    queueOverflowCount: metrics.queueOverflowCount || 0,
+    stallCount: metrics.stallCount || 0,
+    waitingCount: metrics.waitingCount || 0,
+    appendedSegments: metrics.appendedSegments || 0,
+    playbackStartCount: metrics.playbackStartCount || 0
+  };
+})()
+""";
+
+        private readonly string pageUrl;
+        private readonly TimeSpan duration;
+        private readonly SmoothLiveMotionPanel motionPanel = new();
+        private readonly WebView2 playerWebView = new();
+        private readonly System.Windows.Forms.Timer sampleTimer = new();
+        private readonly Stopwatch stopwatch = new();
+        private readonly List<SmoothLiveMetricSample> samples = [];
+        private readonly CancellationTokenSource stopCancellationTokenSource = new();
+        private bool sampleInProgress;
+        private bool visibilityRecoveryAttempted;
+        private double? visibilityRestoredAtSeconds;
+
+        public SmoothLiveDiagnosticForm(string pageUrl, TimeSpan duration)
+        {
+            this.pageUrl = pageUrl;
+            this.duration = duration;
+            Result = SmoothLiveBrowserDiagnosticResult.Failed("diagnostic did not complete");
+            BuildInterface();
+        }
+
+        public SmoothLiveBrowserDiagnosticResult Result { get; private set; }
+
+        protected override async void OnShown(EventArgs eventArgs)
+        {
+            base.OnShown(eventArgs);
+            stopwatch.Start();
+            sampleTimer.Start();
+
+            try
+            {
+                string userDataFolder = Path.Combine(
+                    Path.GetTempPath(),
+                    "VALOWATCH",
+                    "webview2-smooth-live",
+                    Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                Directory.CreateDirectory(userDataFolder);
+                CoreWebView2EnvironmentOptions environmentOptions = new(
+                    "--disable-frame-rate-limit --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --autoplay-policy=no-user-gesture-required");
+                CoreWebView2Environment environment = await CoreWebView2Environment
+                    .CreateAsync(null, userDataFolder, environmentOptions)
+                    .ConfigureAwait(true);
+                await playerWebView.EnsureCoreWebView2Async(environment).ConfigureAwait(true);
+                if (playerWebView.CoreWebView2 is not null)
+                {
+                    playerWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                    playerWebView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                    playerWebView.Source = new Uri(pageUrl);
+                }
+
+                Task visibilityRecoveryTask = duration >= TimeSpan.FromSeconds(35)
+                    ? RunVisibilityRecoveryCycleAsync(stopCancellationTokenSource.Token)
+                    : Task.CompletedTask;
+                await Task.Delay(duration, stopCancellationTokenSource.Token).ConfigureAwait(true);
+                if (!visibilityRecoveryTask.IsCompleted)
+                {
+                    await visibilityRecoveryTask.WaitAsync(TimeSpan.FromSeconds(1), stopCancellationTokenSource.Token).ConfigureAwait(true);
+                }
+
+                Result = SmoothLiveBrowserDiagnosticResult.FromSamples(
+                    samples,
+                    duration,
+                    visibilityRecoveryAttempted,
+                    visibilityRestoredAtSeconds,
+                    startupException: null);
+            }
+            catch (OperationCanceledException)
+            {
+                Result = SmoothLiveBrowserDiagnosticResult.FromSamples(
+                    samples,
+                    duration,
+                    visibilityRecoveryAttempted,
+                    visibilityRestoredAtSeconds,
+                    startupException: null);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+            {
+                Result = SmoothLiveBrowserDiagnosticResult.FromSamples(
+                    samples,
+                    duration,
+                    visibilityRecoveryAttempted,
+                    visibilityRestoredAtSeconds,
+                    exception);
+            }
+            finally
+            {
+                sampleTimer.Stop();
+                Close();
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs eventArgs)
+        {
+            stopCancellationTokenSource.Cancel();
+            sampleTimer.Dispose();
+            stopCancellationTokenSource.Dispose();
+            base.OnFormClosed(eventArgs);
+        }
+
+        private void BuildInterface()
+        {
+            Text = "VALOWATCH Smooth Live Diagnostic";
+            StartPosition = FormStartPosition.Manual;
+            Rectangle screenBounds = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+            Size = new Size(Math.Min(520, screenBounds.Width), Math.Min(360, screenBounds.Height));
+            Location = new Point(screenBounds.Right - Width - 24, screenBounds.Top + 24);
+            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            TopMost = true;
+            BackColor = Color.Black;
+
+            playerWebView.Dock = DockStyle.Fill;
+            Controls.Add(playerWebView);
+
+            sampleTimer.Interval = 1000;
+            sampleTimer.Tick += async (_, _) => await CaptureMetricSampleAsync().ConfigureAwait(true);
+        }
+
+        private async Task RunVisibilityRecoveryCycleAsync(CancellationToken cancellationToken)
+        {
+            TimeSpan delayBeforeHide = TimeSpan.FromSeconds(Math.Max(12D, duration.TotalSeconds * 0.45D));
+            await Task.Delay(delayBeforeHide, cancellationToken).ConfigureAwait(true);
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            visibilityRecoveryAttempted = true;
+            WindowState = FormWindowState.Minimized;
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(true);
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            WindowState = FormWindowState.Normal;
+            BringToFront();
+            Activate();
+            visibilityRestoredAtSeconds = stopwatch.Elapsed.TotalSeconds;
+        }
+
+        private async Task CaptureMetricSampleAsync()
+        {
+            if (sampleInProgress || playerWebView.CoreWebView2 is null)
+            {
+                return;
+            }
+
+            sampleInProgress = true;
+            try
+            {
+                string scriptResult = await playerWebView.CoreWebView2.ExecuteScriptAsync(MetricScript).ConfigureAwait(true);
+                SmoothLiveMetricSample sample = SmoothLiveMetricSample.FromScriptResult(scriptResult, stopwatch.Elapsed.TotalSeconds);
+                sample.WindowWasHidden = WindowState == FormWindowState.Minimized;
+                samples.Add(sample);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or JsonException or ArgumentException or System.ComponentModel.Win32Exception)
+            {
+                samples.Add(SmoothLiveMetricSample.Failed(stopwatch.Elapsed.TotalSeconds, exception.Message)
+                    with
+                    {
+                        WindowWasHidden = WindowState == FormWindowState.Minimized
+                    });
+            }
+            finally
+            {
+                sampleInProgress = false;
+            }
+        }
+    }
+
+    private sealed class SmoothLiveMotionPanel : Control
+    {
+        private readonly Stopwatch stopwatch = new();
+        private readonly System.Windows.Forms.Timer animationTimer = new()
+        {
+            Interval = 16
+        };
+
+        public SmoothLiveMotionPanel()
+        {
+            DoubleBuffered = true;
+            BackColor = Color.FromArgb(10, 12, 18);
+            ForeColor = Color.White;
+            animationTimer.Tick += (_, _) => Invalidate();
+        }
+
+        public void Start()
+        {
+            stopwatch.Restart();
+            animationTimer.Start();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                animationTimer.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        protected override void OnPaint(PaintEventArgs paintEventArgs)
+        {
+            base.OnPaint(paintEventArgs);
+            Graphics graphics = paintEventArgs.Graphics;
+            graphics.Clear(Color.FromArgb(10, 12, 18));
+            double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+            int frameNumber = (int)Math.Floor(elapsedSeconds * 60D);
+            int panelWidth = Math.Max(1, ClientSize.Width);
+            int panelHeight = Math.Max(1, ClientSize.Height);
+            int huePosition = frameNumber % 360;
+            using SolidBrush accentBrush = new(ColorFromHue(huePosition, 210, 130));
+            using SolidBrush dimBrush = new(Color.FromArgb(40, 255, 255, 255));
+            using Pen gridPen = new(Color.FromArgb(30, 255, 255, 255));
+            for (int x = 0; x < panelWidth; x += 40)
+            {
+                graphics.DrawLine(gridPen, x, 0, x, panelHeight);
+            }
+
+            for (int y = 0; y < panelHeight; y += 40)
+            {
+                graphics.DrawLine(gridPen, 0, y, panelWidth, y);
+            }
+
+            int barWidth = Math.Max(80, panelWidth / 4);
+            int movingX = (int)((elapsedSeconds * 360D) % (panelWidth + barWidth)) - barWidth;
+            graphics.FillRectangle(accentBrush, movingX, panelHeight / 2 - 32, barWidth, 64);
+            int pulseSize = 60 + (int)(Math.Abs(Math.Sin(elapsedSeconds * Math.PI * 2D)) * 80D);
+            graphics.FillEllipse(dimBrush, panelWidth - pulseSize - 40, 48, pulseSize, pulseSize);
+
+            using Font titleFont = new("Segoe UI", 22F, FontStyle.Bold);
+            using Font infoFont = new("Consolas", 16F, FontStyle.Regular);
+            graphics.DrawString("VALOWATCH Smooth Live Source", titleFont, Brushes.White, 28, 28);
+            graphics.DrawString($"frame {frameNumber:000000}", infoFont, Brushes.White, 32, 92);
+            graphics.DrawString(DateTimeOffset.Now.ToString("HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture), infoFont, Brushes.White, 32, 124);
+            graphics.DrawString("60fps motion / scroll / color shift", infoFont, Brushes.White, 32, 156);
+
+            int scrollY = panelHeight - 80;
+            using SolidBrush scrollBrush = new(Color.FromArgb(220, 255, 255, 255));
+            for (int index = 0; index < 18; index++)
+            {
+                int x = (int)(((index * 92D) - (elapsedSeconds * 180D)) % (panelWidth + 100));
+                if (x < -80)
+                {
+                    x += panelWidth + 100;
+                }
+
+                graphics.FillRectangle(index % 2 == 0 ? scrollBrush : accentBrush, x, scrollY, 58, 28);
+            }
+        }
+
+        private static Color ColorFromHue(int hueDegrees, int saturation, int value)
+        {
+            double hue = Math.Clamp(hueDegrees, 0, 359) / 60D;
+            double chroma = Math.Clamp(value, 0, 255) / 255D * Math.Clamp(saturation, 0, 255) / 255D;
+            double x = chroma * (1D - Math.Abs((hue % 2D) - 1D));
+            double match = Math.Clamp(value, 0, 255) / 255D - chroma;
+            (double red, double green, double blue) = hue switch
+            {
+                < 1D => (chroma, x, 0D),
+                < 2D => (x, chroma, 0D),
+                < 3D => (0D, chroma, x),
+                < 4D => (0D, x, chroma),
+                < 5D => (x, 0D, chroma),
+                _ => (chroma, 0D, x)
+            };
+
+            return Color.FromArgb(
+                (int)Math.Round((red + match) * 255D),
+                (int)Math.Round((green + match) * 255D),
+                (int)Math.Round((blue + match) * 255D));
+        }
+    }
+
+    private sealed record SmoothLiveMetricSample
+    {
+        public double ElapsedSeconds { get; init; }
+
+        public bool Ok { get; init; }
+
+        public double CurrentTime { get; init; }
+
+        public int ReadyState { get; init; }
+
+        public bool Paused { get; init; }
+
+        public double PlaybackRate { get; init; }
+
+        public int DecodedFrames { get; init; }
+
+        public int DroppedFrames { get; init; }
+
+        public double? LatencySeconds { get; init; }
+
+        public bool WebSocketConnected { get; init; }
+
+        public string MseReadyState { get; init; } = "none";
+
+        public int ReconnectCount { get; init; }
+
+        public int MseRestartCount { get; init; }
+
+        public int QueueOverflowCount { get; init; }
+
+        public int StallCount { get; init; }
+
+        public int WaitingCount { get; init; }
+
+        public int AppendedSegments { get; init; }
+
+        public int PlaybackStartCount { get; init; }
+
+        public bool WindowWasHidden { get; set; }
+
+        public string? Error { get; init; }
+
+        public static SmoothLiveMetricSample Failed(double elapsedSeconds, string error)
+        {
+            return new SmoothLiveMetricSample
+            {
+                ElapsedSeconds = elapsedSeconds,
+                Error = error
+            };
+        }
+
+        public static SmoothLiveMetricSample FromScriptResult(string scriptResult, double elapsedSeconds)
+        {
+            using JsonDocument jsonDocument = JsonDocument.Parse(scriptResult);
+            JsonElement rootElement = jsonDocument.RootElement;
+            if (rootElement.ValueKind != JsonValueKind.Object)
+            {
+                return Failed(elapsedSeconds, $"unexpected script result: {rootElement.ValueKind}");
+            }
+
+            return new SmoothLiveMetricSample
+            {
+                ElapsedSeconds = elapsedSeconds,
+                Ok = ReadBoolean(rootElement, "ok"),
+                CurrentTime = ReadDouble(rootElement, "currentTime"),
+                ReadyState = ReadInteger(rootElement, "readyState"),
+                Paused = ReadBoolean(rootElement, "paused"),
+                PlaybackRate = ReadDouble(rootElement, "playbackRate"),
+                DecodedFrames = ReadInteger(rootElement, "decodedFrames"),
+                DroppedFrames = ReadInteger(rootElement, "droppedFrames"),
+                LatencySeconds = ReadNullableDouble(rootElement, "latencySeconds"),
+                WebSocketConnected = ReadBoolean(rootElement, "websocketConnected"),
+                MseReadyState = ReadString(rootElement, "mseReadyState", "none"),
+                ReconnectCount = ReadInteger(rootElement, "reconnectCount"),
+                MseRestartCount = ReadInteger(rootElement, "mseRestartCount"),
+                QueueOverflowCount = ReadInteger(rootElement, "queueOverflowCount"),
+                StallCount = ReadInteger(rootElement, "stallCount"),
+                WaitingCount = ReadInteger(rootElement, "waitingCount"),
+                AppendedSegments = ReadInteger(rootElement, "appendedSegments"),
+                PlaybackStartCount = ReadInteger(rootElement, "playbackStartCount")
+            };
+        }
+
+        private static bool ReadBoolean(JsonElement rootElement, string propertyName)
+        {
+            return rootElement.TryGetProperty(propertyName, out JsonElement property) &&
+                property.ValueKind == JsonValueKind.True;
+        }
+
+        private static int ReadInteger(JsonElement rootElement, string propertyName)
+        {
+            if (!rootElement.TryGetProperty(propertyName, out JsonElement property))
+            {
+                return 0;
+            }
+
+            if (property.ValueKind == JsonValueKind.Number && property.TryGetInt32(out int integerValue))
+            {
+                return integerValue;
+            }
+
+            return 0;
+        }
+
+        private static double ReadDouble(JsonElement rootElement, string propertyName)
+        {
+            if (!rootElement.TryGetProperty(propertyName, out JsonElement property))
+            {
+                return 0D;
+            }
+
+            if (property.ValueKind == JsonValueKind.Number && property.TryGetDouble(out double doubleValue))
+            {
+                return doubleValue;
+            }
+
+            return 0D;
+        }
+
+        private static double? ReadNullableDouble(JsonElement rootElement, string propertyName)
+        {
+            if (!rootElement.TryGetProperty(propertyName, out JsonElement property) ||
+                property.ValueKind == JsonValueKind.Null)
+            {
+                return null;
+            }
+
+            if (property.ValueKind == JsonValueKind.Number && property.TryGetDouble(out double doubleValue))
+            {
+                return doubleValue;
+            }
+
+            return null;
+        }
+
+        private static string ReadString(JsonElement rootElement, string propertyName, string defaultValue)
+        {
+            if (!rootElement.TryGetProperty(propertyName, out JsonElement property) ||
+                property.ValueKind != JsonValueKind.String)
+            {
+                return defaultValue;
+            }
+
+            return property.GetString() ?? defaultValue;
+        }
+    }
+
+    private sealed class SmoothLiveBrowserDiagnosticResult
+    {
+        private SmoothLiveBrowserDiagnosticResult(
+            bool ready,
+            int totalSampleCount,
+            int usableSampleCount,
+            double averageDecodedFps,
+            double averageLatencySeconds,
+            double maximumLatencySeconds,
+            double latencyIncreaseSecondsPerMinute,
+            int playbackStopCount,
+            int stallEventCount,
+            int queueOverflowEventCount,
+            int mseRestartCount,
+            bool webSocketConnected,
+            bool mseOpened,
+            bool visibilityRecoveryAttempted,
+            bool visibilityRecoveredWithinFiveSeconds,
+            IReadOnlyList<string> failureReasons)
+        {
+            Ready = ready;
+            TotalSampleCount = totalSampleCount;
+            UsableSampleCount = usableSampleCount;
+            AverageDecodedFps = averageDecodedFps;
+            AverageLatencySeconds = averageLatencySeconds;
+            MaximumLatencySeconds = maximumLatencySeconds;
+            LatencyIncreaseSecondsPerMinute = latencyIncreaseSecondsPerMinute;
+            PlaybackStopCount = playbackStopCount;
+            StallEventCount = stallEventCount;
+            QueueOverflowEventCount = queueOverflowEventCount;
+            MseRestartCount = mseRestartCount;
+            WebSocketConnected = webSocketConnected;
+            MseOpened = mseOpened;
+            VisibilityRecoveryAttempted = visibilityRecoveryAttempted;
+            VisibilityRecoveredWithinFiveSeconds = visibilityRecoveredWithinFiveSeconds;
+            FailureReasons = failureReasons;
+        }
+
+        public bool Ready { get; }
+
+        public int TotalSampleCount { get; }
+
+        public int UsableSampleCount { get; }
+
+        public double AverageDecodedFps { get; }
+
+        public double AverageLatencySeconds { get; }
+
+        public double MaximumLatencySeconds { get; }
+
+        public double LatencyIncreaseSecondsPerMinute { get; }
+
+        public int PlaybackStopCount { get; }
+
+        public int StallEventCount { get; }
+
+        public int QueueOverflowEventCount { get; }
+
+        public int MseRestartCount { get; }
+
+        public bool WebSocketConnected { get; }
+
+        public bool MseOpened { get; }
+
+        public bool VisibilityRecoveryAttempted { get; }
+
+        public bool VisibilityRecoveredWithinFiveSeconds { get; }
+
+        public IReadOnlyList<string> FailureReasons { get; }
+
+        public static SmoothLiveBrowserDiagnosticResult Failed(string reason)
+        {
+            return new SmoothLiveBrowserDiagnosticResult(
+                ready: false,
+                totalSampleCount: 0,
+                usableSampleCount: 0,
+                averageDecodedFps: 0D,
+                averageLatencySeconds: 0D,
+                maximumLatencySeconds: 0D,
+                latencyIncreaseSecondsPerMinute: 0D,
+                playbackStopCount: 0,
+                stallEventCount: 0,
+                queueOverflowEventCount: 0,
+                mseRestartCount: 0,
+                webSocketConnected: false,
+                mseOpened: false,
+                visibilityRecoveryAttempted: false,
+                visibilityRecoveredWithinFiveSeconds: false,
+                failureReasons: [reason]);
+        }
+
+        public static SmoothLiveBrowserDiagnosticResult FromSamples(
+            IReadOnlyList<SmoothLiveMetricSample> samples,
+            TimeSpan duration,
+            bool visibilityRecoveryAttempted,
+            double? visibilityRestoredAtSeconds,
+            Exception? startupException)
+        {
+            const double warmupSeconds = 12D;
+            List<SmoothLiveMetricSample> recoveryCandidateSamples = samples
+                .Where(sample => sample.Error is null &&
+                    sample.Ok &&
+                    !sample.WindowWasHidden &&
+                    sample.ElapsedSeconds >= warmupSeconds)
+                .OrderBy(sample => sample.ElapsedSeconds)
+                .ToList();
+            List<SmoothLiveMetricSample> usableSamples = samples
+                .Where(sample => sample.Error is null &&
+                    sample.Ok &&
+                    !sample.WindowWasHidden &&
+                    !IsWithinVisibilityRecoveryWindow(sample, visibilityRestoredAtSeconds) &&
+                    sample.ElapsedSeconds >= warmupSeconds)
+                .OrderBy(sample => sample.ElapsedSeconds)
+                .ToList();
+            List<string> failureReasons = [];
+            if (startupException is not null)
+            {
+                failureReasons.Add(startupException.Message);
+            }
+
+            int minimumUsableSamples = Math.Min(60, Math.Max(12, (int)Math.Floor(duration.TotalSeconds * 0.5D)));
+            if (usableSamples.Count < minimumUsableSamples)
+            {
+                failureReasons.Add($"usable samples {usableSamples.Count} < {minimumUsableSamples}");
+            }
+
+            double averageDecodedFps = CalculateAverageDecodedFps(usableSamples);
+            List<double> latencies = usableSamples
+                .Select(sample => sample.LatencySeconds)
+                .Where(latencySeconds => latencySeconds.HasValue)
+                .Select(latencySeconds => latencySeconds!.Value)
+                .Where(latencySeconds => latencySeconds > 0D)
+                .ToList();
+            double averageLatencySeconds = latencies.Count == 0 ? 0D : latencies.Average();
+            double maximumLatencySeconds = latencies.Count == 0 ? 0D : latencies.Max();
+            double latencyIncreaseSecondsPerMinute = CalculateLatencyIncreaseSecondsPerMinute(usableSamples);
+            int playbackStopCount = CountPlaybackStops(usableSamples);
+            int stallEventCount = CountEventBursts(usableSamples, sample => sample.StallCount + sample.WaitingCount);
+            int queueOverflowEventCount = CountEventDelta(usableSamples, sample => sample.QueueOverflowCount);
+            int mseRestartCount = CountEventDelta(usableSamples, sample => sample.MseRestartCount);
+            bool webSocketConnected = usableSamples.Any(sample => sample.WebSocketConnected);
+            bool mseOpened = usableSamples.Any(sample => string.Equals(sample.MseReadyState, "open", StringComparison.OrdinalIgnoreCase));
+            bool visibilityRecoveredWithinFiveSeconds = !visibilityRecoveryAttempted ||
+                DidRecoverAfterVisibilityRestore(recoveryCandidateSamples, visibilityRestoredAtSeconds);
+
+            if (averageDecodedFps < 55D)
+            {
+                failureReasons.Add($"decoded fps {averageDecodedFps:0.0} < 55.0");
+            }
+
+            if (averageLatencySeconds < 1.7D || averageLatencySeconds > 2.6D)
+            {
+                failureReasons.Add($"average latency {averageLatencySeconds:0.00}s outside 1.70-2.60s");
+            }
+
+            if (maximumLatencySeconds > 3.0D)
+            {
+                failureReasons.Add($"max latency {maximumLatencySeconds:0.00}s > 3.00s");
+            }
+
+            if (latencyIncreaseSecondsPerMinute > 0.1D)
+            {
+                failureReasons.Add($"latency increase {latencyIncreaseSecondsPerMinute:0.000}s/min > 0.100s/min");
+            }
+
+            if (playbackStopCount > 0)
+            {
+                failureReasons.Add($"playback stopped {playbackStopCount} time(s)");
+            }
+
+            if (stallEventCount > 1)
+            {
+                failureReasons.Add($"stall/waiting bursts {stallEventCount} > 1");
+            }
+
+            if (queueOverflowEventCount > 1)
+            {
+                failureReasons.Add($"queue overflow events {queueOverflowEventCount} > 1");
+            }
+
+            if (!webSocketConnected)
+            {
+                failureReasons.Add("WebSocket never connected after warmup");
+            }
+
+            if (!mseOpened)
+            {
+                failureReasons.Add("MSE never reached open state after warmup");
+            }
+
+            if (visibilityRecoveryAttempted && !visibilityRecoveredWithinFiveSeconds)
+            {
+                failureReasons.Add("visibility recovery did not return to live playback within 5 seconds");
+            }
+
+            return new SmoothLiveBrowserDiagnosticResult(
+                ready: failureReasons.Count == 0,
+                totalSampleCount: samples.Count,
+                usableSampleCount: usableSamples.Count,
+                averageDecodedFps,
+                averageLatencySeconds,
+                maximumLatencySeconds,
+                latencyIncreaseSecondsPerMinute,
+                playbackStopCount,
+                stallEventCount,
+                queueOverflowEventCount,
+                mseRestartCount,
+                webSocketConnected,
+                mseOpened,
+                visibilityRecoveryAttempted,
+                visibilityRecoveredWithinFiveSeconds,
+                failureReasons);
+        }
+
+        private static double CalculateAverageDecodedFps(IReadOnlyList<SmoothLiveMetricSample> samples)
+        {
+            if (samples.Count < 2)
+            {
+                return 0D;
+            }
+
+            double decodedFrameCount = 0D;
+            double sampleSeconds = 0D;
+            for (int sampleIndex = 1; sampleIndex < samples.Count; sampleIndex++)
+            {
+                SmoothLiveMetricSample previousSample = samples[sampleIndex - 1];
+                SmoothLiveMetricSample currentSample = samples[sampleIndex];
+                double elapsedSeconds = currentSample.ElapsedSeconds - previousSample.ElapsedSeconds;
+                int decodedDelta = currentSample.DecodedFrames - previousSample.DecodedFrames;
+                if (elapsedSeconds <= 0.2D || decodedDelta < 0 || decodedDelta > elapsedSeconds * 180D)
+                {
+                    continue;
+                }
+
+                decodedFrameCount += decodedDelta;
+                sampleSeconds += elapsedSeconds;
+            }
+
+            return sampleSeconds <= 0D ? 0D : decodedFrameCount / sampleSeconds;
+        }
+
+        private static double CalculateLatencyIncreaseSecondsPerMinute(IReadOnlyList<SmoothLiveMetricSample> samples)
+        {
+            List<SmoothLiveMetricSample> latencySamples = samples
+                .Where(sample => sample.LatencySeconds.HasValue)
+                .ToList();
+            if (latencySamples.Count < 2)
+            {
+                return 0D;
+            }
+
+            SmoothLiveMetricSample firstSample = latencySamples[0];
+            SmoothLiveMetricSample lastSample = latencySamples[^1];
+            double elapsedSeconds = lastSample.ElapsedSeconds - firstSample.ElapsedSeconds;
+            if (elapsedSeconds <= 0D)
+            {
+                return 0D;
+            }
+
+            double increaseSeconds = Math.Max(0D, lastSample.LatencySeconds!.Value - firstSample.LatencySeconds!.Value);
+            return increaseSeconds / elapsedSeconds * 60D;
+        }
+
+        private static int CountPlaybackStops(IReadOnlyList<SmoothLiveMetricSample> samples)
+        {
+            int stopCount = 0;
+            bool previousIntervalWasStopped = false;
+            for (int sampleIndex = 1; sampleIndex < samples.Count; sampleIndex++)
+            {
+                SmoothLiveMetricSample previousSample = samples[sampleIndex - 1];
+                SmoothLiveMetricSample currentSample = samples[sampleIndex];
+                double elapsedSeconds = currentSample.ElapsedSeconds - previousSample.ElapsedSeconds;
+                bool stopped = elapsedSeconds >= 0.5D &&
+                    currentSample.ReadyState >= 2 &&
+                    Math.Abs(currentSample.CurrentTime - previousSample.CurrentTime) < 0.05D;
+                if (stopped && !previousIntervalWasStopped)
+                {
+                    stopCount++;
+                }
+
+                previousIntervalWasStopped = stopped;
+            }
+
+            return stopCount;
+        }
+
+        private static int CountEventDelta(
+            IReadOnlyList<SmoothLiveMetricSample> samples,
+            Func<SmoothLiveMetricSample, int> readEventCount)
+        {
+            if (samples.Count < 2)
+            {
+                return 0;
+            }
+
+            return Math.Max(0, readEventCount(samples[^1]) - readEventCount(samples[0]));
+        }
+
+        private static int CountEventBursts(
+            IReadOnlyList<SmoothLiveMetricSample> samples,
+            Func<SmoothLiveMetricSample, int> readEventCount)
+        {
+            if (samples.Count < 2)
+            {
+                return 0;
+            }
+
+            int burstCount = 0;
+            bool previousIntervalHadEvent = false;
+            for (int sampleIndex = 1; sampleIndex < samples.Count; sampleIndex++)
+            {
+                SmoothLiveMetricSample previousSample = samples[sampleIndex - 1];
+                SmoothLiveMetricSample currentSample = samples[sampleIndex];
+                double elapsedSeconds = currentSample.ElapsedSeconds - previousSample.ElapsedSeconds;
+                if (elapsedSeconds <= 0D || elapsedSeconds > 2.5D)
+                {
+                    previousIntervalHadEvent = false;
+                    continue;
+                }
+
+                int eventDelta = readEventCount(currentSample) - readEventCount(previousSample);
+                bool intervalHadEvent = eventDelta > 0;
+                if (intervalHadEvent && !previousIntervalHadEvent)
+                {
+                    burstCount++;
+                }
+
+                previousIntervalHadEvent = intervalHadEvent;
+            }
+
+            return burstCount;
+        }
+
+        private static bool DidRecoverAfterVisibilityRestore(
+            IReadOnlyList<SmoothLiveMetricSample> usableSamples,
+            double? visibilityRestoredAtSeconds)
+        {
+            if (!visibilityRestoredAtSeconds.HasValue)
+            {
+                return false;
+            }
+
+            double restoredAtSeconds = visibilityRestoredAtSeconds.Value;
+            return usableSamples.Any(sample =>
+                sample.ElapsedSeconds >= restoredAtSeconds &&
+                sample.ElapsedSeconds <= restoredAtSeconds + 5D &&
+                sample.ReadyState >= 2 &&
+                !sample.Paused &&
+                sample.WebSocketConnected &&
+                sample.LatencySeconds is <= ScreenStreamingServer.H264Fmp4MaximumLatencySeconds);
+        }
+
+        private static bool IsWithinVisibilityRecoveryWindow(
+            SmoothLiveMetricSample sample,
+            double? visibilityRestoredAtSeconds)
+        {
+            if (!visibilityRestoredAtSeconds.HasValue)
+            {
+                return false;
+            }
+
+            double restoredAtSeconds = visibilityRestoredAtSeconds.Value;
+            return sample.ElapsedSeconds >= restoredAtSeconds &&
+                sample.ElapsedSeconds <= restoredAtSeconds + 5D;
+        }
     }
 
     private sealed class Fmp4WebSocketDiagnosticResult

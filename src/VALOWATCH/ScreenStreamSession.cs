@@ -113,6 +113,8 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         }
     }
 
+    public string SmoothLiveStatusText => streamingServer.SmoothLiveStatusText;
+
     public static async Task<ScreenStreamSession> StartAsync(
         AppPaths appPaths,
         ScreenCaptureTarget target,
