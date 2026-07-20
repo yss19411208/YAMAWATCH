@@ -827,6 +827,7 @@ static class Program
         appPaths.EnsureDirectories();
         string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         ScreenStreamingServer? server = null;
+        List<string> serverMessages = [];
 
         try
         {
@@ -837,7 +838,6 @@ static class Program
                 1280,
                 ScreenStreamMethod.H264Fmp4);
             string ffmpegPath = ResolveFfmpegForDiagnostic(appPaths, logFilePath);
-            List<string> serverMessages = [];
             server = ScreenStreamingServer.Start(
                 options,
                 ffmpegPath,
@@ -854,8 +854,10 @@ static class Program
             };
             string pageUrl = $"{server.LocalOrigin}/{server.PublicPath}";
             string streamUrl = $"{pageUrl}/stream.mp4";
+            string liveInitUrl = $"{pageUrl}/live/init.mp4";
+            string liveFragmentUrl = $"{pageUrl}/live/fragment/0.m4s";
             string pageHtml = httpClient.GetStringAsync(pageUrl).GetAwaiter().GetResult();
-            using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(8));
+            using CancellationTokenSource readTimeout = new(TimeSpan.FromSeconds(18));
             using HttpResponseMessage response = httpClient
                 .GetAsync(streamUrl, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token)
                 .GetAwaiter()
@@ -863,11 +865,66 @@ static class Program
             response.EnsureSuccessStatusCode();
 
             byte[] streamBytes = ReadSomeResponseBytes(response, minimumBytes: 1024 * 128, maximumBytes: 1024 * 1024, readTimeout.Token);
+            using HttpResponseMessage liveInitResponse = httpClient
+                .GetAsync(liveInitUrl, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            liveInitResponse.EnsureSuccessStatusCode();
+            byte[] liveInitBytes = liveInitResponse.Content.ReadAsByteArrayAsync(readTimeout.Token).GetAwaiter().GetResult();
+            using HttpResponseMessage liveFragmentResponse = httpClient
+                .GetAsync(liveFragmentUrl, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            liveFragmentResponse.EnsureSuccessStatusCode();
+            byte[] liveFragmentBytes = liveFragmentResponse.Content.ReadAsByteArrayAsync(readTimeout.Token).GetAwaiter().GetResult();
+            long firstLiveFragmentSequence = -1L;
+            if (liveFragmentResponse.Headers.TryGetValues("X-VALOWATCH-Sequence", out IEnumerable<string>? firstSequenceValues))
+            {
+                _ = long.TryParse(
+                    firstSequenceValues.FirstOrDefault(),
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out firstLiveFragmentSequence);
+            }
+
+            string nextLiveFragmentUrl = $"{pageUrl}/live/fragment/{(firstLiveFragmentSequence + 1L).ToString(System.Globalization.CultureInfo.InvariantCulture)}.m4s";
+            using HttpResponseMessage nextLiveFragmentResponse = httpClient
+                .GetAsync(nextLiveFragmentUrl, HttpCompletionOption.ResponseHeadersRead, readTimeout.Token)
+                .GetAwaiter()
+                .GetResult();
+            nextLiveFragmentResponse.EnsureSuccessStatusCode();
+            byte[] nextLiveFragmentBytes = nextLiveFragmentResponse.Content.ReadAsByteArrayAsync(readTimeout.Token).GetAwaiter().GetResult();
             bool contentTypeLooksLikeMp4 = response.Content.Headers.ContentType?.MediaType
                 ?.Equals("video/mp4", StringComparison.OrdinalIgnoreCase) == true;
+            bool liveInitContentTypeLooksLikeMp4 = liveInitResponse.Content.Headers.ContentType?.MediaType
+                ?.Equals("video/mp4", StringComparison.OrdinalIgnoreCase) == true;
+            bool liveFragmentContentTypeLooksLikeSegment = liveFragmentResponse.Content.Headers.ContentType?.MediaType
+                ?.Equals("video/iso.segment", StringComparison.OrdinalIgnoreCase) == true;
+            bool nextLiveFragmentContentTypeLooksLikeSegment = nextLiveFragmentResponse.Content.Headers.ContentType?.MediaType
+                ?.Equals("video/iso.segment", StringComparison.OrdinalIgnoreCase) == true;
+            long nextLiveFragmentSequence = -1L;
+            bool nextLiveFragmentHasSequenceHeader =
+                nextLiveFragmentResponse.Headers.TryGetValues("X-VALOWATCH-Sequence", out IEnumerable<string>? nextSequenceValues) &&
+                long.TryParse(
+                    nextSequenceValues.FirstOrDefault(),
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out nextLiveFragmentSequence);
+            bool liveFragmentHasSequenceHeader = firstLiveFragmentSequence >= 0L;
+            bool liveFragmentSequenceAdvances = nextLiveFragmentHasSequenceHeader &&
+                nextLiveFragmentSequence >= firstLiveFragmentSequence + 1L;
             bool streamLooksLikeFragmentedMp4 =
                 ContainsAsciiToken(streamBytes, "ftyp") &&
                 (ContainsAsciiToken(streamBytes, "moov") || ContainsAsciiToken(streamBytes, "moof") || ContainsAsciiToken(streamBytes, "mdat"));
+            bool liveInitLooksLikeInitializationSegment =
+                ContainsAsciiToken(liveInitBytes, "ftyp") &&
+                ContainsAsciiToken(liveInitBytes, "moov");
+            bool liveFragmentLooksLikeMediaSegment =
+                ContainsAsciiToken(liveFragmentBytes, "moof") &&
+                ContainsAsciiToken(liveFragmentBytes, "mdat");
+            bool nextLiveFragmentLooksLikeMediaSegment =
+                ContainsAsciiToken(nextLiveFragmentBytes, "moof") &&
+                ContainsAsciiToken(nextLiveFragmentBytes, "mdat");
             bool pageHasVideoControls = pageHtml.Contains(" controls", StringComparison.OrdinalIgnoreCase);
             string maximumLatencySecondsText = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds
                 .ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
@@ -889,6 +946,12 @@ static class Program
                 pageHtml.Contains("suspendFmp4ForHiddenPage", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("resumeFmp4FromHiddenPage", StringComparison.OrdinalIgnoreCase) &&
                 pageHtml.Contains("hiddenStreamSuspended", StringComparison.OrdinalIgnoreCase);
+            bool pageHasMseLiveController =
+                pageHtml.Contains("MediaSource", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("live/init.mp4", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("live/fragment/", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("queueFmp4Bytes", StringComparison.OrdinalIgnoreCase) &&
+                pageHtml.Contains("X-VALOWATCH-Sequence", StringComparison.OrdinalIgnoreCase);
             bool fmp4LatencyLimitStaysUnderThreeSeconds = ScreenStreamingServer.H264Fmp4MaximumLatencySeconds < 3D &&
                 ScreenStreamingServer.H264Fmp4LatencyCheckIntervalMilliseconds <= 100 &&
                 ScreenStreamingServer.H264Fmp4ReconnectStallMilliseconds <= 2000;
@@ -901,11 +964,20 @@ static class Program
                 !pageHasVideoControls &&
                 pageHasLowLatencyController &&
                 pageHasVisibilityRecovery &&
+                pageHasMseLiveController &&
                 fmp4LatencyLimitStaysUnderThreeSeconds &&
                 fmp4FragmentDurationConfigured &&
                 fmp4KeyframeIntervalConfigured &&
                 contentTypeLooksLikeMp4 &&
                 streamLooksLikeFragmentedMp4 &&
+                liveInitContentTypeLooksLikeMp4 &&
+                liveInitLooksLikeInitializationSegment &&
+                liveFragmentContentTypeLooksLikeSegment &&
+                liveFragmentHasSequenceHeader &&
+                liveFragmentLooksLikeMediaSegment &&
+                nextLiveFragmentContentTypeLooksLikeSegment &&
+                liveFragmentSequenceAdvances &&
+                nextLiveFragmentLooksLikeMediaSegment &&
                 options.FramesPerSecond >= 60;
 
             AppendDiagnosticLogLine(
@@ -917,6 +989,12 @@ static class Program
                 $"FragmentedMp4: {streamLooksLikeFragmentedMp4}. VideoControls: {pageHasVideoControls}. " +
                 $"LowLatencyController: {pageHasLowLatencyController}. " +
                 $"VisibilityRecovery: {pageHasVisibilityRecovery}. " +
+                $"MseLiveController: {pageHasMseLiveController}. " +
+                $"LiveInitBytes: {liveInitBytes.Length}. LiveInitOk: {liveInitLooksLikeInitializationSegment}. " +
+                $"LiveFragmentBytes: {liveFragmentBytes.Length}. LiveFragmentOk: {liveFragmentLooksLikeMediaSegment}. " +
+                $"LiveFragmentSequence: {firstLiveFragmentSequence}. LiveFragmentSequenceHeader: {liveFragmentHasSequenceHeader}. " +
+                $"NextLiveFragmentBytes: {nextLiveFragmentBytes.Length}. NextLiveFragmentOk: {nextLiveFragmentLooksLikeMediaSegment}. " +
+                $"NextLiveFragmentSequence: {nextLiveFragmentSequence}. SequenceAdvances: {liveFragmentSequenceAdvances}. " +
                 $"MaxLatencySeconds: {maximumLatencySecondsText}. " +
                 $"LatencyCheckMs: {latencyCheckIntervalMillisecondsText}. " +
                 $"SeekCooldownMs: {seekCooldownMillisecondsText}. " +
@@ -929,7 +1007,10 @@ static class Program
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or ExternalException or System.ComponentModel.Win32Exception)
         {
-            TryWriteDiagnosticFailure(logFilePath, "Stream h264-fmp4 check", exception);
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Stream h264-fmp4 check failed: {exception}. " +
+                $"Messages: {string.Join(" | ", serverMessages.TakeLast(8))}.");
             Environment.ExitCode = 1;
         }
         finally

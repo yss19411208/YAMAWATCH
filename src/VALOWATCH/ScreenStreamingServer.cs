@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Diagnostics;
@@ -17,24 +18,30 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MinimumMaxWidth = 320;
     public const int DefaultMaxWidth = 1920;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 0.8D;
-    public const double H264Fmp4CatchUpLatencySeconds = 1.0D;
-    public const double H264Fmp4MaximumLatencySeconds = 2.65D;
+    public const double H264Fmp4TargetLatencySeconds = 0.75D;
+    public const double H264Fmp4CatchUpLatencySeconds = 0.95D;
+    public const double H264Fmp4MaximumLatencySeconds = 1.8D;
     public const int H264Fmp4LatencyCheckIntervalMilliseconds = 100;
-    public const int H264Fmp4SeekCooldownMilliseconds = 1400;
-    public const int H264Fmp4ReconnectStallMilliseconds = 1800;
+    public const int H264Fmp4SeekCooldownMilliseconds = 850;
+    public const int H264Fmp4ReconnectStallMilliseconds = 1200;
     public const int H264Fmp4FragmentDurationMicroseconds = 200000;
     public const int H264Fmp4MinimumFragmentDurationMicroseconds = 100000;
+    public const int H264Fmp4InitialFragmentCount = 2;
+    public const int H264Fmp4RetainedFragmentCount = 18;
+    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 1200;
     public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
     public const int MjpegFfmpegThresholdFramesPerSecond = 60;
     private const int FrameCaptureRetryCount = 3;
+    private const long MaximumFmp4BoxBytes = 64L * 1024L * 1024L;
     private static readonly TimeSpan FrameCaptureRetryDelay = TimeSpan.FromMilliseconds(8);
+    private static readonly TimeSpan Fmp4StartupTimeout = TimeSpan.FromSeconds(8);
 
     private readonly TcpListener listener;
     private readonly CancellationTokenSource cancellationTokenSource = new();
     private readonly SemaphoreSlim frameSemaphore = new(1, 1);
     private readonly Action<string, Exception?> log;
+    private readonly object fmp4LiveStreamSyncRoot = new();
     private readonly string token;
     private readonly TimeSpan frameInterval;
     private readonly ScreenCapturePlan capturePlan;
@@ -42,6 +49,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly string streamWorkDirectory;
     private readonly string? hlsDirectory;
     private Process? hlsProcess;
+    private Fmp4LiveFragmentSource? fmp4LiveFragmentSource;
     private FullScreenScreenshotFrame? cachedFrame;
     private DateTimeOffset cachedFrameAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastCaptureFailureLoggedAtUtc = DateTimeOffset.MinValue;
@@ -132,6 +140,10 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         {
             server.StartHlsEncoder();
         }
+        else if (options.Method == ScreenStreamMethod.H264Fmp4)
+        {
+            server.GetOrStartFmp4LiveFragmentSource();
+        }
 
         server.acceptTask = Task.Run(server.AcceptLoopAsync);
         server.log(
@@ -153,6 +165,15 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             StopProcess(hlsProcess, "ffmpeg hls", log);
             hlsProcess = null;
         }
+
+        Fmp4LiveFragmentSource? fmp4SourceToDispose;
+        lock (fmp4LiveStreamSyncRoot)
+        {
+            fmp4SourceToDispose = fmp4LiveFragmentSource;
+            fmp4LiveFragmentSource = null;
+        }
+
+        fmp4SourceToDispose?.Dispose();
 
         if (acceptTask is not null)
         {
@@ -236,6 +257,18 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             if (IsFmp4Path(requestPath))
             {
                 await WriteFmp4StreamResponseAsync(networkStream, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (IsFmp4InitPath(requestPath))
+            {
+                await WriteFmp4InitResponseAsync(networkStream, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (TryGetFmp4FragmentRequest(requestPath, out long requestedFragmentSequence))
+            {
+                await WriteFmp4FragmentResponseAsync(networkStream, requestedFragmentSequence, cancellationToken).ConfigureAwait(false);
                 return;
             }
 
@@ -328,6 +361,30 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         return string.Equals(requestPath, $"/{PublicPath}/stream.mp4", StringComparison.Ordinal);
     }
 
+    private bool IsFmp4InitPath(string requestPath)
+    {
+        return string.Equals(requestPath, $"/{PublicPath}/live/init.mp4", StringComparison.Ordinal);
+    }
+
+    private bool TryGetFmp4FragmentRequest(string requestPath, out long requestedFragmentSequence)
+    {
+        requestedFragmentSequence = 0L;
+        string prefix = $"/{PublicPath}/live/fragment/";
+        if (!requestPath.StartsWith(prefix, StringComparison.Ordinal) ||
+            !requestPath.EndsWith(".m4s", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string sequenceText = requestPath[prefix.Length..^4];
+        return long.TryParse(
+            sequenceText,
+            System.Globalization.NumberStyles.None,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out requestedFragmentSequence) &&
+            requestedFragmentSequence >= 0L;
+    }
+
     private bool IsHlsPlaylistPath(string requestPath)
     {
         return string.Equals(requestPath, $"/{PublicPath}/stream.m3u8", StringComparison.Ordinal);
@@ -374,11 +431,16 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         };
         string streamPathHtml = WebUtility.HtmlEncode(streamPath);
         string streamPathJavaScript = streamPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
+        string liveInitPath = $"/{PublicPath}/live/init.mp4";
+        string liveFragmentPathPrefix = $"/{PublicPath}/live/fragment/";
+        string liveInitPathJavaScript = liveInitPath.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
+        string liveFragmentPathPrefixJavaScript = liveFragmentPathPrefix.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal);
+        string h264MimeTypeJavaScript = $"video/mp4; codecs=\"{GetH264MimeCodec()}\"";
         string mediaElement = Options.Method == ScreenStreamMethod.Mjpeg
             ? $"<img id=\"screen\" src=\"{streamPathHtml}\" alt=\"VALOWATCH stream\">"
             : Options.Method == ScreenStreamMethod.H264Hls
                 ? "<video id=\"screen\" autoplay muted playsinline></video>"
-                : $"<video id=\"screen\" src=\"{streamPathHtml}\" autoplay muted playsinline></video>";
+                : "<video id=\"screen\" autoplay muted playsinline></video>";
         string targetLatencySecondsText = H264Fmp4TargetLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string catchUpLatencySecondsText = H264Fmp4CatchUpLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
         string maximumLatencySecondsText = H264Fmp4MaximumLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
@@ -407,6 +469,9 @@ if (window.Hls && Hls.isSupported()) {
 <script>
 const screenVideo = document.getElementById('screen');
 const streamPath = '{{streamPathJavaScript}}';
+const liveInitPath = '{{liveInitPathJavaScript}}';
+const liveFragmentPathPrefix = '{{liveFragmentPathPrefixJavaScript}}';
+const fmp4MimeType = '{{h264MimeTypeJavaScript}}';
 const targetLatencySeconds = {{targetLatencySecondsText}};
 const catchUpLatencySeconds = {{catchUpLatencySecondsText}};
 const maximumLatencySeconds = {{maximumLatencySecondsText}};
@@ -418,9 +483,18 @@ let lastPlayAttemptAtMilliseconds = 0;
 let lastReconnectAtMilliseconds = 0;
 let lastPlaybackTime = 0;
 let lastPlaybackMovedAtMilliseconds = performance.now();
+let lastFragmentReceivedAtMilliseconds = performance.now();
 let reconnectNonce = 0;
 let frameMonitorScheduled = false;
 let hiddenStreamSuspended = false;
+let mediaSource = null;
+let sourceBuffer = null;
+let sourceObjectUrl = '';
+let appendQueue = [];
+let nextFragmentSequence = 0;
+let activeStreamSession = 0;
+let activeFetchAbortController = null;
+let directFallbackActive = false;
 screenVideo.preload = 'auto';
 screenVideo.controls = false;
 screenVideo.muted = true;
@@ -441,10 +515,16 @@ function suspendFmp4ForHiddenPage() {
 
   hiddenStreamSuspended = true;
   screenVideo.playbackRate = 1;
+  activeStreamSession += 1;
+  if (activeFetchAbortController) {
+    try {
+      activeFetchAbortController.abort();
+    } catch {
+    }
+  }
+
   try {
     screenVideo.pause();
-    screenVideo.removeAttribute('src');
-    screenVideo.load();
   } catch {
   }
 
@@ -519,28 +599,65 @@ function reconnectFmp4Stream(forceReconnect = false) {
   }
 
   if (!forceReconnect &&
-      nowMilliseconds - lastReconnectAtMilliseconds < Math.max(3000, reconnectStallMilliseconds)) {
+      nowMilliseconds - lastReconnectAtMilliseconds < Math.max(650, reconnectStallMilliseconds)) {
     return;
   }
 
   lastReconnectAtMilliseconds = nowMilliseconds;
   lastPlaybackMovedAtMilliseconds = nowMilliseconds;
+  lastFragmentReceivedAtMilliseconds = nowMilliseconds;
   reconnectNonce += 1;
   screenVideo.playbackRate = 1;
+  appendQueue = [];
+  activeStreamSession += 1;
+  if (activeFetchAbortController) {
+    try {
+      activeFetchAbortController.abort();
+    } catch {
+    }
+  }
+
+  if (directFallbackActive) {
+    screenVideo.src = streamPath + '?r=' + reconnectNonce + '&t=' + Date.now();
+    try {
+      screenVideo.load();
+    } catch {
+    }
+
+    keepFmp4Playing(true);
+    return;
+  }
+
+  startMseFmp4Live();
+}
+function releaseCurrentMediaSource() {
   try {
     screenVideo.pause();
-    screenVideo.removeAttribute('src');
-    screenVideo.load();
   } catch {
   }
 
-  screenVideo.src = streamPath + '?r=' + reconnectNonce + '&t=' + Date.now();
+  try {
+    if (mediaSource && mediaSource.readyState === 'open') {
+      mediaSource.endOfStream();
+    }
+  } catch {
+  }
+
+  try {
+    if (sourceObjectUrl) {
+      URL.revokeObjectURL(sourceObjectUrl);
+    }
+  } catch {
+  }
+
+  mediaSource = null;
+  sourceBuffer = null;
+  sourceObjectUrl = '';
+  screenVideo.removeAttribute('src');
   try {
     screenVideo.load();
   } catch {
   }
-
-  keepFmp4Playing(true);
 }
 function keepFmp4LatencyLow() {
   if (suspendFmp4ForHiddenPage()) {
@@ -561,13 +678,24 @@ function keepFmp4LatencyLow() {
   const { bufferedEnd, latencySeconds } = latencyState;
   if (latencySeconds > maximumLatencySeconds) {
     const seeked = seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds);
-    screenVideo.playbackRate = seeked ? 1 : 1.35;
+    if (!seeked && !directFallbackActive) {
+      reconnectFmp4Stream();
+      return;
+    }
+
+    screenVideo.playbackRate = seeked ? 1 : 1.30;
     return;
   }
 
   if (!screenVideo.paused &&
       screenVideo.readyState < 3 &&
       nowMilliseconds - lastPlaybackMovedAtMilliseconds > reconnectStallMilliseconds) {
+    reconnectFmp4Stream();
+    return;
+  }
+
+  if (!directFallbackActive &&
+      nowMilliseconds - lastFragmentReceivedAtMilliseconds > Math.max(1600, reconnectStallMilliseconds + 450)) {
     reconnectFmp4Stream();
     return;
   }
@@ -600,6 +728,181 @@ async function keepFmp4Playing(forcePlay = false) {
   try {
     await screenVideo.play();
   } catch {
+  }
+}
+function queueFmp4Bytes(bytes) {
+  if (!bytes || bytes.byteLength === 0) {
+    return;
+  }
+
+  appendQueue.push(bytes);
+  if (appendQueue.length > 8) {
+    appendQueue.splice(0, appendQueue.length - 3);
+  }
+
+  pumpFmp4AppendQueue();
+}
+function pumpFmp4AppendQueue() {
+  if (!sourceBuffer || sourceBuffer.updating || appendQueue.length === 0) {
+    return;
+  }
+
+  const nextBytes = appendQueue.shift();
+  try {
+    sourceBuffer.appendBuffer(nextBytes);
+  } catch {
+    reconnectFmp4Stream(true);
+  }
+}
+function trimFmp4Buffer() {
+  if (!sourceBuffer || sourceBuffer.updating || !screenVideo.buffered || screenVideo.buffered.length === 0) {
+    return;
+  }
+
+  const bufferedEnd = screenVideo.buffered.end(screenVideo.buffered.length - 1);
+  const removeBefore = bufferedEnd - Math.max(3.2, maximumLatencySeconds + targetLatencySeconds);
+  if (removeBefore <= 0) {
+    return;
+  }
+
+  try {
+    sourceBuffer.remove(0, removeBefore);
+  } catch {
+  }
+}
+function startDirectFmp4Fallback() {
+  directFallbackActive = true;
+  releaseCurrentMediaSource();
+  screenVideo.src = streamPath + '?fallback=1&t=' + Date.now();
+  try {
+    screenVideo.load();
+  } catch {
+  }
+
+  keepFmp4Playing(true);
+}
+function waitForMediaSourceOpen(session) {
+  return new Promise((resolve, reject) => {
+    const openingMediaSource = mediaSource;
+    if (!openingMediaSource) {
+      reject(new Error('MediaSource unavailable'));
+      return;
+    }
+
+    if (openingMediaSource.readyState === 'open') {
+      resolve();
+      return;
+    }
+
+    const handleOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      reject(new Error('MediaSource open failed'));
+    };
+    const cleanup = () => {
+      openingMediaSource.removeEventListener('sourceopen', handleOpen);
+      openingMediaSource.removeEventListener('sourceended', handleError);
+      openingMediaSource.removeEventListener('sourceclose', handleError);
+    };
+    openingMediaSource.addEventListener('sourceopen', handleOpen, { once: true });
+    openingMediaSource.addEventListener('sourceended', handleError, { once: true });
+    openingMediaSource.addEventListener('sourceclose', handleError, { once: true });
+    window.setTimeout(() => {
+      if (session === activeStreamSession && openingMediaSource.readyState !== 'open') {
+        cleanup();
+        reject(new Error('MediaSource open timed out'));
+      }
+    }, 5000);
+  });
+}
+async function fetchFmp4ArrayBuffer(url, abortSignal) {
+  const response = await fetch(url, {
+    cache: 'no-store',
+    signal: abortSignal,
+    headers: { 'Cache-Control': 'no-store' }
+  });
+  if (!response.ok) {
+    throw new Error('HTTP ' + response.status);
+  }
+
+  return { response, bytes: await response.arrayBuffer() };
+}
+async function runFmp4FragmentLoop(session, abortSignal) {
+  while (session === activeStreamSession && !abortSignal.aborted && !isFmp4PageHidden()) {
+    const requestedSequence = nextFragmentSequence > 0 ? nextFragmentSequence : 0;
+    const fragmentUrl = liveFragmentPathPrefix + requestedSequence + '.m4s?t=' + Date.now();
+    const result = await fetchFmp4ArrayBuffer(fragmentUrl, abortSignal);
+    if (session !== activeStreamSession || abortSignal.aborted) {
+      return;
+    }
+
+    const sequenceText = result.response.headers.get('X-VALOWATCH-Sequence');
+    const actualSequence = Number.parseInt(sequenceText || '', 10);
+    nextFragmentSequence = Number.isFinite(actualSequence) && actualSequence >= 0
+      ? actualSequence + 1
+      : requestedSequence + 1;
+    lastFragmentReceivedAtMilliseconds = performance.now();
+    queueFmp4Bytes(result.bytes);
+    keepFmp4LatencyLow();
+  }
+}
+async function startMseFmp4Live() {
+  if (isFmp4PageHidden()) {
+    return;
+  }
+
+  if (!window.MediaSource || !MediaSource.isTypeSupported(fmp4MimeType)) {
+    startDirectFmp4Fallback();
+    return;
+  }
+
+  directFallbackActive = false;
+  const session = activeStreamSession;
+  releaseCurrentMediaSource();
+  appendQueue = [];
+  nextFragmentSequence = 0;
+  activeFetchAbortController = new AbortController();
+  mediaSource = new MediaSource();
+  sourceObjectUrl = URL.createObjectURL(mediaSource);
+  screenVideo.src = sourceObjectUrl;
+  try {
+    screenVideo.load();
+  } catch {
+  }
+
+  try {
+    await waitForMediaSourceOpen(session);
+    if (session !== activeStreamSession || isFmp4PageHidden()) {
+      return;
+    }
+
+    sourceBuffer = mediaSource.addSourceBuffer(fmp4MimeType);
+    try {
+      sourceBuffer.mode = 'sequence';
+    } catch {
+    }
+
+    sourceBuffer.addEventListener('updateend', () => {
+      trimFmp4Buffer();
+      pumpFmp4AppendQueue();
+      keepFmp4LatencyLow();
+    });
+    sourceBuffer.addEventListener('error', () => reconnectFmp4Stream(true));
+    const initResult = await fetchFmp4ArrayBuffer(liveInitPath + '?t=' + Date.now(), activeFetchAbortController.signal);
+    if (session !== activeStreamSession || activeFetchAbortController.signal.aborted) {
+      return;
+    }
+
+    queueFmp4Bytes(initResult.bytes);
+    keepFmp4Playing(true);
+    await runFmp4FragmentLoop(session, activeFetchAbortController.signal);
+  } catch {
+    if (session === activeStreamSession && !isFmp4PageHidden()) {
+      window.setTimeout(() => reconnectFmp4Stream(true), 500);
+    }
   }
 }
 function scheduleFmp4FrameMonitor() {
@@ -654,6 +957,7 @@ window.setInterval(() => {
 screenVideo.onerror = () => {
   reconnectFmp4Stream();
 };
+startMseFmp4Live();
 </script>
 """,
             _ => $$"""
@@ -835,6 +1139,192 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
     }
 
+    private Fmp4LiveFragmentSource GetOrStartFmp4LiveFragmentSource()
+    {
+        if (Options.Method != ScreenStreamMethod.H264Fmp4)
+        {
+            throw new InvalidOperationException("fMP4 live stream is not enabled for this session.");
+        }
+
+        lock (fmp4LiveStreamSyncRoot)
+        {
+            if (fmp4LiveFragmentSource is { IsUsable: true })
+            {
+                return fmp4LiveFragmentSource;
+            }
+
+            fmp4LiveFragmentSource?.Dispose();
+            Process process = StartFfmpegFmp4Process();
+            _ = Task.Run(() => ReadFfmpegErrorLinesAsync(process, cancellationTokenSource.Token), CancellationToken.None);
+            fmp4LiveFragmentSource = new Fmp4LiveFragmentSource(process, log);
+            fmp4LiveFragmentSource.Start(cancellationTokenSource.Token);
+            return fmp4LiveFragmentSource;
+        }
+    }
+
+    private void ClearFmp4LiveFragmentSource(Fmp4LiveFragmentSource source)
+    {
+        bool shouldDispose = false;
+        lock (fmp4LiveStreamSyncRoot)
+        {
+            if (ReferenceEquals(fmp4LiveFragmentSource, source))
+            {
+                fmp4LiveFragmentSource = null;
+                shouldDispose = true;
+            }
+        }
+
+        if (shouldDispose)
+        {
+            source.Dispose();
+        }
+    }
+
+    private async Task<Fmp4LiveSnapshot> WaitForFmp4LiveSnapshotWithRestartAsync(CancellationToken cancellationToken)
+    {
+        Exception? lastException = null;
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
+            try
+            {
+                return await source
+                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (attempt == 1 && exception is InvalidOperationException or TimeoutException)
+            {
+                lastException = exception;
+                log("fMP4 live encoder did not produce an initial fragment; restarting it once.", exception);
+                ClearFmp4LiveFragmentSource(source);
+            }
+        }
+
+        throw new InvalidOperationException("fMP4 live encoder did not produce an initial fragment after restart.", lastException);
+    }
+
+    private async Task<Fmp4Fragment> WaitForFmp4LiveFragmentWithRestartAsync(
+        long requestedFragmentSequence,
+        CancellationToken cancellationToken)
+    {
+        Exception? lastException = null;
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
+            try
+            {
+                long effectiveRequestedSequence = attempt == 1 ? requestedFragmentSequence : 0L;
+                return await source
+                    .WaitForFragmentAsync(effectiveRequestedSequence, Fmp4StartupTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (attempt == 1 && exception is InvalidOperationException or TimeoutException)
+            {
+                lastException = exception;
+                log("fMP4 live encoder did not produce a requested fragment; restarting it once.", exception);
+                ClearFmp4LiveFragmentSource(source);
+            }
+        }
+
+        throw new InvalidOperationException("fMP4 live encoder did not produce a media fragment after restart.", lastException);
+    }
+
+    private async Task WriteFmp4InitResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
+    {
+        if (Options.Method != ScreenStreamMethod.H264Fmp4)
+        {
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 404,
+                reasonPhrase: "Not Found",
+                "fMP4 stream is not enabled for this session.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            Fmp4LiveSnapshot snapshot = await WaitForFmp4LiveSnapshotWithRestartAsync(cancellationToken).ConfigureAwait(false);
+            await WriteFmp4InitResponseHeaderAsync(
+                networkStream,
+                snapshot.InitSegment.Length,
+                cancellationToken).ConfigureAwait(false);
+            await networkStream.WriteAsync(snapshot.InitSegment, cancellationToken).ConfigureAwait(false);
+            await networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException exception)
+        {
+            log("fMP4 live init segment was not ready before the startup timeout.", exception);
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 503,
+                reasonPhrase: "Service Unavailable",
+                "fMP4 live stream is warming up.",
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            log("fMP4 live init response failed.", exception);
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 503,
+                reasonPhrase: "Service Unavailable",
+                "fMP4 live stream is unavailable.",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task WriteFmp4FragmentResponseAsync(
+        NetworkStream networkStream,
+        long requestedFragmentSequence,
+        CancellationToken cancellationToken)
+    {
+        if (Options.Method != ScreenStreamMethod.H264Fmp4)
+        {
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 404,
+                reasonPhrase: "Not Found",
+                "fMP4 stream is not enabled for this session.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            Fmp4Fragment fragment = await WaitForFmp4LiveFragmentWithRestartAsync(
+                requestedFragmentSequence,
+                cancellationToken).ConfigureAwait(false);
+            await WriteFmp4FragmentResponseHeaderAsync(
+                networkStream,
+                fragment.Bytes.Length,
+                fragment.Sequence,
+                cancellationToken).ConfigureAwait(false);
+            await networkStream.WriteAsync(fragment.Bytes, cancellationToken).ConfigureAwait(false);
+            await networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (TimeoutException exception)
+        {
+            log("fMP4 live fragment was not ready before the startup timeout.", exception);
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 503,
+                reasonPhrase: "Service Unavailable",
+                "fMP4 live fragment is warming up.",
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            log("fMP4 live fragment response failed.", exception);
+            await WritePlainTextResponseAsync(
+                networkStream,
+                statusCode: 503,
+                reasonPhrase: "Service Unavailable",
+                "fMP4 live fragment is unavailable.",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private async Task WriteFmp4StreamResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
     {
         if (Options.Method != ScreenStreamMethod.H264Fmp4)
@@ -848,32 +1338,53 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             return;
         }
 
-        Process? process = null;
         long copiedBytes = 0;
+        int copiedFragments = 0;
         DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
+        bool responseHeaderSent = false;
         try
         {
-            process = StartFfmpegFmp4Process();
-            _ = Task.Run(() => ReadFfmpegErrorLinesAsync(process, cancellationToken), CancellationToken.None);
-            await WriteFmp4ResponseHeaderAsync(networkStream, cancellationToken).ConfigureAwait(false);
+            Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
+            Fmp4LiveSnapshot snapshot;
+            try
+            {
+                snapshot = await source
+                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or TimeoutException)
+            {
+                log("fMP4 live encoder did not produce an initial stream fragment; restarting it once.", exception);
+                ClearFmp4LiveFragmentSource(source);
+                source = GetOrStartFmp4LiveFragmentSource();
+                snapshot = await source
+                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
-            byte[] copyBuffer = new byte[1024 * 256];
-            Stream ffmpegOutputStream = process.StandardOutput.BaseStream;
+            await WriteFmp4ResponseHeaderAsync(networkStream, cancellationToken).ConfigureAwait(false);
+            responseHeaderSent = true;
+            await WriteNetworkBytesWithTimeoutAsync(networkStream, snapshot.InitSegment, cancellationToken).ConfigureAwait(false);
+            copiedBytes += snapshot.InitSegment.Length;
+
+            long nextFragmentSequence = snapshot.NextSequence;
+            foreach (Fmp4Fragment fragment in snapshot.Fragments)
+            {
+                await WriteNetworkBytesWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
+                copiedBytes += fragment.Bytes.Length;
+                copiedFragments++;
+                nextFragmentSequence = Math.Max(nextFragmentSequence, fragment.Sequence + 1L);
+            }
+
             while (!cancellationToken.IsCancellationRequested)
             {
-                int readByteCount = await ffmpegOutputStream
-                    .ReadAsync(copyBuffer.AsMemory(0, copyBuffer.Length), cancellationToken)
+                Fmp4Fragment fragment = await source
+                    .WaitForFragmentAsync(nextFragmentSequence, TimeSpan.FromSeconds(5), cancellationToken)
                     .ConfigureAwait(false);
-                if (readByteCount == 0)
-                {
-                    break;
-                }
-
-                await networkStream
-                    .WriteAsync(copyBuffer.AsMemory(0, readByteCount), cancellationToken)
-                    .ConfigureAwait(false);
-                await networkStream.FlushAsync(cancellationToken).ConfigureAwait(false);
-                copiedBytes += readByteCount;
+                await WriteNetworkBytesWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
+                copiedBytes += fragment.Bytes.Length;
+                copiedFragments++;
+                nextFragmentSequence = fragment.Sequence + 1L;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -882,22 +1393,32 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
         {
         }
-        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
         {
-            log("FFmpeg fMP4 screen stream connection stopped.", exception);
+            log("fMP4 live screen stream connection stopped.", exception);
+            if (!responseHeaderSent)
+            {
+                try
+                {
+                    await WritePlainTextResponseAsync(
+                        networkStream,
+                        statusCode: 503,
+                        reasonPhrase: "Service Unavailable",
+                        "fMP4 live stream is unavailable.",
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception responseException) when (responseException is IOException or ObjectDisposedException or InvalidOperationException)
+                {
+                }
+            }
         }
         finally
         {
-            if (process is not null)
-            {
-                StopProcess(process, "ffmpeg fmp4", log);
-            }
-
             double elapsedSeconds = Math.Max(0.001D, (DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds);
             log(
-                "FFmpeg fMP4 screen stream connection closed. " +
+                "fMP4 live screen stream connection closed. " +
                 $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. " +
-                $"ConfiguredFPS: {FramesPerSecond}. MaxWidth: {MaxWidth}. CopiedBytes: {copiedBytes}. " +
+                $"ConfiguredFPS: {FramesPerSecond}. MaxWidth: {MaxWidth}. CopiedBytes: {copiedBytes}. CopiedFragments: {copiedFragments}. " +
                 $"AverageBytesPerSecond: {(copiedBytes / elapsedSeconds).ToString("0", System.Globalization.CultureInfo.InvariantCulture)}.",
                 null);
         }
@@ -1053,6 +1574,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
             $"CRF: {ToH264Crf(JpegQuality)}. " +
+            $"Profile: high. Level: {GetH264LevelText()}. MimeCodec: {GetH264MimeCodec()}. " +
             $"GopFrames: {GetH264GroupOfPicturesSize()}. " +
             $"FragmentDurationUs: {H264Fmp4FragmentDurationMicroseconds}. " +
             $"TargetLatencySeconds: {H264Fmp4TargetLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
@@ -1060,7 +1582,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"MaxLatencySeconds: {H264Fmp4MaximumLatencySeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}. " +
             $"LatencyCheckMs: {H264Fmp4LatencyCheckIntervalMilliseconds}. " +
             $"SeekCooldownMs: {H264Fmp4SeekCooldownMilliseconds}. " +
-            $"ReconnectStallMs: {H264Fmp4ReconnectStallMilliseconds}.",
+            $"ReconnectStallMs: {H264Fmp4ReconnectStallMilliseconds}. " +
+            $"RetainedFragments: {H264Fmp4RetainedFragmentCount}. InitialFragments: {H264Fmp4InitialFragmentCount}.",
             null);
         return process;
     }
@@ -1201,6 +1724,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("zerolatency");
         startInfo.ArgumentList.Add("-x264-params");
         startInfo.ArgumentList.Add("rc-lookahead=0:sync-lookahead=0:sliced-threads=1");
+        startInfo.ArgumentList.Add("-profile:v");
+        startInfo.ArgumentList.Add("high");
+        startInfo.ArgumentList.Add("-level:v");
+        startInfo.ArgumentList.Add(GetH264LevelText());
         startInfo.ArgumentList.Add("-pix_fmt");
         startInfo.ArgumentList.Add("yuv420p");
         startInfo.ArgumentList.Add("-r");
@@ -1215,6 +1742,22 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("0");
         startInfo.ArgumentList.Add("-crf");
         startInfo.ArgumentList.Add(ToH264Crf(JpegQuality).ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    private string GetH264LevelText()
+    {
+        long outputPixels = (long)capturePlan.OutputSize.Width * capturePlan.OutputSize.Height;
+        if (FramesPerSecond > 60 || outputPixels > 1920L * 1080L)
+        {
+            return "5.2";
+        }
+
+        return "4.2";
+    }
+
+    private string GetH264MimeCodec()
+    {
+        return GetH264LevelText() == "5.2" ? "avc1.640034" : "avc1.64002A";
     }
 
     private async Task ReadFfmpegErrorLinesAsync(Process process, CancellationToken cancellationToken)
@@ -1527,12 +2070,546 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             "Content-Type: video/mp4\r\n" +
             "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
             "Pragma: no-cache\r\n" +
+            "X-Accel-Buffering: no\r\n" +
             "X-Robots-Tag: noindex, nofollow\r\n" +
             "Connection: close\r\n" +
             "\r\n";
         await networkStream
             .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static async Task WriteFmp4InitResponseHeaderAsync(
+        NetworkStream networkStream,
+        int contentLength,
+        CancellationToken cancellationToken)
+    {
+        string header =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: video/mp4\r\n" +
+            $"Content-Length: {contentLength}\r\n" +
+            "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
+            "Pragma: no-cache\r\n" +
+            "X-Accel-Buffering: no\r\n" +
+            "X-Robots-Tag: noindex, nofollow\r\n" +
+            "Connection: close\r\n" +
+            "\r\n";
+        await networkStream
+            .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task WriteFmp4FragmentResponseHeaderAsync(
+        NetworkStream networkStream,
+        int contentLength,
+        long sequence,
+        CancellationToken cancellationToken)
+    {
+        string header =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: video/iso.segment\r\n" +
+            $"Content-Length: {contentLength}\r\n" +
+            $"X-VALOWATCH-Sequence: {sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)}\r\n" +
+            "Cache-Control: no-store, no-cache, must-revalidate\r\n" +
+            "Pragma: no-cache\r\n" +
+            "X-Accel-Buffering: no\r\n" +
+            "X-Robots-Tag: noindex, nofollow\r\n" +
+            "Connection: close\r\n" +
+            "\r\n";
+        await networkStream
+            .WriteAsync(Encoding.ASCII.GetBytes(header), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task WriteNetworkBytesWithTimeoutAsync(
+        NetworkStream networkStream,
+        ReadOnlyMemory<byte> bytes,
+        CancellationToken cancellationToken)
+    {
+        TimeSpan timeout = TimeSpan.FromMilliseconds(H264Fmp4NetworkWriteTimeoutMilliseconds);
+        await networkStream
+            .WriteAsync(bytes, cancellationToken)
+            .AsTask()
+            .WaitAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
+        await networkStream
+            .FlushAsync(cancellationToken)
+            .WaitAsync(timeout, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private sealed class Fmp4LiveFragmentSource : IDisposable
+    {
+        private readonly Process process;
+        private readonly Action<string, Exception?> log;
+        private readonly object syncRoot = new();
+        private readonly List<Fmp4Fragment> fragments = [];
+        private TaskCompletionSource<object?> changeSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private CancellationTokenSource? readCancellationTokenSource;
+        private Task? readTask;
+        private byte[] initSegment = [];
+        private bool initSegmentReady;
+        private bool completed;
+        private bool disposed;
+        private long nextSequence;
+        private Exception? failure;
+
+        public Fmp4LiveFragmentSource(Process process, Action<string, Exception?> log)
+        {
+            this.process = process;
+            this.log = log;
+        }
+
+        public bool IsUsable
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return !disposed && !completed && !process.HasExited;
+                }
+            }
+        }
+
+        public void Start(CancellationToken ownerCancellationToken)
+        {
+            lock (syncRoot)
+            {
+                if (readTask is not null)
+                {
+                    return;
+                }
+
+                readCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(ownerCancellationToken);
+                readTask = Task.Run(
+                    () => ReadOutputLoopAsync(readCancellationTokenSource.Token),
+                    CancellationToken.None);
+            }
+        }
+
+        public async Task<Fmp4LiveSnapshot> WaitForSnapshotAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            DateTimeOffset deadlineUtc = DateTimeOffset.UtcNow + timeout;
+            while (true)
+            {
+                Task waitTask;
+                lock (syncRoot)
+                {
+                    ThrowIfUnavailableWithoutBufferedData();
+                    if (initSegmentReady && fragments.Count > 0)
+                    {
+                        List<Fmp4Fragment> recentFragments = TakeRecentFragmentsForStartup();
+                        long nextFragmentSequence = recentFragments.Count > 0
+                            ? recentFragments[^1].Sequence + 1L
+                            : nextSequence;
+                        return new Fmp4LiveSnapshot(initSegment, recentFragments, nextFragmentSequence);
+                    }
+
+                    waitTask = changeSignal.Task;
+                }
+
+                await WaitForChangeAsync(waitTask, deadlineUtc, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public async Task<Fmp4Fragment> WaitForFragmentAsync(
+            long requestedSequence,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            DateTimeOffset deadlineUtc = DateTimeOffset.UtcNow + timeout;
+            while (true)
+            {
+                Task waitTask;
+                lock (syncRoot)
+                {
+                    ThrowIfUnavailableWithoutBufferedData();
+                    Fmp4Fragment? fragment = FindFragmentForSequence(requestedSequence);
+                    if (fragment is not null)
+                    {
+                        return fragment;
+                    }
+
+                    waitTask = changeSignal.Task;
+                }
+
+                await WaitForChangeAsync(waitTask, deadlineUtc, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (syncRoot)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                disposed = true;
+                readCancellationTokenSource?.Cancel();
+            }
+
+            StopProcess(process, "ffmpeg fmp4 live", log);
+            Complete(null);
+            readCancellationTokenSource?.Dispose();
+        }
+
+        private async Task ReadOutputLoopAsync(CancellationToken cancellationToken)
+        {
+            MemoryStream initSegmentBuilder = new();
+            MemoryStream fragmentBuilder = new();
+            bool mediaSegmentStarted = false;
+            bool fragmentHasMoof = false;
+            bool moovSeen = false;
+            try
+            {
+                Stream outputStream = process.StandardOutput.BaseStream;
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    Fmp4Box? box = await ReadNextFmp4BoxAsync(outputStream, cancellationToken).ConfigureAwait(false);
+                    if (box is null)
+                    {
+                        break;
+                    }
+
+                    if (!mediaSegmentStarted && IsInitializationBox(box.Type))
+                    {
+                        initSegmentBuilder.Write(box.Bytes, 0, box.Bytes.Length);
+                        if (box.Type.Equals("moov", StringComparison.Ordinal))
+                        {
+                            moovSeen = true;
+                        }
+
+                        PublishInitSegment(initSegmentBuilder.ToArray(), moovSeen);
+                        continue;
+                    }
+
+                    if (!mediaSegmentStarted && moovSeen && IsMediaSegmentPrefixBox(box.Type))
+                    {
+                        mediaSegmentStarted = true;
+                    }
+
+                    if (box.Type.Equals("moof", StringComparison.Ordinal))
+                    {
+                        if (fragmentBuilder.Length > 0 && fragmentHasMoof)
+                        {
+                            PublishFragment(fragmentBuilder.ToArray());
+                            fragmentBuilder.SetLength(0);
+                        }
+
+                        mediaSegmentStarted = true;
+                        fragmentHasMoof = true;
+                    }
+
+                    if (mediaSegmentStarted)
+                    {
+                        fragmentBuilder.Write(box.Bytes, 0, box.Bytes.Length);
+                        if (box.Type.Equals("mdat", StringComparison.Ordinal) && fragmentHasMoof)
+                        {
+                            PublishFragment(fragmentBuilder.ToArray());
+                            fragmentBuilder.SetLength(0);
+                            fragmentHasMoof = false;
+                        }
+
+                        continue;
+                    }
+
+                    initSegmentBuilder.Write(box.Bytes, 0, box.Bytes.Length);
+                    PublishInitSegment(initSegmentBuilder.ToArray(), moovSeen);
+                }
+
+                if (fragmentBuilder.Length > 0 && fragmentHasMoof)
+                {
+                    PublishFragment(fragmentBuilder.ToArray());
+                }
+
+                Complete(null);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                Complete(null);
+            }
+            catch (Exception exception) when (exception is IOException or InvalidDataException or EndOfStreamException or ObjectDisposedException)
+            {
+                log("fMP4 live fragment reader stopped.", exception);
+                Complete(exception);
+            }
+            finally
+            {
+                initSegmentBuilder.Dispose();
+                fragmentBuilder.Dispose();
+            }
+        }
+
+        private void PublishInitSegment(byte[] bytes, bool ready)
+        {
+            TaskCompletionSource<object?> signalToRelease;
+            lock (syncRoot)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                initSegment = bytes;
+                initSegmentReady = ready;
+                signalToRelease = RotateChangeSignal();
+            }
+
+            signalToRelease.TrySetResult(null);
+        }
+
+        private void PublishFragment(byte[] bytes)
+        {
+            if (bytes.Length == 0)
+            {
+                return;
+            }
+
+            TaskCompletionSource<object?> signalToRelease;
+            lock (syncRoot)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+                fragments.Add(new Fmp4Fragment(nextSequence, bytes, DateTimeOffset.UtcNow));
+                nextSequence++;
+                while (fragments.Count > H264Fmp4RetainedFragmentCount)
+                {
+                    fragments.RemoveAt(0);
+                }
+
+                signalToRelease = RotateChangeSignal();
+            }
+
+            signalToRelease.TrySetResult(null);
+        }
+
+        private void Complete(Exception? exception)
+        {
+            TaskCompletionSource<object?> signalToRelease;
+            lock (syncRoot)
+            {
+                completed = true;
+                failure ??= exception;
+                signalToRelease = RotateChangeSignal();
+            }
+
+            signalToRelease.TrySetResult(null);
+        }
+
+        private TaskCompletionSource<object?> RotateChangeSignal()
+        {
+            TaskCompletionSource<object?> signalToRelease = changeSignal;
+            changeSignal = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            return signalToRelease;
+        }
+
+        private List<Fmp4Fragment> TakeRecentFragmentsForStartup()
+        {
+            int skipCount = Math.Max(0, fragments.Count - H264Fmp4InitialFragmentCount);
+            return fragments.Skip(skipCount).ToList();
+        }
+
+        private Fmp4Fragment? FindFragmentForSequence(long requestedSequence)
+        {
+            if (fragments.Count == 0)
+            {
+                return null;
+            }
+
+            long oldestSequence = fragments[0].Sequence;
+            if (requestedSequence <= 0 || requestedSequence < oldestSequence)
+            {
+                int startupIndex = Math.Max(0, fragments.Count - H264Fmp4InitialFragmentCount);
+                return fragments[startupIndex];
+            }
+
+            foreach (Fmp4Fragment fragment in fragments)
+            {
+                if (fragment.Sequence >= requestedSequence)
+                {
+                    return fragment;
+                }
+            }
+
+            return null;
+        }
+
+        private void ThrowIfUnavailableWithoutBufferedData()
+        {
+            if (failure is not null && fragments.Count == 0)
+            {
+                throw new InvalidOperationException("fMP4 live encoder stopped before any media fragments were buffered.", failure);
+            }
+
+            if ((completed || disposed || process.HasExited) && fragments.Count == 0)
+            {
+                throw new InvalidOperationException("fMP4 live encoder is not running.");
+            }
+        }
+
+        private static async Task WaitForChangeAsync(
+            Task waitTask,
+            DateTimeOffset deadlineUtc,
+            CancellationToken cancellationToken)
+        {
+            TimeSpan remaining = deadlineUtc - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw new TimeoutException("Timed out while waiting for the next fMP4 live fragment.");
+            }
+
+            await waitTask.WaitAsync(remaining, cancellationToken).ConfigureAwait(false);
+        }
+
+        private static bool IsInitializationBox(string boxType)
+        {
+            return boxType is "ftyp" or "moov" or "free" or "wide" or "skip";
+        }
+
+        private static bool IsMediaSegmentPrefixBox(string boxType)
+        {
+            return boxType is "sidx" or "styp";
+        }
+    }
+
+    private sealed class Fmp4LiveSnapshot
+    {
+        public Fmp4LiveSnapshot(byte[] initSegment, IReadOnlyList<Fmp4Fragment> fragments, long nextSequence)
+        {
+            InitSegment = initSegment;
+            Fragments = fragments;
+            NextSequence = nextSequence;
+        }
+
+        public byte[] InitSegment { get; }
+
+        public IReadOnlyList<Fmp4Fragment> Fragments { get; }
+
+        public long NextSequence { get; }
+    }
+
+    private sealed class Fmp4Fragment
+    {
+        public Fmp4Fragment(long sequence, byte[] bytes, DateTimeOffset capturedAtUtc)
+        {
+            Sequence = sequence;
+            Bytes = bytes;
+            CapturedAtUtc = capturedAtUtc;
+        }
+
+        public long Sequence { get; }
+
+        public byte[] Bytes { get; }
+
+        public DateTimeOffset CapturedAtUtc { get; }
+    }
+
+    private sealed class Fmp4Box
+    {
+        public Fmp4Box(string type, byte[] bytes)
+        {
+            Type = type;
+            Bytes = bytes;
+        }
+
+        public string Type { get; }
+
+        public byte[] Bytes { get; }
+    }
+
+    private static async Task<Fmp4Box?> ReadNextFmp4BoxAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        byte[] header = new byte[8];
+        int headerBytesRead = await ReadExactOrEndAsync(stream, header, cancellationToken).ConfigureAwait(false);
+        if (headerBytesRead == 0)
+        {
+            return null;
+        }
+
+        if (headerBytesRead < header.Length)
+        {
+            throw new EndOfStreamException("fMP4 box header ended unexpectedly.");
+        }
+
+        ulong boxSize = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(0, 4));
+        string boxType = Encoding.ASCII.GetString(header, 4, 4);
+        byte[]? extendedSizeBytes = null;
+        int headerLength = 8;
+        if (boxSize == 1UL)
+        {
+            extendedSizeBytes = new byte[8];
+            int extendedBytesRead = await ReadExactOrEndAsync(stream, extendedSizeBytes, cancellationToken).ConfigureAwait(false);
+            if (extendedBytesRead < extendedSizeBytes.Length)
+            {
+                throw new EndOfStreamException("fMP4 extended box size ended unexpectedly.");
+            }
+
+            boxSize = BinaryPrimitives.ReadUInt64BigEndian(extendedSizeBytes);
+            headerLength = 16;
+        }
+        else if (boxSize == 0UL)
+        {
+            throw new InvalidDataException($"Unsupported fMP4 box with open-ended size. Type: {boxType}.");
+        }
+
+        if (boxSize < (ulong)headerLength)
+        {
+            throw new InvalidDataException($"Invalid fMP4 box size. Type: {boxType}. Size: {boxSize}.");
+        }
+
+        if (boxSize > MaximumFmp4BoxBytes || boxSize > int.MaxValue)
+        {
+            throw new InvalidDataException($"fMP4 box is too large to buffer safely. Type: {boxType}. Size: {boxSize}.");
+        }
+
+        byte[] boxBytes = new byte[(int)boxSize];
+        Buffer.BlockCopy(header, 0, boxBytes, 0, header.Length);
+        if (extendedSizeBytes is not null)
+        {
+            Buffer.BlockCopy(extendedSizeBytes, 0, boxBytes, header.Length, extendedSizeBytes.Length);
+        }
+
+        int payloadLength = (int)boxSize - headerLength;
+        if (payloadLength > 0)
+        {
+            int payloadBytesRead = await ReadExactOrEndAsync(
+                stream,
+                boxBytes.AsMemory(headerLength, payloadLength),
+                cancellationToken).ConfigureAwait(false);
+            if (payloadBytesRead < payloadLength)
+            {
+                throw new EndOfStreamException($"fMP4 box payload ended unexpectedly. Type: {boxType}.");
+            }
+        }
+
+        return new Fmp4Box(boxType, boxBytes);
+    }
+
+    private static async Task<int> ReadExactOrEndAsync(
+        Stream stream,
+        Memory<byte> destination,
+        CancellationToken cancellationToken)
+    {
+        int totalBytesRead = 0;
+        while (totalBytesRead < destination.Length)
+        {
+            int bytesRead = await stream
+                .ReadAsync(destination[totalBytesRead..], cancellationToken)
+                .ConfigureAwait(false);
+            if (bytesRead == 0)
+            {
+                return totalBytesRead;
+            }
+
+            totalBytesRead += bytesRead;
+        }
+
+        return totalBytesRead;
     }
 
     private void TryDeleteHlsDirectory()
