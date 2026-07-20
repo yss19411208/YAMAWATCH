@@ -58,6 +58,12 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
 
     public DateTimeOffset StartedAtUtc { get; }
 
+    public bool PublicUrlHasBeenHealthy { get; private set; }
+
+    public string PublicUrlHealthDetail { get; private set; } = "not checked";
+
+    public DateTimeOffset? PublicUrlLastHealthyAtUtc { get; private set; }
+
     public ScreenStreamOptions Options => ScreenStreamOptions.Create(
         Target,
         FramesPerSecond,
@@ -208,6 +214,16 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         {
             return ScreenStreamHealthStatus.Unhealthy(
                 $"public URL check failed: {exception.GetType().Name}: {exception.Message}");
+        }
+    }
+
+    public void UpdatePublicUrlHealth(ScreenStreamHealthStatus healthStatus)
+    {
+        PublicUrlHealthDetail = healthStatus.Detail;
+        if (healthStatus.IsHealthy)
+        {
+            PublicUrlHasBeenHealthy = true;
+            PublicUrlLastHealthyAtUtc = DateTimeOffset.UtcNow;
         }
     }
 

@@ -156,6 +156,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool screenStreamRestartInProgress;
     private int screenStreamConsecutiveHealthFailures;
     private int screenStreamRequestGeneration;
+    private DateTimeOffset lastScreenStreamHealthDiagnosticNotificationAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastScreenStreamRestartFailureNotificationAtUtc = DateTimeOffset.MinValue;
     private ulong currentMonitoredDiscordUserId;
     private ulong currentVoiceGuildId;
@@ -1841,7 +1842,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         ScreenStreamSession? startedSession = null;
         try
         {
-            startedSession = await StartValidatedScreenStreamSessionAsync(
+            startedSession = await StartResponsiveScreenStreamSessionAsync(
                     streamOptions,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -1906,7 +1907,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task<ScreenStreamSession> StartValidatedScreenStreamSessionAsync(
+    private async Task<ScreenStreamSession> StartResponsiveScreenStreamSessionAsync(
         ScreenStreamOptions streamOptions,
         CancellationToken cancellationToken)
     {
@@ -1926,6 +1927,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                         session,
                         cancellationToken)
                     .ConfigureAwait(false);
+                session.UpdatePublicUrlHealth(healthStatus);
                 if (healthStatus.IsHealthy)
                 {
                     WriteLog(
@@ -1938,12 +1940,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 }
 
                 lastHealthDetail = healthStatus.Detail;
-                lastException = new InvalidOperationException(
-                    $"Screen stream public URL did not become reachable: {healthStatus.Detail}");
                 WriteLog(
-                    "Screen stream public URL validation failed; retrying with a new tunnel. " +
+                    "Screen stream public URL is not reachable yet; keeping the quick tunnel alive for fast startup. " +
                     $"Attempt: {attempt}/{ScreenStreamStartValidationAttempts}. " +
                     $"Url: {session.PublicUrl}. Detail: {healthStatus.Detail}.");
+                ScreenStreamSession unvalidatedSession = session;
+                session = null;
+                return unvalidatedSession;
             }
             catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or TimeoutException or OperationCanceledException or System.ComponentModel.Win32Exception)
             {
@@ -1976,7 +1979,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         throw new InvalidOperationException(
-            $"Screen stream public URL could not be validated before sending it to Discord. Last detail: {lastHealthDetail}",
+            $"Screen stream could not be started before sending it to Discord. Last detail: {lastHealthDetail}",
             lastException);
     }
 
@@ -1996,6 +1999,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             lastStatus = await session
                 .CheckPublicUrlHealthAsync(httpClient, cancellationToken)
                 .ConfigureAwait(false);
+            session.UpdatePublicUrlHealth(lastStatus);
             if (lastStatus.IsHealthy)
             {
                 return lastStatus;
@@ -2150,6 +2154,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         ScreenStreamSession? sessionSnapshot;
         ScreenStreamOptions? requestedOptionsSnapshot;
+        IMessageChannel? notifyChannelSnapshot;
         int requestGenerationSnapshot;
         await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -2161,6 +2166,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             requestedOptionsSnapshot = requestedScreenStreamOptions;
             sessionSnapshot = activeScreenStreamSession;
+            notifyChannelSnapshot = activeScreenStreamNotifyChannel ?? discordStatusTextChannel;
             requestGenerationSnapshot = screenStreamRequestGeneration;
         }
         finally
@@ -2187,6 +2193,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ScreenStreamHealthStatus healthStatus = await sessionSnapshot
                 .CheckPublicUrlHealthAsync(httpClient, cancellationToken)
                 .ConfigureAwait(false);
+            sessionSnapshot.UpdatePublicUrlHealth(healthStatus);
             if (healthStatus.IsHealthy)
             {
                 await ResetScreenStreamHealthFailuresAsync(sessionSnapshot, cancellationToken).ConfigureAwait(false);
@@ -2206,6 +2213,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"Screen stream public URL health check failed. " +
                 $"Failures: {failureCount}/{ScreenStreamPublicUrlFailureThreshold}. " +
                 $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}.");
+            await SendScreenStreamHealthDiagnosticNotificationAsync(
+                    notifyChannelSnapshot,
+                    sessionSnapshot,
+                    healthStatus,
+                    failureCount)
+                .ConfigureAwait(false);
             if (failureCount < ScreenStreamPublicUrlFailureThreshold)
             {
                 return;
@@ -2310,7 +2323,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ScreenStreamRestartTimeout);
-            replacementSession = await StartValidatedScreenStreamSessionAsync(
+            replacementSession = await StartResponsiveScreenStreamSessionAsync(
                     requestedOptionsSnapshot,
                     timeout.Token)
                 .ConfigureAwait(false);
@@ -2400,6 +2413,47 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private async Task SendScreenStreamHealthDiagnosticNotificationAsync(
+        IMessageChannel? notifyChannel,
+        ScreenStreamSession session,
+        ScreenStreamHealthStatus healthStatus,
+        int failureCount)
+    {
+        if (notifyChannel is null)
+        {
+            return;
+        }
+
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        if (nowUtc - lastScreenStreamHealthDiagnosticNotificationAtUtc < ScreenStreamRestartFailureNotificationCooldown)
+        {
+            return;
+        }
+
+        lastScreenStreamHealthDiagnosticNotificationAtUtc = nowUtc;
+        string message =
+            "配信URLの接続確認に失敗しました。" +
+            Environment.NewLine +
+            $"URL: {session.PublicUrl}" +
+            Environment.NewLine +
+            $"失敗回数: {failureCount}/{ScreenStreamPublicUrlFailureThreshold}" +
+            Environment.NewLine +
+            $"原因: {SanitizeStreamHealthDetail(healthStatus.Detail)}" +
+            Environment.NewLine +
+            "対応: DNS反映待ち、または一時的なCloudflare Quick Tunnel不調として監視します。長く続く場合は自動でURLを更新します。";
+
+        try
+        {
+            await notifyChannel
+                .SendMessageAsync(embed: BuildStatusNotificationEmbed(message))
+                .ConfigureAwait(false);
+        }
+        catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("Screen stream health diagnostic notification failed.", responseException);
+        }
+    }
+
     private async Task SendScreenStreamRestartFailureNotificationAsync(
         IMessageChannel? notifyChannel,
         Exception exception)
@@ -2441,6 +2495,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
+                $"{BuildStreamPublicUrlStatusText(session)}{Environment.NewLine}" +
                 "停止: /stream off",
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
@@ -2458,7 +2513,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"理由: {restartReason}{Environment.NewLine}" +
                 $"対象: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
-                $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}",
+                $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                BuildStreamPublicUrlStatusText(session),
             Color = new Discord.Color(88, 166, 255),
             Timestamp = DateTimeOffset.Now
         };
@@ -2493,11 +2549,38 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 $"URL: {session.PublicUrl}{Environment.NewLine}" +
+                $"{BuildStreamPublicUrlStatusText(session)}{Environment.NewLine}" +
                 $"トンネル: {session.TunnelProcessStatusText}{Environment.NewLine}" +
                 $"開始: {session.StartedAtUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}";
         }
 
         return embedBuilder.Build();
+    }
+
+    private static string BuildStreamPublicUrlStatusText(ScreenStreamSession session)
+    {
+        if (session.PublicUrlHasBeenHealthy)
+        {
+            string healthyAtText = session.PublicUrlLastHealthyAtUtc.HasValue
+                ? $" ({session.PublicUrlLastHealthyAtUtc.Value.LocalDateTime:HH:mm:ss})"
+                : string.Empty;
+            return $"接続確認: OK{healthyAtText}";
+        }
+
+        return
+            "接続確認: 確認中。開けない場合は数秒後に再読み込みしてください。長く開けない場合は自動でURLを更新します。" +
+            Environment.NewLine +
+            $"直近原因: {SanitizeStreamHealthDetail(session.PublicUrlHealthDetail)}";
+    }
+
+    private static string SanitizeStreamHealthDetail(string detail)
+    {
+        string sanitizedDetail = RuntimeLogMessageCollector.SanitizeLine(
+            string.IsNullOrWhiteSpace(detail) ? "not checked" : detail);
+        const int maximumHealthDetailLength = 700;
+        return sanitizedDetail.Length <= maximumHealthDetailLength
+            ? sanitizedDetail
+            : sanitizedDetail[..maximumHealthDetailLength] + "...";
     }
 
     private void WriteScreenStreamLog(string message, Exception? exception)

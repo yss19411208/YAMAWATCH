@@ -127,9 +127,9 @@ Discordアプリ音声はプロセス単位で捕捉します。Discord内の話
 
 スクショ送信は初期OFFです。Discordで `/screenshot on` を実行すると手動送信を許可し、`/screenshot now` でその時点の画面全体をDiscordへ1枚だけ送信します。送信時はDiscordに「スクショ送信中」と表示し、PC画面上には追加UIを出しません。止める場合は `/screenshot off` を実行してください。スクショ画像は送信後にローカル一時ファイルから削除します。5分ごとの自動スクショ送信は行いません。
 
-リンク配信は `/stream on target:full` または `/stream on target:valorant` で開始します。コマンドはすぐに受け付け完了を返し、VALOWATCH内のローカル配信サーバーをCloudflare Quick Tunnelで公開できたらDiscordに「配信開始」とランダムURLを送信します。停止は `/stream off`、状態確認は `/stream status` です。PC画面上には追加UIを出しません。URLはランダムで、リンクを知らない人には通常見つかりませんが、ログイン認証ではないためURLを共有した相手だけに扱ってください。`target:valorant` はVALORANTのウィンドウが見つかる場合だけ開始できます。VALORANTが独占フルスクリーンの場合はWindows側から画面を取得できないことがあるため、画面モードはウィンドウフルスクリーンを使ってください。
+リンク配信は `/stream on target:full` または `/stream on target:valorant` で開始します。コマンドはすぐに受け付け完了を返し、VALOWATCH内のローカル配信サーバーをCloudflare Quick Tunnelで公開できたらDiscordに「配信開始」とランダムURLを送信します。URL発行直後のDNS未反映でまだ開けない場合でも配信セッションは保持し、裏で疎通確認と自動URL更新を続けます。停止は `/stream off`、状態確認は `/stream status` です。PC画面上には追加UIを出しません。URLはランダムで、リンクを知らない人には通常見つかりませんが、ログイン認証ではないためURLを共有した相手だけに扱ってください。`target:valorant` はVALORANTのウィンドウが見つかる場合だけ開始できます。VALORANTが独占フルスクリーンの場合はWindows側から画面を取得できないことがあるため、画面モードはウィンドウフルスクリーンを使ってください。
 
-Cloudflare Quick TunnelのURLは一時URLです。`trycloudflare.com` がNXDOMAINになるなど公開URLへ到達できなくなった場合、VALOWATCHは15秒ごとに疎通確認し、2回連続で失敗したら同じ配信設定でトンネルを作り直します。配信開始時と自動復旧時はURLをDiscordへ出す前に短時間だけ疎通確認し、届かないURLは最大3回まで作り直します。新しいURLはDiscordへ「VALOWATCH 配信URL更新」として送信されるため、古いURLではなく最新メッセージのURLを開いてください。
+Cloudflare Quick TunnelのURLは一時URLです。`trycloudflare.com` がNXDOMAINになるなど公開URLへ到達できなくなった場合、VALOWATCHは15秒ごとに疎通確認し、2回連続で失敗したら同じ配信設定でトンネルを作り直します。配信開始時と自動復旧時は短時間だけ疎通確認し、まだDNS未反映でもURLを保持してDiscordへ送信します。接続確認に失敗した場合は、Discordに直近原因を出します。新しいURLはDiscordへ「VALOWATCH 配信URL更新」として送信されるため、古いURLではなく最新メッセージのURLを開いてください。
 
 配信方式は `method` で選べます。指定しない場合は、高画質・60fps以上・低遅延補正を優先する `h264-fmp4` です。fMP4ページは100msごとにライブ端との差を見て、遅延が増えた場合は再生速度補正、ライブ端へのシーク、または再接続で古いバッファを捨てます。少し遅延が増えても安定寄りにしたい場合は `h264-hls` を使ってください。HLSページはブラウザ互換用に `hls.js` をCDNから読み込みます。古いブラウザやH.264がうまく再生されない場合だけ互換用の `mjpeg` を使います。
 
