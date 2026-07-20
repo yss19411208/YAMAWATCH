@@ -759,6 +759,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
+        catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
+        {
+        }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or ExternalException)
         {
             log("Screen stream MJPEG connection stopped.", exception);
@@ -806,6 +809,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
         {
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
@@ -871,6 +877,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
         {
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
@@ -1410,6 +1419,16 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
     private static bool IsTransientCaptureException(Exception exception)
     {
         return exception is InvalidOperationException or ExternalException or System.ComponentModel.Win32Exception;
+    }
+
+    private static bool IsExpectedClientDisconnectException(Exception exception)
+    {
+        return exception.GetBaseException() is SocketException socketException &&
+            socketException.SocketErrorCode is SocketError.ConnectionAborted or
+                SocketError.ConnectionReset or
+                SocketError.NetworkReset or
+                SocketError.OperationAborted or
+                SocketError.Shutdown;
     }
 
     private void LogCaptureFailureThrottled(string message, Exception? exception)

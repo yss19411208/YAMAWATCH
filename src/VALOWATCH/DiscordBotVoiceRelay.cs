@@ -30,11 +30,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ScreenStreamHealthCheckInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan ScreenStreamHealthRequestTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan ScreenStreamStartValidationTimeout = TimeSpan.FromSeconds(25);
+    private static readonly TimeSpan ScreenStreamStartValidationDelay = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ScreenStreamRestartTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan ScreenStreamMonitorShutdownTimeout = TimeSpan.FromSeconds(3);
     private const int DiscordEmbedDescriptionLimit = 4096;
     private const int DiscordEmbedDescriptionSafetyMargin = 120;
     private const int ScreenStreamPublicUrlFailureThreshold = 2;
+    private const int ScreenStreamStartValidationAttempts = 3;
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan ScreenStreamRestartFailureNotificationCooldown = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan StartupNotificationCooldown = TimeSpan.FromMinutes(2);
@@ -1761,8 +1764,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 activeScreenStreamSession = null;
             }
 
-            ScreenStreamSession session = await ScreenStreamSession
-                .StartAsync(appPaths, streamOptions, WriteScreenStreamLog, cancellationToken)
+            ScreenStreamSession session = await StartValidatedScreenStreamSessionAsync(
+                    streamOptions,
+                    cancellationToken)
                 .ConfigureAwait(false);
             activeScreenStreamSession = session;
             requestedScreenStreamOptions = streamOptions;
@@ -1784,6 +1788,113 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             screenStreamSemaphore.Release();
         }
+    }
+
+    private async Task<ScreenStreamSession> StartValidatedScreenStreamSessionAsync(
+        ScreenStreamOptions streamOptions,
+        CancellationToken cancellationToken)
+    {
+        Exception? lastException = null;
+        string lastHealthDetail = "not checked";
+
+        for (int attempt = 1; attempt <= ScreenStreamStartValidationAttempts; attempt++)
+        {
+            ScreenStreamSession? session = null;
+            try
+            {
+                session = await ScreenStreamSession
+                    .StartAsync(appPaths, streamOptions, WriteScreenStreamLog, cancellationToken)
+                    .ConfigureAwait(false);
+
+                ScreenStreamHealthStatus healthStatus = await WaitForScreenStreamPublicUrlReadyAsync(
+                        session,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (healthStatus.IsHealthy)
+                {
+                    WriteLog(
+                        "Screen stream public URL validated. " +
+                        $"Attempt: {attempt}/{ScreenStreamStartValidationAttempts}. " +
+                        $"Url: {session.PublicUrl}. Detail: {healthStatus.Detail}.");
+                    ScreenStreamSession validatedSession = session;
+                    session = null;
+                    return validatedSession;
+                }
+
+                lastHealthDetail = healthStatus.Detail;
+                lastException = new InvalidOperationException(
+                    $"Screen stream public URL did not become reachable: {healthStatus.Detail}");
+                WriteLog(
+                    "Screen stream public URL validation failed; retrying with a new tunnel. " +
+                    $"Attempt: {attempt}/{ScreenStreamStartValidationAttempts}. " +
+                    $"Url: {session.PublicUrl}. Detail: {healthStatus.Detail}.");
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or TimeoutException or OperationCanceledException or System.ComponentModel.Win32Exception)
+            {
+                lastException = exception;
+                lastHealthDetail = $"{exception.GetType().Name}: {exception.Message}";
+                WriteLog(
+                    "Screen stream startup validation attempt failed; retrying with a new tunnel. " +
+                    $"Attempt: {attempt}/{ScreenStreamStartValidationAttempts}.",
+                    exception);
+            }
+            finally
+            {
+                if (session is not null)
+                {
+                    try
+                    {
+                        await session.DisposeAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception disposeException) when (disposeException is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+                    {
+                        WriteLog("Screen stream startup validation cleanup failed.", disposeException);
+                    }
+                }
+            }
+
+            if (attempt < ScreenStreamStartValidationAttempts)
+            {
+                await Task.Delay(ScreenStreamStartValidationDelay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"Screen stream public URL could not be validated before sending it to Discord. Last detail: {lastHealthDetail}",
+            lastException);
+    }
+
+    private static async Task<ScreenStreamHealthStatus> WaitForScreenStreamPublicUrlReadyAsync(
+        ScreenStreamSession session,
+        CancellationToken cancellationToken)
+    {
+        using HttpClient httpClient = new()
+        {
+            Timeout = ScreenStreamHealthRequestTimeout
+        };
+
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        ScreenStreamHealthStatus lastStatus = ScreenStreamHealthStatus.Unhealthy("not checked");
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            lastStatus = await session
+                .CheckPublicUrlHealthAsync(httpClient, cancellationToken)
+                .ConfigureAwait(false);
+            if (lastStatus.IsHealthy)
+            {
+                return lastStatus;
+            }
+
+            if (stopwatch.Elapsed >= ScreenStreamStartValidationTimeout)
+            {
+                return lastStatus;
+            }
+
+            await Task.Delay(ScreenStreamStartValidationDelay, cancellationToken).ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return lastStatus;
     }
 
     private async Task<bool> StopActiveScreenStreamAsync(string reason, IMessageChannel? notifyChannel)
@@ -2083,8 +2194,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(ScreenStreamRestartTimeout);
-            replacementSession = await ScreenStreamSession
-                .StartAsync(appPaths, requestedOptionsSnapshot, WriteScreenStreamLog, timeout.Token)
+            replacementSession = await StartValidatedScreenStreamSessionAsync(
+                    requestedOptionsSnapshot,
+                    timeout.Token)
                 .ConfigureAwait(false);
 
             bool acceptedReplacement = false;
