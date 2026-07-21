@@ -1,6 +1,7 @@
 using Discord;
 using Discord.WebSocket;
 using System.Diagnostics;
+using System.Net.NetworkInformation;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,6 +19,11 @@ internal static class Program
     private const string AppProcessName = "VALOWATCH";
     private const int EmbedDescriptionLimit = 4096;
     private const int EmbedDescriptionSafetyMargin = 250;
+    private static readonly TimeSpan DiscordHealthCheckInterval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan DiscordDisconnectedRestartDelay = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan NetworkChangeRestartDelay = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan NetworkChangeMinimumUptime = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SleepResumeRestartThreshold = TimeSpan.FromMinutes(2);
     private static readonly byte[] DurableEnvEntropy = Encoding.UTF8.GetBytes("VALOWATCH.EnvSettings.v1");
 
     private static DiscordSocketClient? discordClient;
@@ -94,6 +100,8 @@ internal static class Program
             AlwaysDownloadUsers = false,
             LogLevel = LogSeverity.Info
         });
+        using CancellationTokenSource restartDiscordLoop = new();
+        DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
         discordClient = client;
         client.Log += message =>
         {
@@ -105,23 +113,185 @@ internal static class Program
                 message.Exception);
             return Task.CompletedTask;
         };
+        client.Connected += () =>
+        {
+            WriteLog(resolvedPaths, "Start agent Discord gateway connected.");
+            return Task.CompletedTask;
+        };
+        client.Disconnected += exception =>
+        {
+            WriteLog(resolvedPaths, "Start agent Discord gateway disconnected; health monitor will restart it if it does not recover.", exception);
+            return Task.CompletedTask;
+        };
         client.Ready += () => OnReadyAsync(client, settings, resolvedPaths);
         client.SlashCommandExecuted += command => OnSlashCommandExecutedAsync(command, settings, resolvedPaths);
+
+        NetworkAvailabilityChangedEventHandler networkAvailabilityChangedHandler = (_, eventArgs) =>
+        {
+            WriteLog(resolvedPaths, $"Start agent network availability changed. IsAvailable: {eventArgs.IsAvailable}.");
+            if (eventArgs.IsAvailable && DateTimeOffset.UtcNow - startedAtUtc >= NetworkChangeMinimumUptime)
+            {
+                RequestDiscordLoopRestartAfter(
+                    resolvedPaths,
+                    restartDiscordLoop,
+                    NetworkChangeRestartDelay,
+                    "network became available");
+            }
+        };
+        NetworkAddressChangedEventHandler networkAddressChangedHandler = (_, _) =>
+        {
+            WriteLog(resolvedPaths, "Start agent network address changed.");
+            if (DateTimeOffset.UtcNow - startedAtUtc >= NetworkChangeMinimumUptime)
+            {
+                RequestDiscordLoopRestartAfter(
+                    resolvedPaths,
+                    restartDiscordLoop,
+                    NetworkChangeRestartDelay,
+                    "network address changed");
+            }
+        };
+        NetworkChange.NetworkAvailabilityChanged += networkAvailabilityChangedHandler;
+        NetworkChange.NetworkAddressChanged += networkAddressChangedHandler;
 
         await client.LoginAsync(TokenType.Bot, settings.BotToken).ConfigureAwait(false);
         await client.StartAsync().ConfigureAwait(false);
         WriteLog(resolvedPaths, "VALOWATCH Start agent connected to Discord and is waiting for /start.");
+        Task healthMonitorTask = MonitorDiscordHealthAsync(client, resolvedPaths, restartDiscordLoop);
 
         try
         {
-            await Task.Delay(Timeout.InfiniteTimeSpan).ConfigureAwait(false);
+            Task waitForRestartTask = Task.Delay(Timeout.InfiniteTimeSpan, restartDiscordLoop.Token);
+            Task completedTask = await Task.WhenAny(waitForRestartTask, healthMonitorTask).ConfigureAwait(false);
+            if (completedTask == healthMonitorTask)
+            {
+                await healthMonitorTask.ConfigureAwait(false);
+            }
+            else
+            {
+                await waitForRestartTask.ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (restartDiscordLoop.IsCancellationRequested)
+        {
+            WriteLog(resolvedPaths, "Start agent Discord loop restart requested.");
         }
         finally
         {
-            await client.StopAsync().ConfigureAwait(false);
-            await client.LogoutAsync().ConfigureAwait(false);
+            NetworkChange.NetworkAvailabilityChanged -= networkAvailabilityChangedHandler;
+            NetworkChange.NetworkAddressChanged -= networkAddressChangedHandler;
+            await StopDiscordClientQuietlyAsync(client, resolvedPaths).ConfigureAwait(false);
             client.Dispose();
             discordClient = null;
+        }
+    }
+
+    private static async Task MonitorDiscordHealthAsync(
+        DiscordSocketClient client,
+        StartAgentPaths resolvedPaths,
+        CancellationTokenSource restartDiscordLoop)
+    {
+        DateTimeOffset lastCheckAtUtc = DateTimeOffset.UtcNow;
+        DateTimeOffset lastHealthyAtUtc = DateTimeOffset.UtcNow;
+        ConnectionState? lastLoggedConnectionState = null;
+
+        while (!restartDiscordLoop.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(DiscordHealthCheckInterval, restartDiscordLoop.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (restartDiscordLoop.IsCancellationRequested)
+            {
+                return;
+            }
+
+            DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+            TimeSpan checkGap = nowUtc - lastCheckAtUtc;
+            lastCheckAtUtc = nowUtc;
+            if (checkGap > SleepResumeRestartThreshold)
+            {
+                WriteLog(
+                    resolvedPaths,
+                    $"Start agent detected sleep/resume or timer stall; restarting Discord connection. GapSeconds: {checkGap.TotalSeconds:0}.");
+                restartDiscordLoop.Cancel();
+                return;
+            }
+
+            ConnectionState connectionState = client.ConnectionState;
+            if (lastLoggedConnectionState != connectionState)
+            {
+                WriteLog(resolvedPaths, $"Start agent Discord connection state: {connectionState}.");
+                lastLoggedConnectionState = connectionState;
+            }
+
+            if (connectionState == ConnectionState.Connected && client.CurrentUser is not null)
+            {
+                lastHealthyAtUtc = nowUtc;
+                continue;
+            }
+
+            TimeSpan unhealthyDuration = nowUtc - lastHealthyAtUtc;
+            if (unhealthyDuration >= DiscordDisconnectedRestartDelay)
+            {
+                WriteLog(
+                    resolvedPaths,
+                    $"Start agent Discord connection remained unhealthy; restarting loop. State: {connectionState}. UnhealthySeconds: {unhealthyDuration.TotalSeconds:0}.");
+                restartDiscordLoop.Cancel();
+                return;
+            }
+        }
+    }
+
+    private static void RequestDiscordLoopRestartAfter(
+        StartAgentPaths resolvedPaths,
+        CancellationTokenSource restartDiscordLoop,
+        TimeSpan delay,
+        string reason)
+    {
+        if (restartDiscordLoop.IsCancellationRequested)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay).ConfigureAwait(false);
+                if (restartDiscordLoop.IsCancellationRequested)
+                {
+                    return;
+                }
+
+                WriteLog(resolvedPaths, $"Start agent Discord loop restart requested after delay. Reason: {reason}. DelaySeconds: {delay.TotalSeconds:0}.");
+                restartDiscordLoop.Cancel();
+            }
+            catch (Exception exception) when (exception is TaskCanceledException or ObjectDisposedException)
+            {
+            }
+        });
+    }
+
+    private static async Task StopDiscordClientQuietlyAsync(
+        DiscordSocketClient client,
+        StartAgentPaths resolvedPaths)
+    {
+        try
+        {
+            await client.StopAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or TaskCanceledException or Discord.Net.HttpException)
+        {
+            WriteLog(resolvedPaths, "Start agent Discord client stop failed during restart cleanup.", exception);
+        }
+
+        try
+        {
+            await client.LogoutAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or TaskCanceledException or Discord.Net.HttpException)
+        {
+            WriteLog(resolvedPaths, "Start agent Discord client logout failed during restart cleanup.", exception);
         }
     }
 

@@ -28,7 +28,7 @@ internal static class WatchAgentSupervisor
     private const string AppFileName = "VALOWATCH.exe";
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
     private const int KeepAliveIntervalMinutes = 5;
-    private static readonly TimeSpan StartAgentLaunchRetryInterval = TimeSpan.FromHours(1);
+    private static readonly TimeSpan StartAgentLaunchRetryInterval = TimeSpan.FromMinutes(5);
     private static DateTimeOffset nextStartAgentLaunchAttemptAtUtc = DateTimeOffset.MinValue;
 
     public static WatchAgentPlan GetPlan(AppPaths appPaths)
