@@ -2662,7 +2662,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 CameraDeviceDiagnostic device = snapshot.Devices[deviceIndex];
                 string readiness = device.CanReadFrame ? "OK" : "NG";
                 descriptionBuilder.AppendLine(
-                    $"{deviceIndex + 1}. [{readiness}] {SanitizeCameraDeviceText(device.Name)}");
+                    $"{deviceIndex + 1}. [{readiness}] {SanitizeCameraDeviceText(device.Name)} - {SanitizeCameraDeviceText(device.Detail)}");
             }
         }
 

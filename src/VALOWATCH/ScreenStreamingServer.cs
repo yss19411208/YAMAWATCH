@@ -43,6 +43,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private const int MinimumCameraOverlayWidth = 120;
     private const int MaximumCameraOverlayWidth = 420;
     private const int CameraOverlayBorderPixels = 6;
+    private const int CameraPreflightTimeoutMilliseconds = 4500;
     private static readonly TimeSpan FrameCaptureRetryDelay = TimeSpan.FromMilliseconds(8);
     private static readonly TimeSpan Fmp4StartupTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Fmp4WebSocketFragmentWaitTimeout = TimeSpan.FromSeconds(8);
@@ -76,6 +77,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly string? ffmpegPath;
     private readonly H264EncoderProfile h264EncoderProfile;
     private readonly string? cameraOverlayDeviceName;
+    private readonly CameraInputProfile? cameraOverlayInputProfile;
     private readonly string cameraOverlayStatusText;
     private readonly string streamWorkDirectory;
     private readonly string? hlsDirectory;
@@ -110,6 +112,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             options.CameraOverlayEnabled,
             options.CameraDeviceName,
             log,
+            out cameraOverlayInputProfile,
             out cameraOverlayStatusText);
         h264EncoderProfile = options.Method is ScreenStreamMethod.H264Fmp4 or ScreenStreamMethod.H264Hls
             ? SelectH264EncoderProfile(this.ffmpegPath, log)
@@ -2679,8 +2682,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         bool cameraOverlayEnabled,
         string cameraDeviceName,
         Action<string, Exception?> log,
+        out CameraInputProfile? cameraInputProfile,
         out string statusText)
     {
+        cameraInputProfile = null;
         if (!cameraOverlayEnabled)
         {
             statusText = "off";
@@ -2709,7 +2714,13 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                     string.Equals(deviceName, requestedDeviceName, StringComparison.OrdinalIgnoreCase));
                 if (!string.IsNullOrWhiteSpace(exactDeviceName))
                 {
-                    return ResolveUsableCameraDevice(ffmpegPath, exactDeviceName, $"active ({exactDeviceName})", log, out statusText);
+                    return ResolveUsableCameraDevice(
+                        ffmpegPath,
+                        exactDeviceName,
+                        $"active ({exactDeviceName})",
+                        log,
+                        out cameraInputProfile,
+                        out statusText);
                 }
 
                 string? partialDeviceName = cameraDeviceNames.FirstOrDefault(deviceName =>
@@ -2721,6 +2732,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                         partialDeviceName,
                         $"active ({partialDeviceName}; matched {requestedDeviceName})",
                         log,
+                        out cameraInputProfile,
                         out statusText);
                 }
 
@@ -2730,6 +2742,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                     fallbackDeviceName,
                     $"active ({fallbackDeviceName}; configured camera was not found: {requestedDeviceName})",
                     log,
+                    out cameraInputProfile,
                     out statusText);
             }
 
@@ -2738,6 +2751,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 cameraDeviceNames[0],
                 $"active ({cameraDeviceNames[0]})",
                 log,
+                out cameraInputProfile,
                 out statusText);
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or TimeoutException or System.ComponentModel.Win32Exception)
@@ -2766,8 +2780,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             List<CameraDeviceDiagnostic> devices = new(deviceNames.Count);
             foreach (string deviceName in deviceNames)
             {
-                bool canReadFrame = CanReadDirectShowCameraFrame(ffmpegPath, deviceName, log);
-                devices.Add(new CameraDeviceDiagnostic(deviceName, canReadFrame));
+                CameraInputProfile? profile = ResolveReadableDirectShowCameraProfile(ffmpegPath, deviceName, log, out string status);
+                devices.Add(new CameraDeviceDiagnostic(
+                    deviceName,
+                    profile is not null,
+                    profile?.DisplayText ?? status));
             }
 
             string detail = deviceNames.Count == 0
@@ -2793,15 +2810,17 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         string deviceName,
         string activeStatusText,
         Action<string, Exception?> log,
+        out CameraInputProfile? cameraInputProfile,
         out string statusText)
     {
-        if (CanReadDirectShowCameraFrame(ffmpegPath, deviceName, log))
+        cameraInputProfile = ResolveReadableDirectShowCameraProfile(ffmpegPath, deviceName, log, out string preflightStatus);
+        if (cameraInputProfile is not null)
         {
-            statusText = activeStatusText;
+            statusText = $"{activeStatusText}; {cameraInputProfile.DisplayText}";
             return deviceName;
         }
 
-        statusText = $"requested but camera did not produce a test frame ({deviceName})";
+        statusText = $"requested but camera did not produce a test frame ({deviceName}; {preflightStatus})";
         return null;
     }
 
@@ -2884,10 +2903,34 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         return deviceNames;
     }
 
+    private static CameraInputProfile? ResolveReadableDirectShowCameraProfile(
+        string ffmpegPath,
+        string deviceName,
+        Action<string, Exception?> log,
+        out string status)
+    {
+        List<string> failedProfiles = [];
+        foreach (CameraInputProfile profile in BuildCameraInputProfiles())
+        {
+            if (CanReadDirectShowCameraFrame(ffmpegPath, deviceName, profile, log, out string detail))
+            {
+                status = $"passed with {profile.DisplayText}";
+                return profile;
+            }
+
+            failedProfiles.Add($"{profile.DisplayText}: {detail}");
+        }
+
+        status = TrimForLog(string.Join(" | ", failedProfiles), 700);
+        return null;
+    }
+
     private static bool CanReadDirectShowCameraFrame(
         string ffmpegPath,
         string deviceName,
-        Action<string, Exception?> log)
+        CameraInputProfile profile,
+        Action<string, Exception?> log,
+        out string detail)
     {
         using Process process = new()
         {
@@ -2904,8 +2947,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         process.StartInfo.ArgumentList.Add("-hide_banner");
         process.StartInfo.ArgumentList.Add("-loglevel");
         process.StartInfo.ArgumentList.Add("warning");
-        process.StartInfo.ArgumentList.Add("-f");
-        process.StartInfo.ArgumentList.Add("dshow");
+        process.StartInfo.ArgumentList.Add("-nostdin");
+        profile.AddInputArguments(process.StartInfo);
         process.StartInfo.ArgumentList.Add("-i");
         process.StartInfo.ArgumentList.Add($"video={deviceName}");
         process.StartInfo.ArgumentList.Add("-frames:v");
@@ -2919,32 +2962,53 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         {
             if (!process.Start())
             {
+                detail = "process did not start";
                 return false;
             }
 
             Task<string> standardErrorTask = process.StandardError.ReadToEndAsync();
-            bool exited = process.WaitForExit(4000);
+            bool exited = process.WaitForExit(CameraPreflightTimeoutMilliseconds);
             if (!exited)
             {
                 TryKillProcess(process);
-                log($"Camera overlay preflight timed out. Device: {deviceName}.", null);
+                detail = "timed out";
+                log($"Camera overlay preflight timed out. Device: {deviceName}. Profile: {profile.DisplayText}.", null);
                 return false;
             }
 
             string standardErrorText = standardErrorTask.GetAwaiter().GetResult();
             bool frameWasRead = process.ExitCode == 0;
+            detail = frameWasRead
+                ? "frame read"
+                : TrimForLog(standardErrorText, 260);
             log(
                 $"Camera overlay preflight {(frameWasRead ? "passed" : "failed")}. " +
-                $"Device: {deviceName}. ExitCode: {process.ExitCode}. " +
+                $"Device: {deviceName}. Profile: {profile.DisplayText}. ExitCode: {process.ExitCode}. " +
                 $"Detail: {TrimForLog(standardErrorText, 260)}",
                 null);
             return frameWasRead;
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
-            log($"Camera overlay preflight failed. Device: {deviceName}.", exception);
+            detail = exception.Message;
+            log($"Camera overlay preflight failed. Device: {deviceName}. Profile: {profile.DisplayText}.", exception);
             return false;
         }
+    }
+
+    private static IReadOnlyList<CameraInputProfile> BuildCameraInputProfiles()
+    {
+        return
+        [
+            new CameraInputProfile("640x480@30 yuyv422", "640x480", 30, "yuyv422", null),
+            new CameraInputProfile("640x360@30 yuyv422", "640x360", 30, "yuyv422", null),
+            new CameraInputProfile("1280x720@30 mjpeg", "1280x720", 30, null, "mjpeg"),
+            new CameraInputProfile("640x480@30 auto", "640x480", 30, null, null),
+            new CameraInputProfile("640x360@30 auto", "640x360", 30, null, null),
+            new CameraInputProfile("1280x720@30 auto", "1280x720", 30, null, null),
+            new CameraInputProfile("1920x1080@30 mjpeg", "1920x1080", 30, null, "mjpeg"),
+            new CameraInputProfile("default", null, null, null, null)
+        ];
     }
 
     private static string TrimForLog(string text, int maximumLength)
@@ -3015,8 +3079,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("256");
         startInfo.ArgumentList.Add("-rtbufsize");
         startInfo.ArgumentList.Add("128M");
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("dshow");
+        (cameraOverlayInputProfile ?? CameraInputProfile.Default).AddInputArguments(startInfo);
         startInfo.ArgumentList.Add("-i");
         startInfo.ArgumentList.Add($"video={cameraOverlayDeviceName}");
     }
@@ -4295,7 +4358,48 @@ internal sealed record CameraDeviceSnapshot(
 
 internal sealed record CameraDeviceDiagnostic(
     string Name,
-    bool CanReadFrame);
+    bool CanReadFrame,
+    string Detail);
+
+internal sealed record CameraInputProfile(
+    string DisplayText,
+    string? VideoSize,
+    int? FrameRate,
+    string? PixelFormat,
+    string? InputCodec)
+{
+    public static CameraInputProfile Default { get; } = new("default", null, null, null, null);
+
+    public void AddInputArguments(ProcessStartInfo startInfo)
+    {
+        if (!string.IsNullOrWhiteSpace(InputCodec))
+        {
+            startInfo.ArgumentList.Add("-vcodec");
+            startInfo.ArgumentList.Add(InputCodec);
+        }
+
+        if (!string.IsNullOrWhiteSpace(VideoSize))
+        {
+            startInfo.ArgumentList.Add("-video_size");
+            startInfo.ArgumentList.Add(VideoSize);
+        }
+
+        if (FrameRate is int frameRate)
+        {
+            startInfo.ArgumentList.Add("-framerate");
+            startInfo.ArgumentList.Add(frameRate.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        if (!string.IsNullOrWhiteSpace(PixelFormat))
+        {
+            startInfo.ArgumentList.Add("-pixel_format");
+            startInfo.ArgumentList.Add(PixelFormat);
+        }
+
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("dshow");
+    }
+}
 
 internal readonly record struct ScreenStreamOptions(
     ScreenCaptureTarget Target,
