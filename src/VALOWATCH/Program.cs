@@ -1133,6 +1133,7 @@ static class Program
                 $"Samples: {browserResult.UsableSampleCount}/{browserResult.TotalSampleCount}. " +
                 $"PlaybackStops: {browserResult.PlaybackStopCount}. StallEvents: {browserResult.StallEventCount}. " +
                 $"BlackFrameReconnects: {browserResult.BlackFrameReconnectCount}. FrozenFrameReconnects: {browserResult.FrozenFrameReconnectCount}. " +
+                $"TransportRecoveries: {browserResult.TransportRecoveryCount}. FetchFallbacks: {browserResult.FetchFallbackCount}. WebSocketReconnects: {browserResult.WebSocketReconnectCount}. FragmentStallRecoveries: {browserResult.FragmentStallRecoveryCount}. " +
                 $"QueueOverflowEvents: {browserResult.QueueOverflowEventCount}. MseRestarts: {browserResult.MseRestartCount}. " +
                 $"WebSocketConnected: {browserResult.WebSocketConnected}. MseOpened: {browserResult.MseOpened}. " +
                 $"VisibilityRecoveryAttempted: {browserResult.VisibilityRecoveryAttempted}. " +
@@ -2993,6 +2994,10 @@ static class Program
     queueOverflowCount: metrics.queueOverflowCount || 0,
     blackFrameReconnectCount: metrics.blackFrameReconnectCount || 0,
     frozenFrameReconnectCount: metrics.frozenFrameReconnectCount || 0,
+    transportRecoveryCount: metrics.transportRecoveryCount || 0,
+    fetchFallbackCount: metrics.fetchFallbackCount || 0,
+    websocketReconnectCount: metrics.websocketReconnectCount || 0,
+    fragmentStallRecoveryCount: metrics.fragmentStallRecoveryCount || 0,
     stallCount: metrics.stallCount || 0,
     waitingCount: metrics.waitingCount || 0,
     appendedSegments: metrics.appendedSegments || 0,
@@ -3332,6 +3337,14 @@ static class Program
 
         public int FrozenFrameReconnectCount { get; init; }
 
+        public int TransportRecoveryCount { get; init; }
+
+        public int FetchFallbackCount { get; init; }
+
+        public int WebSocketReconnectCount { get; init; }
+
+        public int FragmentStallRecoveryCount { get; init; }
+
         public int StallCount { get; init; }
 
         public int WaitingCount { get; init; }
@@ -3386,6 +3399,10 @@ static class Program
                 QueueOverflowCount = ReadInteger(rootElement, "queueOverflowCount"),
                 BlackFrameReconnectCount = ReadInteger(rootElement, "blackFrameReconnectCount"),
                 FrozenFrameReconnectCount = ReadInteger(rootElement, "frozenFrameReconnectCount"),
+                TransportRecoveryCount = ReadInteger(rootElement, "transportRecoveryCount"),
+                FetchFallbackCount = ReadInteger(rootElement, "fetchFallbackCount"),
+                WebSocketReconnectCount = ReadInteger(rootElement, "websocketReconnectCount"),
+                FragmentStallRecoveryCount = ReadInteger(rootElement, "fragmentStallRecoveryCount"),
                 StallCount = ReadInteger(rootElement, "stallCount"),
                 WaitingCount = ReadInteger(rootElement, "waitingCount"),
                 AppendedSegments = ReadInteger(rootElement, "appendedSegments"),
@@ -3474,6 +3491,10 @@ static class Program
             int stallEventCount,
             int blackFrameReconnectCount,
             int frozenFrameReconnectCount,
+            int transportRecoveryCount,
+            int fetchFallbackCount,
+            int webSocketReconnectCount,
+            int fragmentStallRecoveryCount,
             int queueOverflowEventCount,
             int mseRestartCount,
             bool webSocketConnected,
@@ -3494,6 +3515,10 @@ static class Program
             StallEventCount = stallEventCount;
             BlackFrameReconnectCount = blackFrameReconnectCount;
             FrozenFrameReconnectCount = frozenFrameReconnectCount;
+            TransportRecoveryCount = transportRecoveryCount;
+            FetchFallbackCount = fetchFallbackCount;
+            WebSocketReconnectCount = webSocketReconnectCount;
+            FragmentStallRecoveryCount = fragmentStallRecoveryCount;
             QueueOverflowEventCount = queueOverflowEventCount;
             MseRestartCount = mseRestartCount;
             WebSocketConnected = webSocketConnected;
@@ -3526,6 +3551,14 @@ static class Program
 
         public int FrozenFrameReconnectCount { get; }
 
+        public int TransportRecoveryCount { get; }
+
+        public int FetchFallbackCount { get; }
+
+        public int WebSocketReconnectCount { get; }
+
+        public int FragmentStallRecoveryCount { get; }
+
         public int QueueOverflowEventCount { get; }
 
         public int MseRestartCount { get; }
@@ -3556,6 +3589,10 @@ static class Program
                 stallEventCount: 0,
                 blackFrameReconnectCount: 0,
                 frozenFrameReconnectCount: 0,
+                transportRecoveryCount: 0,
+                fetchFallbackCount: 0,
+                webSocketReconnectCount: 0,
+                fragmentStallRecoveryCount: 0,
                 queueOverflowEventCount: 0,
                 mseRestartCount: 0,
                 webSocketConnected: false,
@@ -3618,9 +3655,15 @@ static class Program
             int stallEventCount = CountVisualStallEventBursts(usableSamples, sample => sample.StallCount + sample.WaitingCount);
             int blackFrameReconnectCount = CountEventDelta(usableSamples, sample => sample.BlackFrameReconnectCount);
             int frozenFrameReconnectCount = CountEventDelta(usableSamples, sample => sample.FrozenFrameReconnectCount);
+            int transportRecoveryCount = CountEventPeak(cleanSamples, sample => sample.TransportRecoveryCount);
+            int fetchFallbackCount = CountEventPeak(cleanSamples, sample => sample.FetchFallbackCount);
+            int webSocketReconnectCount = CountEventPeak(cleanSamples, sample => sample.WebSocketReconnectCount);
+            int fragmentStallRecoveryCount = CountEventPeak(cleanSamples, sample => sample.FragmentStallRecoveryCount);
             int queueOverflowEventCount = CountEventDelta(usableSamples, sample => sample.QueueOverflowCount);
             int mseRestartCount = CountEventDelta(usableSamples, sample => sample.MseRestartCount);
             bool webSocketConnected = usableSamples.Any(sample => sample.WebSocketConnected);
+            bool liveTransportConnected = webSocketConnected ||
+                usableSamples.Any(sample => sample.FetchFallbackCount > 0 && sample.AppendedSegments > 0);
             bool mseOpened = usableSamples.Any(sample => string.Equals(sample.MseReadyState, "open", StringComparison.OrdinalIgnoreCase));
             bool visibilityRecoveredWithinFiveSeconds = !visibilityRecoveryAttempted ||
                 DidRecoverAfterVisibilityRestore(recoveryCandidateSamples, visibilityRestoredAtSeconds);
@@ -3630,9 +3673,9 @@ static class Program
                 failureReasons.Add($"decoded fps {averageDecodedFps:0.0} < 55.0");
             }
 
-            if (averageLatencySeconds < 1.7D || averageLatencySeconds > 2.6D)
+            if (averageLatencySeconds < 2.0D || averageLatencySeconds > 2.95D)
             {
-                failureReasons.Add($"average latency {averageLatencySeconds:0.00}s outside 1.70-2.60s");
+                failureReasons.Add($"average latency {averageLatencySeconds:0.00}s outside 2.00-2.95s");
             }
 
             if (maximumLatencySeconds > 3.0D)
@@ -3670,9 +3713,9 @@ static class Program
                 failureReasons.Add($"queue overflow events {queueOverflowEventCount} > 1");
             }
 
-            if (!webSocketConnected)
+            if (!liveTransportConnected)
             {
-                failureReasons.Add("WebSocket never connected after warmup");
+                failureReasons.Add("live transport never connected after warmup");
             }
 
             if (!mseOpened)
@@ -3697,6 +3740,10 @@ static class Program
                 stallEventCount,
                 blackFrameReconnectCount,
                 frozenFrameReconnectCount,
+                transportRecoveryCount,
+                fetchFallbackCount,
+                webSocketReconnectCount,
+                fragmentStallRecoveryCount,
                 queueOverflowEventCount,
                 mseRestartCount,
                 webSocketConnected,
@@ -3718,7 +3765,7 @@ static class Program
                     : "null";
                 return string.Create(
                     System.Globalization.CultureInfo.InvariantCulture,
-                    $"t={sample.ElapsedSeconds:0.0},ct={sample.CurrentTime:0.00},lat={latencyText},ready={sample.ReadyState},paused={sample.Paused},rate={sample.PlaybackRate:0.000},dec={sample.DecodedFrames},ws={sample.WebSocketConnected},mse={sample.MseReadyState},start={sample.PlaybackStartCount},append={sample.AppendedSegments},re={sample.ReconnectCount},blk={sample.BlackFrameReconnectCount},frz={sample.FrozenFrameReconnectCount},size={sample.VideoWidth}x{sample.VideoHeight},hold={sample.LastFrameCanvasVisible}");
+                    $"t={sample.ElapsedSeconds:0.0},ct={sample.CurrentTime:0.00},lat={latencyText},ready={sample.ReadyState},paused={sample.Paused},rate={sample.PlaybackRate:0.000},dec={sample.DecodedFrames},ws={sample.WebSocketConnected},mse={sample.MseReadyState},start={sample.PlaybackStartCount},append={sample.AppendedSegments},re={sample.ReconnectCount},tr={sample.TransportRecoveryCount},fb={sample.FetchFallbackCount},wr={sample.WebSocketReconnectCount},fs={sample.FragmentStallRecoveryCount},blk={sample.BlackFrameReconnectCount},frz={sample.FrozenFrameReconnectCount},size={sample.VideoWidth}x{sample.VideoHeight},hold={sample.LastFrameCanvasVisible}");
             }
 
             IEnumerable<SmoothLiveMetricSample> summarySamples = cleanSamples
@@ -3954,6 +4001,13 @@ static class Program
             return Math.Max(0, readEventCount(samples[^1]) - readEventCount(samples[0]));
         }
 
+        private static int CountEventPeak(
+            IReadOnlyList<SmoothLiveMetricSample> samples,
+            Func<SmoothLiveMetricSample, int> readEventCount)
+        {
+            return samples.Count == 0 ? 0 : samples.Max(readEventCount);
+        }
+
         private static int CountVisualStallEventBursts(
             IReadOnlyList<SmoothLiveMetricSample> samples,
             Func<SmoothLiveMetricSample, int> readEventCount)
@@ -3978,7 +4032,10 @@ static class Program
 
                 if (currentSample.MseRestartCount != previousSample.MseRestartCount ||
                     currentSample.PlaybackStartCount != previousSample.PlaybackStartCount ||
-                    currentSample.ReconnectCount != previousSample.ReconnectCount)
+                    currentSample.ReconnectCount != previousSample.ReconnectCount ||
+                    currentSample.TransportRecoveryCount != previousSample.TransportRecoveryCount ||
+                    currentSample.FetchFallbackCount != previousSample.FetchFallbackCount ||
+                    currentSample.WebSocketReconnectCount != previousSample.WebSocketReconnectCount)
                 {
                     previousIntervalHadEvent = false;
                     continue;

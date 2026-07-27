@@ -19,9 +19,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MinimumMaxWidth = 320;
     public const int DefaultMaxWidth = 720;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 2.5D;
-    public const double H264Fmp4MinimumSmoothLatencySeconds = 2.05D;
-    public const double H264Fmp4CatchUpLatencySeconds = 2.7D;
+    public const double H264Fmp4TargetLatencySeconds = 2.75D;
+    public const double H264Fmp4MinimumSmoothLatencySeconds = 2.25D;
+    public const double H264Fmp4CatchUpLatencySeconds = 2.9D;
     public const double H264Fmp4MaximumLatencySeconds = 3.0D;
     public const double H264Fmp4RestartLatencySeconds = 4.2D;
     public const int H264Fmp4LatencyCheckIntervalMilliseconds = 250;
@@ -29,9 +29,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int H264Fmp4ReconnectStallMilliseconds = 7000;
     public const int H264Fmp4FragmentDurationMicroseconds = 500000;
     public const int H264Fmp4MinimumFragmentDurationMicroseconds = 250000;
-    public const int H264Fmp4InitialFragmentCount = 4;
-    public const int H264Fmp4RetainedFragmentCount = 42;
-    public const int H264Fmp4MaximumAppendQueueLength = 45;
+    public const int H264Fmp4InitialFragmentCount = 6;
+    public const int H264Fmp4RetainedFragmentCount = 72;
+    public const int H264Fmp4MaximumAppendQueueLength = 60;
     public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 8000;
     public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
@@ -536,6 +536,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string seekCooldownMillisecondsText = H264Fmp4SeekCooldownMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string reconnectStallMillisecondsText = H264Fmp4ReconnectStallMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string maximumAppendQueueLengthText = H264Fmp4MaximumAppendQueueLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string fragmentDurationMillisecondsText = (H264Fmp4FragmentDurationMicroseconds / 1000D).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
         string mediaScript = Options.Method switch
         {
             ScreenStreamMethod.H264Hls => $$"""
@@ -574,9 +575,13 @@ const latencyCheckMilliseconds = {{latencyCheckIntervalMillisecondsText}};
 const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
 const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
 const maximumAppendQueueLength = {{maximumAppendQueueLengthText}};
-const websocketReconnectDelayMilliseconds = 1200;
+const fragmentDurationMilliseconds = {{fragmentDurationMillisecondsText}};
+const websocketReconnectDelayMilliseconds = 450;
 const blackFrameReconnectMilliseconds = 3200;
 const frozenFrameReconnectMilliseconds = 5200;
+const transportRecoveryCooldownMilliseconds = 900;
+const transportStallMilliseconds = Math.max(2200, fragmentDurationMilliseconds * 4);
+const hardFragmentStallMilliseconds = Math.max(4200, fragmentDurationMilliseconds * 8);
 const liveBufferKeepBehindSeconds = Math.max(18, restartLatencySeconds + targetLatencySeconds + 8);
 let lastSeekAtMilliseconds = -seekCooldownMilliseconds;
 let lastPlayAttemptAtMilliseconds = 0;
@@ -589,6 +594,7 @@ let lastDecodedFrameChangedAtMilliseconds = performance.now();
 let lastRenderableFrameAtMilliseconds = performance.now();
 let lastFragmentReceivedAtMilliseconds = performance.now();
 let lastCanvasFrameAtMilliseconds = 0;
+let lastTransportRecoveryAtMilliseconds = -transportRecoveryCooldownMilliseconds;
 let reconnectNonce = 0;
 let frameMonitorScheduled = false;
 let hiddenStreamSuspended = false;
@@ -614,6 +620,10 @@ const streamMetrics = window.valowatchStreamMetrics = {
   queueOverflowCount: 0,
   blackFrameReconnectCount: 0,
   frozenFrameReconnectCount: 0,
+  transportRecoveryCount: 0,
+  fetchFallbackCount: 0,
+  websocketReconnectCount: 0,
+  fragmentStallRecoveryCount: 0,
   stallCount: 0,
   waitingCount: 0,
   playbackStartCount: 0,
@@ -718,7 +728,7 @@ function isFmp4PageHidden() {
   return document.hidden || document.visibilityState === 'hidden';
 }
 function suspendFmp4ForHiddenPage(forceSuspend = false) {
-  if (!forceSuspend && !isFmp4PageHidden()) {
+  if (!forceSuspend) {
     return false;
   }
 
@@ -733,12 +743,7 @@ function suspendFmp4ForHiddenPage(forceSuspend = false) {
   showLastFrameCanvas();
   screenVideo.playbackRate = 1;
   activeStreamSession += 1;
-  if (activeFetchAbortController) {
-    try {
-      activeFetchAbortController.abort();
-    } catch {
-    }
-  }
+  abortFmp4Fetch();
   closeFmp4WebSocket();
 
   try {
@@ -867,12 +872,7 @@ function reconnectFmp4Stream(forceReconnect = false) {
   fmp4PlaybackHasStarted = false;
   appendQueue = [];
   activeStreamSession += 1;
-  if (activeFetchAbortController) {
-    try {
-      activeFetchAbortController.abort();
-    } catch {
-    }
-  }
+  abortFmp4Fetch();
   closeFmp4WebSocket();
 
   if (directFallbackActive) {
@@ -975,9 +975,18 @@ function keepFmp4LatencyLow() {
   markFmp4PlaybackMovement(nowMilliseconds);
   const latencyState = readFmp4LatencySeconds();
   updateFmp4Metrics(latencyState);
+  const fragmentIdleMilliseconds = nowMilliseconds - lastFragmentReceivedAtMilliseconds;
   if (!latencyState) {
-    if (!screenVideo.paused && nowMilliseconds - lastPlaybackMovedAtMilliseconds > reconnectStallMilliseconds) {
-      reconnectFmp4Stream();
+    if (!directFallbackActive &&
+        fmp4PlaybackHasStarted &&
+        fragmentIdleMilliseconds > transportStallMilliseconds &&
+        recoverFmp4Transport(true)) {
+      streamMetrics.fragmentStallRecoveryCount += 1;
+      return;
+    }
+
+    if (!screenVideo.paused && nowMilliseconds - lastPlaybackMovedAtMilliseconds > hardFragmentStallMilliseconds) {
+      reconnectFmp4Stream(true);
     }
 
     return;
@@ -991,6 +1000,15 @@ function keepFmp4LatencyLow() {
   }
 
   if (checkFmp4RenderHealth(nowMilliseconds)) {
+    return;
+  }
+
+  if (!directFallbackActive &&
+      fmp4PlaybackHasStarted &&
+      fragmentIdleMilliseconds > transportStallMilliseconds &&
+      latencySeconds < targetLatencySeconds + 0.35 &&
+      recoverFmp4Transport(true)) {
+    streamMetrics.fragmentStallRecoveryCount += 1;
     return;
   }
 
@@ -1027,8 +1045,9 @@ function keepFmp4LatencyLow() {
   }
 
   if (!directFallbackActive &&
-      nowMilliseconds - lastFragmentReceivedAtMilliseconds > Math.max(8500, reconnectStallMilliseconds + 1000)) {
-    reconnectFmp4Stream();
+      fragmentIdleMilliseconds > hardFragmentStallMilliseconds &&
+      latencySeconds < minimumSmoothLatencySeconds - 0.9) {
+    reconnectFmp4Stream(true);
     return;
   }
 
@@ -1054,7 +1073,7 @@ function keepFmp4LatencyLow() {
   updateFmp4Metrics(latencyState);
 }
 async function keepFmp4Playing(forcePlay = false) {
-  if (isFmp4PageHidden()) {
+  if (hiddenStreamSuspended) {
     return;
   }
 
@@ -1095,6 +1114,55 @@ function closeFmp4WebSocket() {
     socket.close();
   } catch {
   }
+}
+function abortFmp4Fetch() {
+  const fetchAbortController = activeFetchAbortController;
+  activeFetchAbortController = null;
+  if (!fetchAbortController) {
+    return;
+  }
+
+  try {
+    fetchAbortController.abort();
+  } catch {
+  }
+}
+function shouldPreferHttpFmp4Transport() {
+  const hostname = (location.hostname || '').toLowerCase();
+  return hostname.endsWith('.trycloudflare.com') || hostname.includes('trycloudflare');
+}
+function recoverFmp4Transport(preferFetch = true) {
+  if (directFallbackActive || isFmp4PageHidden() || !mediaSource || mediaSource.readyState !== 'open' || !sourceBuffer) {
+    return false;
+  }
+
+  const nowMilliseconds = performance.now();
+  if (nowMilliseconds - lastTransportRecoveryAtMilliseconds < transportRecoveryCooldownMilliseconds) {
+    return false;
+  }
+
+  const session = activeStreamSession;
+  lastTransportRecoveryAtMilliseconds = nowMilliseconds;
+  streamMetrics.transportRecoveryCount += 1;
+  closeFmp4WebSocket();
+  abortFmp4Fetch();
+  const useFetchTransport = preferFetch || shouldPreferHttpFmp4Transport();
+  if (useFetchTransport) {
+    streamMetrics.fetchFallbackCount += 1;
+    window.setTimeout(() => {
+      if (session === activeStreamSession && !hiddenStreamSuspended) {
+        startFetchFmp4Live(session, false);
+      }
+    }, 80);
+  } else {
+    window.setTimeout(() => {
+      if (session === activeStreamSession && !hiddenStreamSuspended) {
+        startWebSocketFmp4Live(session);
+      }
+    }, 80);
+  }
+
+  return true;
 }
 function buildFmp4WebSocketUrl() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1226,7 +1294,7 @@ async function fetchFmp4ArrayBuffer(url, abortSignal) {
   return { response, bytes: await response.arrayBuffer() };
 }
 async function runFmp4FragmentLoop(session, abortSignal) {
-  while (session === activeStreamSession && !abortSignal.aborted && !isFmp4PageHidden()) {
+  while (session === activeStreamSession && !abortSignal.aborted && !hiddenStreamSuspended) {
     const requestedSequence = nextFragmentSequence > 0 ? nextFragmentSequence : 0;
     const fragmentUrl = liveFragmentPathPrefix + requestedSequence + '.m4s?t=' + Date.now();
     const result = await fetchFmp4ArrayBuffer(fragmentUrl, abortSignal);
@@ -1244,20 +1312,46 @@ async function runFmp4FragmentLoop(session, abortSignal) {
     keepFmp4LatencyLow();
   }
 }
-async function startFetchFmp4Live(session) {
-  activeFetchAbortController = new AbortController();
+async function startFetchFmp4Live(session, includeInitSegment = true) {
+  abortFmp4Fetch();
+  const fetchAbortController = new AbortController();
+  activeFetchAbortController = fetchAbortController;
   try {
-    const initResult = await fetchFmp4ArrayBuffer(liveInitPath + '?t=' + Date.now(), activeFetchAbortController.signal);
-    if (session !== activeStreamSession || activeFetchAbortController.signal.aborted) {
+    if (includeInitSegment) {
+      const initResult = await fetchFmp4ArrayBuffer(liveInitPath + '?t=' + Date.now(), fetchAbortController.signal);
+      if (session !== activeStreamSession || fetchAbortController.signal.aborted) {
+        return;
+      }
+
+      queueFmp4Bytes(initResult.bytes, session);
+      keepFmp4Playing(true);
+    } else {
+      keepFmp4Playing();
+    }
+
+    await runFmp4FragmentLoop(session, fetchAbortController.signal);
+  } catch {
+    if (fetchAbortController.signal.aborted || session !== activeStreamSession || hiddenStreamSuspended) {
       return;
     }
 
-    queueFmp4Bytes(initResult.bytes, session);
-    keepFmp4Playing(true);
-    await runFmp4FragmentLoop(session, activeFetchAbortController.signal);
-  } catch {
-    if (session === activeStreamSession && !isFmp4PageHidden()) {
-      window.setTimeout(() => reconnectFmp4Stream(true), 450);
+    const retryDelayMilliseconds = includeInitSegment ? 450 : 850;
+    window.setTimeout(() => {
+      if (session !== activeStreamSession || hiddenStreamSuspended) {
+        return;
+      }
+
+      const latencyState = readFmp4LatencySeconds();
+      if (!includeInitSegment && latencyState && latencyState.latencySeconds > 0.35) {
+        startFetchFmp4Live(session, false);
+        return;
+      }
+
+      reconnectFmp4Stream(true);
+    }, retryDelayMilliseconds);
+  } finally {
+    if (activeFetchAbortController === fetchAbortController) {
+      activeFetchAbortController = null;
     }
   }
 }
@@ -1277,7 +1371,7 @@ function startWebSocketFmp4Live(session) {
     streamMetrics.websocketConnected = true;
   };
   socket.onmessage = async event => {
-    if (session !== activeStreamSession || isFmp4PageHidden()) {
+    if (session !== activeStreamSession || hiddenStreamSuspended) {
       try {
         socket.close();
       } catch {
@@ -1286,7 +1380,7 @@ function startWebSocketFmp4Live(session) {
     }
 
     const bytes = await normalizeFmp4MessageBytes(event.data);
-    if (session !== activeStreamSession || isFmp4PageHidden()) {
+    if (session !== activeStreamSession || hiddenStreamSuspended) {
       return;
     }
 
@@ -1308,24 +1402,35 @@ function startWebSocketFmp4Live(session) {
     }
     streamMetrics.websocketConnected = false;
 
-    if (session !== activeStreamSession || isFmp4PageHidden()) {
+    if (session !== activeStreamSession || hiddenStreamSuspended) {
       return;
     }
 
     if (receivedMessages === 0 && !fallbackStarted) {
       fallbackStarted = true;
-      startFetchFmp4Live(session);
+      startFetchFmp4Live(session, true);
       return;
     }
 
     const reconnectDelayMilliseconds = receivedMessages > 0
       ? websocketReconnectDelayMilliseconds
       : Math.min(websocketReconnectDelayMilliseconds, 700);
-    window.setTimeout(() => reconnectFmp4Stream(true), reconnectDelayMilliseconds);
+    streamMetrics.websocketReconnectCount += 1;
+    window.setTimeout(() => {
+      if (session !== activeStreamSession || hiddenStreamSuspended) {
+        return;
+      }
+
+      if (receivedMessages > 0 && recoverFmp4Transport(true)) {
+        return;
+      }
+
+      reconnectFmp4Stream(true);
+    }, reconnectDelayMilliseconds);
   };
 }
 async function startMseFmp4Live() {
-  if (isFmp4PageHidden()) {
+  if (hiddenStreamSuspended) {
     return;
   }
 
@@ -1352,7 +1457,7 @@ async function startMseFmp4Live() {
 
   try {
     await waitForMediaSourceOpen(session);
-    if (session !== activeStreamSession || isFmp4PageHidden()) {
+    if (session !== activeStreamSession || hiddenStreamSuspended) {
       return;
     }
 
@@ -1372,9 +1477,14 @@ async function startMseFmp4Live() {
       keepFmp4LatencyLow();
     });
     sourceBuffer.addEventListener('error', () => reconnectFmp4Stream(true));
-    startWebSocketFmp4Live(session);
+    if (shouldPreferHttpFmp4Transport()) {
+      streamMetrics.fetchFallbackCount += 1;
+      startFetchFmp4Live(session, true);
+    } else {
+      startWebSocketFmp4Live(session);
+    }
   } catch {
-    if (session === activeStreamSession && !isFmp4PageHidden()) {
+    if (session === activeStreamSession && !hiddenStreamSuspended) {
       window.setTimeout(() => reconnectFmp4Stream(true), 500);
     }
   }
