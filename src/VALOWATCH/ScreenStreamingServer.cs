@@ -32,7 +32,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int H264Fmp4InitialFragmentCount = 4;
     public const int H264Fmp4RetainedFragmentCount = 42;
     public const int H264Fmp4MaximumAppendQueueLength = 45;
-    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 1500;
+    public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 8000;
     public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
     public const int MjpegFfmpegThresholdFramesPerSecond = 60;
@@ -40,6 +40,8 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private const long MaximumFmp4BoxBytes = 64L * 1024L * 1024L;
     private static readonly TimeSpan FrameCaptureRetryDelay = TimeSpan.FromMilliseconds(8);
     private static readonly TimeSpan Fmp4StartupTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan Fmp4WebSocketFragmentWaitTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan Fmp4WebSocketStopLogInterval = TimeSpan.FromMinutes(1);
     private static readonly object H264EncoderSelectionSyncRoot = new();
     private static readonly H264EncoderProfile Libx264EncoderProfile = new("libx264", "libx264", UsesCrf: true, []);
     private static readonly H264EncoderProfile[] HardwareH264EncoderProfiles =
@@ -56,6 +58,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly SemaphoreSlim frameSemaphore = new(1, 1);
     private readonly Action<string, Exception?> log;
     private readonly object fmp4LiveStreamSyncRoot = new();
+    private readonly object fmp4WebSocketStopLogSyncRoot = new();
     private readonly string token;
     private readonly TimeSpan frameInterval;
     private readonly ScreenCapturePlan capturePlan;
@@ -70,6 +73,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private FullScreenScreenshotFrame? cachedFrame;
     private DateTimeOffset cachedFrameAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastCaptureFailureLoggedAtUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset lastFmp4WebSocketStopLoggedAtUtc = DateTimeOffset.MinValue;
+    private bool disableDesktopDuplicationCaptureForSession;
+    private int suppressedFmp4WebSocketStopCount;
     private Task? acceptTask;
 
     private ScreenStreamingServer(
@@ -566,6 +572,7 @@ const latencyCheckMilliseconds = {{latencyCheckIntervalMillisecondsText}};
 const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
 const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
 const maximumAppendQueueLength = {{maximumAppendQueueLengthText}};
+const websocketReconnectDelayMilliseconds = 1200;
 let lastSeekAtMilliseconds = -seekCooldownMilliseconds;
 let lastPlayAttemptAtMilliseconds = 0;
 let lastReconnectAtMilliseconds = 0;
@@ -1134,7 +1141,10 @@ function startWebSocketFmp4Live(session) {
       return;
     }
 
-    window.setTimeout(() => reconnectFmp4Stream(true), 350);
+    const reconnectDelayMilliseconds = receivedMessages > 0
+      ? websocketReconnectDelayMilliseconds
+      : Math.min(websocketReconnectDelayMilliseconds, 700);
+    window.setTimeout(() => reconnectFmp4Stream(true), reconnectDelayMilliseconds);
   };
 }
 async function startMseFmp4Live() {
@@ -1487,6 +1497,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             {
                 lastException = exception;
                 log("fMP4 live encoder did not produce an initial fragment; restarting it once.", exception);
+                DisableDesktopDuplicationCaptureForSessionIfNeeded(exception);
                 ClearFmp4LiveFragmentSource(source);
             }
         }
@@ -1513,6 +1524,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             {
                 lastException = exception;
                 log("fMP4 live encoder did not produce a requested fragment; restarting it once.", exception);
+                DisableDesktopDuplicationCaptureForSessionIfNeeded(exception);
                 ClearFmp4LiveFragmentSource(source);
             }
         }
@@ -1645,12 +1657,15 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
         long copiedBytes = 0;
         int copiedMessages = 0;
+        int consecutiveFragmentTimeouts = 0;
         DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
         bool responseHeaderSent = false;
         bool activeClientCountIncremented = false;
+        Fmp4LiveFragmentSource? activeSource = null;
         try
         {
             Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
+            activeSource = source;
             Fmp4LiveSnapshot snapshot;
             try
             {
@@ -1661,8 +1676,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             catch (Exception exception) when (exception is InvalidOperationException or TimeoutException)
             {
                 log("fMP4 WebSocket encoder did not produce an initial fragment; restarting it once.", exception);
+                DisableDesktopDuplicationCaptureForSessionIfNeeded(exception);
                 ClearFmp4LiveFragmentSource(source);
                 source = GetOrStartFmp4LiveFragmentSource();
+                activeSource = source;
                 snapshot = await source
                     .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
                     .ConfigureAwait(false);
@@ -1688,9 +1705,37 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                Fmp4Fragment fragment = await source
-                    .WaitForFragmentAsync(nextFragmentSequence, TimeSpan.FromSeconds(3), cancellationToken)
-                    .ConfigureAwait(false);
+                Fmp4Fragment fragment;
+                try
+                {
+                    fragment = await source
+                        .WaitForFragmentAsync(nextFragmentSequence, Fmp4WebSocketFragmentWaitTimeout, cancellationToken)
+                        .ConfigureAwait(false);
+                    consecutiveFragmentTimeouts = 0;
+                }
+                catch (TimeoutException) when (source.IsUsable && consecutiveFragmentTimeouts++ < 1)
+                {
+                    continue;
+                }
+                catch (TimeoutException exception)
+                {
+                    if (!source.IsUsable)
+                    {
+                        ClearFmp4LiveFragmentSource(source);
+                    }
+
+                    throw new TimeoutException(
+                        "Timed out while waiting for the next fMP4 WebSocket fragment; the browser will reconnect to the live edge.",
+                        exception);
+                }
+                catch (InvalidOperationException exception) when (!source.IsUsable)
+                {
+                    ClearFmp4LiveFragmentSource(source);
+                    throw new InvalidOperationException(
+                        "The fMP4 WebSocket encoder stopped after buffered fragments were exhausted; the browser will reconnect to a fresh encoder.",
+                        exception);
+                }
+
                 await WriteWebSocketBinaryMessageWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
                 Volatile.Write(ref lastFmp4FragmentSequence, fragment.Sequence);
                 copiedBytes += fragment.Bytes.Length;
@@ -1706,7 +1751,12 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
         {
-            log("fMP4 WebSocket screen stream connection stopped.", exception);
+            if (exception is TimeoutException && activeSource is not null && !activeSource.IsUsable)
+            {
+                ClearFmp4LiveFragmentSource(activeSource);
+            }
+
+            LogFmp4WebSocketConnectionStopped(exception, responseHeaderSent, copiedMessages);
             if (!responseHeaderSent)
             {
                 try
@@ -1759,23 +1809,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         bool responseHeaderSent = false;
         try
         {
+            Fmp4LiveSnapshot snapshot = await WaitForFmp4LiveSnapshotWithRestartAsync(cancellationToken).ConfigureAwait(false);
             Fmp4LiveFragmentSource source = GetOrStartFmp4LiveFragmentSource();
-            Fmp4LiveSnapshot snapshot;
-            try
-            {
-                snapshot = await source
-                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is InvalidOperationException or TimeoutException)
-            {
-                log("fMP4 live encoder did not produce an initial stream fragment; restarting it once.", exception);
-                ClearFmp4LiveFragmentSource(source);
-                source = GetOrStartFmp4LiveFragmentSource();
-                snapshot = await source
-                    .WaitForSnapshotAsync(Fmp4StartupTimeout, cancellationToken)
-                    .ConfigureAwait(false);
-            }
 
             await WriteFmp4ResponseHeaderAsync(networkStream, cancellationToken).ConfigureAwait(false);
             responseHeaderSent = true;
@@ -1793,9 +1828,28 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                Fmp4Fragment fragment = await source
-                    .WaitForFragmentAsync(nextFragmentSequence, TimeSpan.FromSeconds(5), cancellationToken)
-                    .ConfigureAwait(false);
+                Fmp4Fragment fragment;
+                try
+                {
+                    fragment = await source
+                        .WaitForFragmentAsync(nextFragmentSequence, Fmp4WebSocketFragmentWaitTimeout, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (TimeoutException exception) when (!source.IsUsable)
+                {
+                    ClearFmp4LiveFragmentSource(source);
+                    throw new TimeoutException(
+                        "Timed out while waiting for the next fMP4 live fragment after the encoder stopped; the browser should reconnect to the live edge.",
+                        exception);
+                }
+                catch (InvalidOperationException exception) when (!source.IsUsable)
+                {
+                    ClearFmp4LiveFragmentSource(source);
+                    throw new InvalidOperationException(
+                        "The fMP4 live encoder stopped after buffered fragments were exhausted; the browser should reconnect to a fresh encoder.",
+                        exception);
+                }
+
                 await WriteNetworkBytesWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
                 copiedBytes += fragment.Bytes.Length;
                 copiedFragments++;
@@ -1810,7 +1864,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or TimeoutException or System.ComponentModel.Win32Exception)
         {
-            log("fMP4 live screen stream connection stopped.", exception);
+            LogFmp4WebSocketConnectionStopped(exception, responseHeaderSent, copiedFragments);
             if (!responseHeaderSent)
             {
                 try
@@ -2223,6 +2277,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
     private bool ShouldUseDesktopDuplicationCapture()
     {
+        if (disableDesktopDuplicationCaptureForSession)
+        {
+            return false;
+        }
+
         if (string.Equals(
             Environment.GetEnvironmentVariable("VALOWATCH_DISABLE_DDAGRAB"),
             "1",
@@ -2234,6 +2293,19 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         return capturePlan.ScreenCount == 1 &&
             capturePlan.Bounds.Left >= 0 &&
             capturePlan.Bounds.Top >= 0;
+    }
+
+    private void DisableDesktopDuplicationCaptureForSessionIfNeeded(Exception exception)
+    {
+        if (!ShouldUseDesktopDuplicationCapture())
+        {
+            return;
+        }
+
+        disableDesktopDuplicationCaptureForSession = true;
+        log(
+            "Desktop duplication capture was unavailable; falling back to gdigrab for this stream session.",
+            exception);
     }
 
     private void AddFfmpegCaptureInputArguments(ProcessStartInfo startInfo)
@@ -2608,6 +2680,32 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         log(message, exception);
     }
 
+    private void LogFmp4WebSocketConnectionStopped(Exception exception, bool responseHeaderSent, int copiedMessages)
+    {
+        DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
+        int suppressedCount;
+        lock (fmp4WebSocketStopLogSyncRoot)
+        {
+            if (nowUtc - lastFmp4WebSocketStopLoggedAtUtc < Fmp4WebSocketStopLogInterval)
+            {
+                suppressedFmp4WebSocketStopCount++;
+                return;
+            }
+
+            suppressedCount = suppressedFmp4WebSocketStopCount;
+            suppressedFmp4WebSocketStopCount = 0;
+            lastFmp4WebSocketStopLoggedAtUtc = nowUtc;
+        }
+
+        string suppressedText = suppressedCount > 0
+            ? $" SuppressedSimilarStops: {suppressedCount}."
+            : string.Empty;
+        log(
+            "fMP4 WebSocket screen stream connection stopped. " +
+            $"HeaderSent: {responseHeaderSent}. CopiedMessages: {copiedMessages}.{suppressedText}",
+            exception);
+    }
+
     private static async Task WritePlainTextResponseAsync(
         NetworkStream networkStream,
         int statusCode,
@@ -2963,6 +3061,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                         return fragment;
                     }
 
+                    ThrowIfUnavailableAfterBufferedData(requestedSequence);
                     waitTask = changeSignal.Task;
                 }
 
@@ -3182,6 +3281,29 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             if ((completed || disposed || process.HasExited) && fragments.Count == 0)
             {
                 throw new InvalidOperationException("fMP4 live encoder is not running.");
+            }
+        }
+
+        private void ThrowIfUnavailableAfterBufferedData(long requestedSequence)
+        {
+            if (!completed && !disposed && !process.HasExited)
+            {
+                return;
+            }
+
+            if (fragments.Count == 0)
+            {
+                ThrowIfUnavailableWithoutBufferedData();
+                return;
+            }
+
+            long latestSequence = fragments[^1].Sequence;
+            if (requestedSequence > latestSequence)
+            {
+                Exception? innerException = failure;
+                throw new InvalidOperationException(
+                    "fMP4 live encoder stopped after buffered fragments were exhausted.",
+                    innerException);
             }
         }
 
