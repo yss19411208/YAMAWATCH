@@ -640,7 +640,7 @@ static class Program
             AppendDiagnosticLogLine(
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Stream slash command check: " +
-                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status. Targets: full,valorant. " +
+                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status,cameras. Targets: full,valorant. " +
                 $"Methods: {ScreenStreamMethodNames.H264Fmp4},{ScreenStreamMethodNames.H264Hls},{ScreenStreamMethodNames.Mjpeg}. " +
                 $"Options: method,fps,quality,width,camera. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
             Environment.ExitCode = ready ? 0 : 1;

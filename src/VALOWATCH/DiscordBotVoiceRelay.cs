@@ -67,13 +67,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StreamSubcommandOnName = "on";
     private const string StreamSubcommandOffName = "off";
     private const string StreamSubcommandStatusName = "status";
+    private const string StreamSubcommandCamerasName = "cameras";
     private const string StreamTargetOptionName = "target";
     private const string StreamMethodOptionName = "method";
     private const string StreamFramesPerSecondOptionName = "fps";
     private const string StreamQualityOptionName = "quality";
     private const string StreamWidthOptionName = "width";
     private const string StreamCameraOverlayOptionName = "camera";
-    private const string StreamCommandDescription = "VALOWATCH stream controls v6";
+    private const string StreamCommandDescription = "VALOWATCH stream controls v7";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -1645,6 +1646,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            if (string.Equals(actionName, StreamSubcommandCamerasName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+                deferred = true;
+                Embed cameraDevicesEmbed = BuildStreamCameraDevicesEmbed(settings);
+                await command
+                    .FollowupAsync(embed: cameraDevicesEmbed, ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             IMessageChannel? targetChannel = ResolveStreamTargetChannel(command);
             if (targetChannel is null)
             {
@@ -1669,7 +1681,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (!string.Equals(actionName, StreamSubcommandOnName, StringComparison.OrdinalIgnoreCase))
             {
                 await command
-                    .RespondAsync("Use /stream on, /stream off, or /stream status.", ephemeral: true)
+                    .RespondAsync("Use /stream on, /stream off, /stream status, or /stream cameras.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -2625,6 +2637,72 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return embedBuilder.Build();
     }
 
+    private Embed BuildStreamCameraDevicesEmbed(DiscordBotSettings settings)
+    {
+        CameraDeviceSnapshot snapshot = ScreenStreamingServer.CaptureCameraDeviceSnapshot(appPaths.FfmpegPath, WriteLog);
+        StringBuilder descriptionBuilder = new();
+        descriptionBuilder.AppendLine($"既定カメラ表示: {(settings.StreamDefaultCameraOverlayEnabled ? "on" : "off")}");
+        descriptionBuilder.AppendLine(
+            $"設定カメラ名: {(string.IsNullOrWhiteSpace(settings.StreamCameraDeviceName) ? "(未指定)" : SanitizeCameraDeviceText(settings.StreamCameraDeviceName))}");
+        descriptionBuilder.AppendLine($"ffmpeg: {(snapshot.FfmpegAvailable ? "available" : "missing")}");
+        descriptionBuilder.AppendLine();
+
+        if (!snapshot.FfmpegAvailable)
+        {
+            descriptionBuilder.AppendLine(SanitizeCameraDeviceText(snapshot.Detail));
+        }
+        else if (snapshot.Devices.Count == 0)
+        {
+            descriptionBuilder.AppendLine("DirectShowでWebカメラは検出されませんでした。");
+        }
+        else
+        {
+            for (int deviceIndex = 0; deviceIndex < snapshot.Devices.Count; deviceIndex++)
+            {
+                CameraDeviceDiagnostic device = snapshot.Devices[deviceIndex];
+                string readiness = device.CanReadFrame ? "OK" : "NG";
+                descriptionBuilder.AppendLine(
+                    $"{deviceIndex + 1}. [{readiness}] {SanitizeCameraDeviceText(device.Name)}");
+            }
+        }
+
+        descriptionBuilder.AppendLine();
+        descriptionBuilder.AppendLine("OK: 配信用テストフレーム取得成功");
+        descriptionBuilder.AppendLine("NG: 検出はされたが、使用中・権限・ドライバ等で読み取り失敗");
+        if (!string.IsNullOrWhiteSpace(snapshot.Detail))
+        {
+            descriptionBuilder.AppendLine($"Detail: {SanitizeCameraDeviceText(snapshot.Detail)}");
+        }
+
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH Webカメラ一覧",
+            Description = TrimEmbedDescription(descriptionBuilder.ToString()),
+            Color = snapshot.Devices.Count == 0 ? new Discord.Color(210, 153, 34) : new Discord.Color(63, 185, 80),
+            Timestamp = DateTimeOffset.Now
+        };
+        embedBuilder.AddField(
+            "使い方",
+            "/stream on target:full method:h264-fmp4 fps:60 quality:90 width:1280 camera:true",
+            inline: false);
+        return embedBuilder.Build();
+    }
+
+    private static string SanitizeCameraDeviceText(string text)
+    {
+        string sanitizedText = RuntimeLogMessageCollector
+            .SanitizeLine(text)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        if (string.IsNullOrWhiteSpace(sanitizedText))
+        {
+            return "(empty)";
+        }
+
+        return sanitizedText.Length <= 160 ? sanitizedText : sanitizedText[..160] + "...";
+    }
+
     private static string BuildStreamSmoothLiveStatusText(ScreenStreamSession session)
     {
         if (session.Method != ScreenStreamMethod.H264Fmp4)
@@ -3415,6 +3493,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 new SlashCommandOptionBuilder()
                     .WithName(StreamSubcommandStatusName)
                     .WithDescription("Show current stream status")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandCamerasName)
+                    .WithDescription("List webcam devices visible to VALOWATCH")
                     .WithType(ApplicationCommandOptionType.SubCommand));
     }
 

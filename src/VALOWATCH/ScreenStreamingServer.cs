@@ -2748,6 +2748,46 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
     }
 
+    internal static CameraDeviceSnapshot CaptureCameraDeviceSnapshot(
+        string? ffmpegPath,
+        Action<string, Exception?> log)
+    {
+        if (string.IsNullOrWhiteSpace(ffmpegPath) || !File.Exists(ffmpegPath))
+        {
+            return new CameraDeviceSnapshot(
+                FfmpegAvailable: false,
+                Detail: "ffmpeg executable was not found; camera overlay cannot list DirectShow devices.",
+                Devices: []);
+        }
+
+        try
+        {
+            IReadOnlyList<string> deviceNames = ListDirectShowVideoDeviceNames(ffmpegPath, log);
+            List<CameraDeviceDiagnostic> devices = new(deviceNames.Count);
+            foreach (string deviceName in deviceNames)
+            {
+                bool canReadFrame = CanReadDirectShowCameraFrame(ffmpegPath, deviceName, log);
+                devices.Add(new CameraDeviceDiagnostic(deviceName, canReadFrame));
+            }
+
+            string detail = deviceNames.Count == 0
+                ? "No DirectShow video devices were detected by ffmpeg."
+                : "DirectShow video devices were detected by ffmpeg.";
+            return new CameraDeviceSnapshot(
+                FfmpegAvailable: true,
+                Detail: detail,
+                Devices: devices);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            log("Camera device snapshot failed.", exception);
+            return new CameraDeviceSnapshot(
+                FfmpegAvailable: true,
+                Detail: exception.Message,
+                Devices: []);
+        }
+    }
+
     private static string? ResolveUsableCameraDevice(
         string ffmpegPath,
         string deviceName,
@@ -4247,6 +4287,15 @@ internal sealed class HttpRequestInfo
 
     public IReadOnlyDictionary<string, string> Headers { get; }
 }
+
+internal sealed record CameraDeviceSnapshot(
+    bool FfmpegAvailable,
+    string Detail,
+    IReadOnlyList<CameraDeviceDiagnostic> Devices);
+
+internal sealed record CameraDeviceDiagnostic(
+    string Name,
+    bool CanReadFrame);
 
 internal readonly record struct ScreenStreamOptions(
     ScreenCaptureTarget Target,
