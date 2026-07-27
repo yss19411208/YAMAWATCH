@@ -73,6 +73,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StreamQualityOptionName = "quality";
     private const string StreamWidthOptionName = "width";
     private const string StreamCameraOverlayOptionName = "camera";
+    private const string StreamCommandDescription = "VALOWATCH stream controls v6";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -3318,7 +3319,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
-        const string description = "VALOWATCH stream controls v4";
         try
         {
             var commands = await guild
@@ -3328,7 +3328,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 string.Equals(command.Name, StreamCommandName, StringComparison.OrdinalIgnoreCase));
             if (existingCommand is not null)
             {
-                if (string.Equals(existingCommand.Description, description, StringComparison.Ordinal))
+                if (string.Equals(existingCommand.Description, StreamCommandDescription, StringComparison.Ordinal))
                 {
                     WriteLog($"Stream slash command already exists: /{StreamCommandName}.");
                     return;
@@ -3357,7 +3357,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         return new SlashCommandBuilder()
             .WithName(StreamCommandName)
-            .WithDescription("VALOWATCH stream controls v5")
+            .WithDescription(StreamCommandDescription)
             .WithContextTypes(InteractionContextType.Guild)
             .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
             .AddOption(
