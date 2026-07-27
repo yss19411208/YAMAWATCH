@@ -47,7 +47,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private static readonly TimeSpan Fmp4StartupTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Fmp4WebSocketFragmentWaitTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Fmp4WebSocketStopLogInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan DesktopDuplicationFallbackCooldown = TimeSpan.FromMinutes(20);
     private static readonly object H264EncoderSelectionSyncRoot = new();
+    private static readonly object DesktopDuplicationFallbackSyncRoot = new();
     private static readonly H264EncoderProfile Libx264EncoderProfile = new("libx264", "libx264", UsesCrf: true, []);
     private static readonly H264EncoderProfile[] HardwareH264EncoderProfiles =
     [
@@ -60,6 +62,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static bool h264EncoderSelectionWasTested;
     private static H264EncoderProfile? selectedHardwareH264EncoderProfile;
+    private static DateTimeOffset desktopDuplicationDisabledUntilUtc = DateTimeOffset.MinValue;
 
     private readonly TcpListener listener;
     private readonly CancellationTokenSource cancellationTokenSource = new();
@@ -2639,9 +2642,36 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             return false;
         }
 
+        if (IsDesktopDuplicationTemporarilyDisabled())
+        {
+            return false;
+        }
+
         return capturePlan.ScreenCount == 1 &&
             capturePlan.Bounds.Left >= 0 &&
             capturePlan.Bounds.Top >= 0;
+    }
+
+    private static bool IsDesktopDuplicationTemporarilyDisabled()
+    {
+        lock (DesktopDuplicationFallbackSyncRoot)
+        {
+            return DateTimeOffset.UtcNow < desktopDuplicationDisabledUntilUtc;
+        }
+    }
+
+    private static DateTimeOffset DisableDesktopDuplicationTemporarily()
+    {
+        DateTimeOffset disabledUntilUtc = DateTimeOffset.UtcNow + DesktopDuplicationFallbackCooldown;
+        lock (DesktopDuplicationFallbackSyncRoot)
+        {
+            if (desktopDuplicationDisabledUntilUtc < disabledUntilUtc)
+            {
+                desktopDuplicationDisabledUntilUtc = disabledUntilUtc;
+            }
+
+            return desktopDuplicationDisabledUntilUtc;
+        }
     }
 
     private static string? ResolveCameraOverlayDeviceName(
@@ -2899,9 +2929,21 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
 
         disableDesktopDuplicationCaptureForSession = true;
+        DateTimeOffset disabledUntilUtc = DisableDesktopDuplicationTemporarily();
         log(
-            "Desktop duplication capture was unavailable; falling back to gdigrab for this stream session.",
+            "Desktop duplication capture was unavailable; falling back to gdigrab for this stream session " +
+            $"and suppressing ddagrab until {disabledUntilUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}.",
             exception);
+    }
+
+    private static bool IsDesktopDuplicationFailureLine(string line)
+    {
+        return line.Contains("ddagrab", StringComparison.OrdinalIgnoreCase) &&
+            (line.Contains("AcquireNextFrame failed", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("Desktop duplication access denied", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("Operation not permitted", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("887a0026", StringComparison.OrdinalIgnoreCase) ||
+             line.Contains("887a0005", StringComparison.OrdinalIgnoreCase));
     }
 
     private void AddFfmpegCaptureInputArguments(ProcessStartInfo startInfo)
@@ -3142,6 +3184,12 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 if (loggedLineCount <= 12 || loggedLineCount % 30 == 0)
                 {
                     log($"FFmpeg stream stderr: {line.Trim()}", null);
+                }
+
+                if (IsDesktopDuplicationFailureLine(line))
+                {
+                    DisableDesktopDuplicationCaptureForSessionIfNeeded(
+                        new InvalidOperationException($"FFmpeg ddagrab failure: {TrimForLog(line, 260)}"));
                 }
             }
         }

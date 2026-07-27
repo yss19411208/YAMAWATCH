@@ -29,7 +29,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan RuntimeLogInitialDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan RuntimeLogInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ScreenStreamHealthCheckInterval = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan ScreenStreamHealthRequestTimeout = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan ScreenStreamHealthRequestTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ScreenStreamBackgroundStartTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan ScreenStreamStartValidationTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan ScreenStreamStartValidationDelay = TimeSpan.FromMilliseconds(500);
@@ -1161,11 +1161,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
             DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
             if (settings is null)
             {
                 await command
-                    .RespondAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
+                    .FollowupAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1227,11 +1230,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
             DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
             if (settings is null)
             {
                 await command
-                    .RespondAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
+                    .FollowupAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1239,13 +1245,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
             {
                 await command
-                    .RespondAsync("このサーバーではVALOWATCHの実行アプリを確認できません。", ephemeral: true)
+                    .FollowupAsync("このサーバーではVALOWATCHの実行アプリを確認できません。", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
-
-            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-            deferred = true;
 
             Embed embed = RunningApplicationSnapshot.BuildAllProcessDiscordEmbed();
             await command
@@ -1256,6 +1259,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException)
         {
             WriteLog("Running application slash command handling failed.", exception);
+            if (exception is Discord.Net.HttpException httpException &&
+                IsDiscordUnknownInteraction(httpException))
+            {
+                WriteLog("Running application slash command response skipped because the interaction had already expired.", null);
+                return;
+            }
+
             try
             {
                 if (deferred)
@@ -1345,6 +1355,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 WriteLog("Self diagnostics slash command error response failed.", responseException);
             }
         }
+    }
+
+    private static bool IsDiscordUnknownInteraction(Discord.Net.HttpException exception)
+    {
+        return exception.Message.Contains("10062", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("Unknown interaction", StringComparison.OrdinalIgnoreCase);
     }
 
     private async Task HandleScreenshotSlashCommandAsync(SocketSlashCommand command)
@@ -2243,17 +2259,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"Screen stream public URL health check failed. " +
                 $"Failures: {failureCount}/{ScreenStreamPublicUrlFailureThreshold}. " +
                 $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}.");
+            if (failureCount < ScreenStreamPublicUrlFailureThreshold)
+            {
+                return;
+            }
+
             await SendScreenStreamHealthDiagnosticNotificationAsync(
                     notifyChannelSnapshot,
                     sessionSnapshot,
                     healthStatus,
                     failureCount)
                 .ConfigureAwait(false);
-            if (failureCount < ScreenStreamPublicUrlFailureThreshold)
-            {
-                return;
-            }
-
             restartReason = $"{healthStatus.Detail} after {failureCount} consecutive checks";
         }
 
@@ -2402,9 +2418,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"NewUrl: {acceptedSession.PublicUrl}.");
             if (notifyChannel is not null)
             {
-                await notifyChannel
-                    .SendMessageAsync(embed: BuildStreamRecoveredEmbed(acceptedSession, restartReason))
-                    .ConfigureAwait(false);
+                try
+                {
+                    await notifyChannel
+                        .SendMessageAsync(embed: BuildStreamRecoveredEmbed(acceptedSession, restartReason))
+                        .ConfigureAwait(false);
+                }
+                catch (Exception responseException) when (responseException is InvalidOperationException or ObjectDisposedException or Discord.Net.HttpException)
+                {
+                    WriteLog("Screen stream restart notification skipped because the Discord channel was unavailable.", null);
+                }
             }
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or HttpRequestException or TaskCanceledException or TimeoutException or OperationCanceledException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
@@ -2478,6 +2501,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed(message))
                 .ConfigureAwait(false);
         }
+        catch (ObjectDisposedException)
+        {
+            WriteLog("Screen stream health diagnostic notification skipped because the Discord channel was already disposed.", null);
+        }
         catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
         {
             WriteLog("Screen stream health diagnostic notification failed.", responseException);
@@ -2505,6 +2532,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await notifyChannel
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信URLの自動復旧に失敗しました: {exception.Message}"))
                 .ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            WriteLog("Screen stream restart failure notification skipped because the Discord channel was already disposed.", null);
         }
         catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
         {
