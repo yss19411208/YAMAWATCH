@@ -19,9 +19,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MinimumMaxWidth = 320;
     public const int DefaultMaxWidth = 720;
     public const int MaximumMaxWidth = 3840;
-    public const double H264Fmp4TargetLatencySeconds = 2.35D;
-    public const double H264Fmp4MinimumSmoothLatencySeconds = 1.9D;
-    public const double H264Fmp4CatchUpLatencySeconds = 2.55D;
+    public const double H264Fmp4TargetLatencySeconds = 2.5D;
+    public const double H264Fmp4MinimumSmoothLatencySeconds = 2.05D;
+    public const double H264Fmp4CatchUpLatencySeconds = 2.7D;
     public const double H264Fmp4MaximumLatencySeconds = 3.0D;
     public const double H264Fmp4RestartLatencySeconds = 4.2D;
     public const int H264Fmp4LatencyCheckIntervalMilliseconds = 250;
@@ -557,6 +557,8 @@ if (window.Hls && Hls.isSupported()) {
             ScreenStreamMethod.H264Fmp4 => $$"""
 <script>
 const screenVideo = document.getElementById('screen');
+const lastFrameCanvas = document.getElementById('last-frame');
+const lastFrameCanvasContext = lastFrameCanvas ? lastFrameCanvas.getContext('2d', { alpha: false }) : null;
 const streamPath = '{{streamPathJavaScript}}';
 const liveInitPath = '{{liveInitPathJavaScript}}';
 const liveFragmentPathPrefix = '{{liveFragmentPathPrefixJavaScript}}';
@@ -573,13 +575,20 @@ const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
 const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
 const maximumAppendQueueLength = {{maximumAppendQueueLengthText}};
 const websocketReconnectDelayMilliseconds = 1200;
+const blackFrameReconnectMilliseconds = 3200;
+const frozenFrameReconnectMilliseconds = 5200;
+const liveBufferKeepBehindSeconds = Math.max(18, restartLatencySeconds + targetLatencySeconds + 8);
 let lastSeekAtMilliseconds = -seekCooldownMilliseconds;
 let lastPlayAttemptAtMilliseconds = 0;
 let lastReconnectAtMilliseconds = 0;
 let lastUnderflowReconnectAtMilliseconds = 0;
 let lastPlaybackTime = 0;
 let lastPlaybackMovedAtMilliseconds = performance.now();
+let lastDecodedFrameCount = 0;
+let lastDecodedFrameChangedAtMilliseconds = performance.now();
+let lastRenderableFrameAtMilliseconds = performance.now();
 let lastFragmentReceivedAtMilliseconds = performance.now();
+let lastCanvasFrameAtMilliseconds = 0;
 let reconnectNonce = 0;
 let frameMonitorScheduled = false;
 let hiddenStreamSuspended = false;
@@ -603,6 +612,8 @@ const streamMetrics = window.valowatchStreamMetrics = {
   reconnectCount: 0,
   mseRestartCount: 0,
   queueOverflowCount: 0,
+  blackFrameReconnectCount: 0,
+  frozenFrameReconnectCount: 0,
   stallCount: 0,
   waitingCount: 0,
   playbackStartCount: 0,
@@ -615,6 +626,94 @@ screenVideo.autoplay = false;
 screenVideo.controls = false;
 screenVideo.muted = true;
 screenVideo.defaultPlaybackRate = 1;
+function resizeLastFrameCanvas() {
+  if (!lastFrameCanvas) {
+    return false;
+  }
+
+  const pixelRatio = Math.max(1, window.devicePixelRatio || 1);
+  const targetWidth = Math.max(1, Math.floor(window.innerWidth * pixelRatio));
+  const targetHeight = Math.max(1, Math.floor(window.innerHeight * pixelRatio));
+  if (lastFrameCanvas.width !== targetWidth || lastFrameCanvas.height !== targetHeight) {
+    lastFrameCanvas.width = targetWidth;
+    lastFrameCanvas.height = targetHeight;
+  }
+
+  return true;
+}
+function drawVideoToLastFrameCanvas(forceDraw = false) {
+  if (!lastFrameCanvas || !lastFrameCanvasContext ||
+      screenVideo.videoWidth <= 0 || screenVideo.videoHeight <= 0) {
+    return false;
+  }
+
+  const nowMilliseconds = performance.now();
+  if (!forceDraw && nowMilliseconds - lastCanvasFrameAtMilliseconds < 220) {
+    return true;
+  }
+
+  if (!resizeLastFrameCanvas()) {
+    return false;
+  }
+
+  const canvasWidth = lastFrameCanvas.width;
+  const canvasHeight = lastFrameCanvas.height;
+  const sourceRatio = screenVideo.videoWidth / screenVideo.videoHeight;
+  const canvasRatio = canvasWidth / canvasHeight;
+  let drawWidth = canvasWidth;
+  let drawHeight = canvasHeight;
+  let drawX = 0;
+  let drawY = 0;
+  if (canvasRatio > sourceRatio) {
+    drawWidth = Math.round(canvasHeight * sourceRatio);
+    drawX = Math.round((canvasWidth - drawWidth) / 2);
+  } else {
+    drawHeight = Math.round(canvasWidth / sourceRatio);
+    drawY = Math.round((canvasHeight - drawHeight) / 2);
+  }
+
+  try {
+    lastFrameCanvasContext.fillStyle = '#050505';
+    lastFrameCanvasContext.fillRect(0, 0, canvasWidth, canvasHeight);
+    lastFrameCanvasContext.drawImage(screenVideo, drawX, drawY, drawWidth, drawHeight);
+    lastCanvasFrameAtMilliseconds = nowMilliseconds;
+    lastRenderableFrameAtMilliseconds = nowMilliseconds;
+    return true;
+  } catch {
+    return false;
+  }
+}
+function showLastFrameCanvas() {
+  if (lastFrameCanvas && lastCanvasFrameAtMilliseconds > 0) {
+    lastFrameCanvas.style.display = 'block';
+  }
+}
+function hideLastFrameCanvas() {
+  if (lastFrameCanvas) {
+    lastFrameCanvas.style.display = 'none';
+  }
+}
+function readDecodedFrameCount() {
+  try {
+    if (typeof screenVideo.getVideoPlaybackQuality === 'function') {
+      const playbackQuality = screenVideo.getVideoPlaybackQuality();
+      if (playbackQuality && Number.isFinite(playbackQuality.totalVideoFrames)) {
+        return playbackQuality.totalVideoFrames;
+      }
+    }
+
+    if (Number.isFinite(screenVideo.webkitDecodedFrameCount)) {
+      return screenVideo.webkitDecodedFrameCount;
+    }
+
+    if (Number.isFinite(screenVideo.mozDecodedFrames)) {
+      return screenVideo.mozDecodedFrames;
+    }
+  } catch {
+  }
+
+  return null;
+}
 function isFmp4PageHidden() {
   return document.hidden || document.visibilityState === 'hidden';
 }
@@ -630,6 +729,8 @@ function suspendFmp4ForHiddenPage(forceSuspend = false) {
   }
 
   hiddenStreamSuspended = true;
+  drawVideoToLastFrameCanvas(true);
+  showLastFrameCanvas();
   screenVideo.playbackRate = 1;
   activeStreamSession += 1;
   if (activeFetchAbortController) {
@@ -670,6 +771,15 @@ function resumeFmp4FromHiddenPage(forceResume = false) {
   keepFmp4LatencyLow();
 }
 function markFmp4PlaybackMovement(nowMilliseconds) {
+  const decodedFrameCount = readDecodedFrameCount();
+  if (decodedFrameCount !== null && decodedFrameCount > lastDecodedFrameCount) {
+    lastDecodedFrameCount = decodedFrameCount;
+    lastDecodedFrameChangedAtMilliseconds = nowMilliseconds;
+    if (drawVideoToLastFrameCanvas()) {
+      hideLastFrameCanvas();
+    }
+  }
+
   if (Math.abs(screenVideo.currentTime - lastPlaybackTime) > 0.015) {
     lastPlaybackMovedAtMilliseconds = nowMilliseconds;
     lastPlaybackTime = screenVideo.currentTime;
@@ -700,6 +810,9 @@ function updateFmp4Metrics(latencyState = readFmp4LatencySeconds()) {
   streamMetrics.queueLength = appendQueue.length;
   streamMetrics.mseReadyState = mediaSource ? mediaSource.readyState : 'none';
   streamMetrics.sourceBufferUpdating = !!(sourceBuffer && sourceBuffer.updating);
+  streamMetrics.videoWidth = screenVideo.videoWidth || 0;
+  streamMetrics.videoHeight = screenVideo.videoHeight || 0;
+  streamMetrics.lastDecodedFrameCount = lastDecodedFrameCount;
 }
 function hasFmp4SmoothStartupBuffer() {
   if (directFallbackActive) {
@@ -748,6 +861,8 @@ function reconnectFmp4Stream(forceReconnect = false) {
   lastFragmentReceivedAtMilliseconds = nowMilliseconds;
   streamMetrics.reconnectCount += 1;
   reconnectNonce += 1;
+  drawVideoToLastFrameCanvas(true);
+  showLastFrameCanvas();
   screenVideo.playbackRate = 1;
   fmp4PlaybackHasStarted = false;
   appendQueue = [];
@@ -774,6 +889,8 @@ function reconnectFmp4Stream(forceReconnect = false) {
   startMseFmp4Live();
 }
 function releaseCurrentMediaSource() {
+  drawVideoToLastFrameCanvas(true);
+  showLastFrameCanvas();
   try {
     screenVideo.pause();
   } catch {
@@ -803,6 +920,52 @@ function releaseCurrentMediaSource() {
   } catch {
   }
 }
+function checkFmp4RenderHealth(nowMilliseconds = performance.now()) {
+  if (directFallbackActive || isFmp4PageHidden()) {
+    return false;
+  }
+
+  const decodedFrameCount = readDecodedFrameCount();
+  if (decodedFrameCount !== null && decodedFrameCount > lastDecodedFrameCount) {
+    lastDecodedFrameCount = decodedFrameCount;
+    lastDecodedFrameChangedAtMilliseconds = nowMilliseconds;
+    if (drawVideoToLastFrameCanvas()) {
+      hideLastFrameCanvas();
+    }
+  }
+
+  const hasRenderableSize = screenVideo.videoWidth > 0 && screenVideo.videoHeight > 0;
+  const hasBufferedVideo = !!(screenVideo.buffered && screenVideo.buffered.length > 0);
+  const hasEnoughDataButNoFrame =
+    !hasRenderableSize &&
+    hasBufferedVideo &&
+    streamMetrics.appendedSegments >= Math.max(2, {{H264Fmp4InitialFragmentCount}});
+  if (hasEnoughDataButNoFrame &&
+      nowMilliseconds - lastRenderableFrameAtMilliseconds > blackFrameReconnectMilliseconds &&
+      nowMilliseconds - lastReconnectAtMilliseconds > blackFrameReconnectMilliseconds) {
+    streamMetrics.blackFrameReconnectCount += 1;
+    reconnectFmp4Stream(true);
+    return true;
+  }
+
+  if (!fmp4PlaybackHasStarted || !hasRenderableSize || decodedFrameCount === null) {
+    return false;
+  }
+
+  const decodedFrameIdleMilliseconds = nowMilliseconds - lastDecodedFrameChangedAtMilliseconds;
+  const playbackIdleMilliseconds = nowMilliseconds - lastPlaybackMovedAtMilliseconds;
+  const fragmentsAreStillArriving = nowMilliseconds - lastFragmentReceivedAtMilliseconds < Math.max(3000, reconnectStallMilliseconds);
+  if (decodedFrameIdleMilliseconds > frozenFrameReconnectMilliseconds &&
+      playbackIdleMilliseconds > Math.min(frozenFrameReconnectMilliseconds, reconnectStallMilliseconds) &&
+      fragmentsAreStillArriving &&
+      nowMilliseconds - lastReconnectAtMilliseconds > frozenFrameReconnectMilliseconds) {
+    streamMetrics.frozenFrameReconnectCount += 1;
+    reconnectFmp4Stream(true);
+    return true;
+  }
+
+  return false;
+}
 function keepFmp4LatencyLow() {
   if (suspendFmp4ForHiddenPage()) {
     return;
@@ -823,6 +986,11 @@ function keepFmp4LatencyLow() {
   const { bufferedEnd, latencySeconds } = latencyState;
   if (!fmp4PlaybackHasStarted) {
     keepFmp4Playing();
+    checkFmp4RenderHealth(nowMilliseconds);
+    return;
+  }
+
+  if (checkFmp4RenderHealth(nowMilliseconds)) {
     return;
   }
 
@@ -943,8 +1111,8 @@ function normalizeFmp4MessageBytes(messageData) {
 
   return Promise.resolve(null);
 }
-function queueFmp4Bytes(bytes) {
-  if (!bytes || bytes.byteLength === 0) {
+function queueFmp4Bytes(bytes, session = activeStreamSession) {
+  if (session !== activeStreamSession || !bytes || bytes.byteLength === 0) {
     return;
   }
 
@@ -956,15 +1124,19 @@ function queueFmp4Bytes(bytes) {
     return;
   }
 
-  pumpFmp4AppendQueue();
+  pumpFmp4AppendQueue(session);
 }
-function pumpFmp4AppendQueue() {
-  if (!sourceBuffer || sourceBuffer.updating || appendQueue.length === 0) {
+function pumpFmp4AppendQueue(session = activeStreamSession) {
+  if (session !== activeStreamSession || !sourceBuffer || sourceBuffer.updating || appendQueue.length === 0) {
     return;
   }
 
   const nextBytes = appendQueue.shift();
   try {
+    if (session !== activeStreamSession) {
+      return;
+    }
+
     sourceBuffer.appendBuffer(nextBytes);
     streamMetrics.appendedSegments += 1;
     streamMetrics.queueLength = appendQueue.length;
@@ -977,14 +1149,19 @@ function trimFmp4Buffer() {
     return;
   }
 
-  const keepBehindSeconds = Math.max(1800, restartLatencySeconds + targetLatencySeconds);
+  const keepBehindSeconds = liveBufferKeepBehindSeconds;
   const removeBefore = screenVideo.currentTime - keepBehindSeconds;
   if (!Number.isFinite(removeBefore) || removeBefore <= 0) {
     return;
   }
 
   try {
-    sourceBuffer.remove(0, removeBefore);
+    const bufferedStart = screenVideo.buffered.start(0);
+    if (removeBefore <= bufferedStart + 2) {
+      return;
+    }
+
+    sourceBuffer.remove(bufferedStart, removeBefore);
   } catch {
   }
 }
@@ -1063,7 +1240,7 @@ async function runFmp4FragmentLoop(session, abortSignal) {
       ? actualSequence + 1
       : requestedSequence + 1;
     lastFragmentReceivedAtMilliseconds = performance.now();
-    queueFmp4Bytes(result.bytes);
+    queueFmp4Bytes(result.bytes, session);
     keepFmp4LatencyLow();
   }
 }
@@ -1075,7 +1252,7 @@ async function startFetchFmp4Live(session) {
       return;
     }
 
-    queueFmp4Bytes(initResult.bytes);
+    queueFmp4Bytes(initResult.bytes, session);
     keepFmp4Playing(true);
     await runFmp4FragmentLoop(session, activeFetchAbortController.signal);
   } catch {
@@ -1119,7 +1296,7 @@ function startWebSocketFmp4Live(session) {
 
     receivedMessages += 1;
     lastFragmentReceivedAtMilliseconds = performance.now();
-    queueFmp4Bytes(bytes);
+    queueFmp4Bytes(bytes, session);
     keepFmp4Playing();
     keepFmp4LatencyLow();
   };
@@ -1186,8 +1363,12 @@ async function startMseFmp4Live() {
     }
 
     sourceBuffer.addEventListener('updateend', () => {
+      if (session !== activeStreamSession) {
+        return;
+      }
+
       trimFmp4Buffer();
-      pumpFmp4AppendQueue();
+      pumpFmp4AppendQueue(session);
       keepFmp4LatencyLow();
     });
     sourceBuffer.addEventListener('error', () => reconnectFmp4Stream(true));
@@ -1207,17 +1388,46 @@ function scheduleFmp4FrameMonitor() {
   screenVideo.requestVideoFrameCallback(() => {
     frameMonitorScheduled = false;
     const nowMilliseconds = performance.now();
+    const decodedFrameCount = readDecodedFrameCount();
+    if (decodedFrameCount !== null && decodedFrameCount > lastDecodedFrameCount) {
+      lastDecodedFrameCount = decodedFrameCount;
+    }
+
+    lastDecodedFrameChangedAtMilliseconds = nowMilliseconds;
     lastPlaybackMovedAtMilliseconds = nowMilliseconds;
     lastPlaybackTime = screenVideo.currentTime;
+    if (drawVideoToLastFrameCanvas()) {
+      hideLastFrameCanvas();
+    }
+
     keepFmp4LatencyLow();
     scheduleFmp4FrameMonitor();
   });
 }
-screenVideo.addEventListener('loadedmetadata', () => keepFmp4Playing(true));
-screenVideo.addEventListener('loadeddata', keepFmp4LatencyLow);
-screenVideo.addEventListener('canplay', keepFmp4Playing);
+screenVideo.addEventListener('loadedmetadata', () => {
+  drawVideoToLastFrameCanvas(true);
+  keepFmp4Playing(true);
+});
+screenVideo.addEventListener('loadeddata', () => {
+  if (drawVideoToLastFrameCanvas(true)) {
+    hideLastFrameCanvas();
+  }
+
+  keepFmp4LatencyLow();
+});
+screenVideo.addEventListener('canplay', () => {
+  if (drawVideoToLastFrameCanvas(true)) {
+    hideLastFrameCanvas();
+  }
+
+  keepFmp4Playing();
+});
 screenVideo.addEventListener('playing', () => {
   lastPlaybackMovedAtMilliseconds = performance.now();
+  if (drawVideoToLastFrameCanvas(true)) {
+    hideLastFrameCanvas();
+  }
+
   scheduleFmp4FrameMonitor();
   keepFmp4LatencyLow();
 });
@@ -1242,6 +1452,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pageshow', () => resumeFmp4FromHiddenPage());
 window.addEventListener('focus', () => resumeFmp4FromHiddenPage());
+window.addEventListener('resize', () => drawVideoToLastFrameCanvas(true));
 window.addEventListener('pagehide', () => suspendFmp4ForHiddenPage());
 window.valowatchStreamTestSuspend = () => suspendFmp4ForHiddenPage(true);
 window.valowatchStreamTestResume = () => resumeFmp4FromHiddenPage(true);
@@ -1280,12 +1491,15 @@ screenImage.onerror = () => {
 <title>VALOWATCH Stream</title>
 <style>
 html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-family:system-ui,sans-serif;overflow:hidden}
-#screen{width:100vw;height:100vh;object-fit:contain;background:#050505;display:block}
-#status{position:fixed;left:12px;bottom:10px;padding:6px 8px;background:rgba(0,0,0,.55);border-radius:6px;font-size:12px}
+#screen,#last-frame{position:fixed;inset:0;width:100vw;height:100vh;background:#050505;display:block}
+#screen{object-fit:contain;z-index:1}
+#last-frame{display:none;z-index:2;pointer-events:none}
+#status{position:fixed;left:12px;bottom:10px;padding:6px 8px;background:rgba(0,0,0,.55);border-radius:6px;font-size:12px;z-index:3}
 </style>
 </head>
 <body>
 {{mediaElement}}
+<canvas id="last-frame" aria-hidden="true"></canvas>
 <div id="status">VALOWATCH stream: {{targetName}} / {{fpsText}}fps / width {{widthText}} / {{engineText}}</div>
 {{mediaScript}}
 </body>

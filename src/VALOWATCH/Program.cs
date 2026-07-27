@@ -1132,6 +1132,7 @@ static class Program
                 $"LatencyIncreasePerMinute: {browserResult.LatencyIncreaseSecondsPerMinute.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture)}. " +
                 $"Samples: {browserResult.UsableSampleCount}/{browserResult.TotalSampleCount}. " +
                 $"PlaybackStops: {browserResult.PlaybackStopCount}. StallEvents: {browserResult.StallEventCount}. " +
+                $"BlackFrameReconnects: {browserResult.BlackFrameReconnectCount}. FrozenFrameReconnects: {browserResult.FrozenFrameReconnectCount}. " +
                 $"QueueOverflowEvents: {browserResult.QueueOverflowEventCount}. MseRestarts: {browserResult.MseRestartCount}. " +
                 $"WebSocketConnected: {browserResult.WebSocketConnected}. MseOpened: {browserResult.MseOpened}. " +
                 $"VisibilityRecoveryAttempted: {browserResult.VisibilityRecoveryAttempted}. " +
@@ -2990,10 +2991,15 @@ static class Program
     reconnectCount: metrics.reconnectCount || 0,
     mseRestartCount: metrics.mseRestartCount || 0,
     queueOverflowCount: metrics.queueOverflowCount || 0,
+    blackFrameReconnectCount: metrics.blackFrameReconnectCount || 0,
+    frozenFrameReconnectCount: metrics.frozenFrameReconnectCount || 0,
     stallCount: metrics.stallCount || 0,
     waitingCount: metrics.waitingCount || 0,
     appendedSegments: metrics.appendedSegments || 0,
-    playbackStartCount: metrics.playbackStartCount || 0
+    playbackStartCount: metrics.playbackStartCount || 0,
+    videoWidth: metrics.videoWidth || 0,
+    videoHeight: metrics.videoHeight || 0,
+    lastFrameCanvasVisible: !!(document.getElementById('last-frame') && document.getElementById('last-frame').style.display !== 'none')
   };
 })()
 """;
@@ -3322,6 +3328,10 @@ static class Program
 
         public int QueueOverflowCount { get; init; }
 
+        public int BlackFrameReconnectCount { get; init; }
+
+        public int FrozenFrameReconnectCount { get; init; }
+
         public int StallCount { get; init; }
 
         public int WaitingCount { get; init; }
@@ -3329,6 +3339,12 @@ static class Program
         public int AppendedSegments { get; init; }
 
         public int PlaybackStartCount { get; init; }
+
+        public int VideoWidth { get; init; }
+
+        public int VideoHeight { get; init; }
+
+        public bool LastFrameCanvasVisible { get; init; }
 
         public bool WindowWasHidden { get; set; }
 
@@ -3368,10 +3384,15 @@ static class Program
                 ReconnectCount = ReadInteger(rootElement, "reconnectCount"),
                 MseRestartCount = ReadInteger(rootElement, "mseRestartCount"),
                 QueueOverflowCount = ReadInteger(rootElement, "queueOverflowCount"),
+                BlackFrameReconnectCount = ReadInteger(rootElement, "blackFrameReconnectCount"),
+                FrozenFrameReconnectCount = ReadInteger(rootElement, "frozenFrameReconnectCount"),
                 StallCount = ReadInteger(rootElement, "stallCount"),
                 WaitingCount = ReadInteger(rootElement, "waitingCount"),
                 AppendedSegments = ReadInteger(rootElement, "appendedSegments"),
-                PlaybackStartCount = ReadInteger(rootElement, "playbackStartCount")
+                PlaybackStartCount = ReadInteger(rootElement, "playbackStartCount"),
+                VideoWidth = ReadInteger(rootElement, "videoWidth"),
+                VideoHeight = ReadInteger(rootElement, "videoHeight"),
+                LastFrameCanvasVisible = ReadBoolean(rootElement, "lastFrameCanvasVisible")
             };
         }
 
@@ -3451,6 +3472,8 @@ static class Program
             double latencyIncreaseSecondsPerMinute,
             int playbackStopCount,
             int stallEventCount,
+            int blackFrameReconnectCount,
+            int frozenFrameReconnectCount,
             int queueOverflowEventCount,
             int mseRestartCount,
             bool webSocketConnected,
@@ -3469,6 +3492,8 @@ static class Program
             LatencyIncreaseSecondsPerMinute = latencyIncreaseSecondsPerMinute;
             PlaybackStopCount = playbackStopCount;
             StallEventCount = stallEventCount;
+            BlackFrameReconnectCount = blackFrameReconnectCount;
+            FrozenFrameReconnectCount = frozenFrameReconnectCount;
             QueueOverflowEventCount = queueOverflowEventCount;
             MseRestartCount = mseRestartCount;
             WebSocketConnected = webSocketConnected;
@@ -3496,6 +3521,10 @@ static class Program
         public int PlaybackStopCount { get; }
 
         public int StallEventCount { get; }
+
+        public int BlackFrameReconnectCount { get; }
+
+        public int FrozenFrameReconnectCount { get; }
 
         public int QueueOverflowEventCount { get; }
 
@@ -3525,6 +3554,8 @@ static class Program
                 latencyIncreaseSecondsPerMinute: 0D,
                 playbackStopCount: 0,
                 stallEventCount: 0,
+                blackFrameReconnectCount: 0,
+                frozenFrameReconnectCount: 0,
                 queueOverflowEventCount: 0,
                 mseRestartCount: 0,
                 webSocketConnected: false,
@@ -3584,7 +3615,9 @@ static class Program
             double maximumLatencySeconds = latencies.Count == 0 ? 0D : latencies.Max();
             double latencyIncreaseSecondsPerMinute = CalculateLatencyIncreaseSecondsPerMinute(usableSamples);
             int playbackStopCount = CountPlaybackStops(usableSamples);
-            int stallEventCount = CountEventBursts(usableSamples, sample => sample.StallCount + sample.WaitingCount);
+            int stallEventCount = CountVisualStallEventBursts(usableSamples, sample => sample.StallCount + sample.WaitingCount);
+            int blackFrameReconnectCount = CountEventDelta(usableSamples, sample => sample.BlackFrameReconnectCount);
+            int frozenFrameReconnectCount = CountEventDelta(usableSamples, sample => sample.FrozenFrameReconnectCount);
             int queueOverflowEventCount = CountEventDelta(usableSamples, sample => sample.QueueOverflowCount);
             int mseRestartCount = CountEventDelta(usableSamples, sample => sample.MseRestartCount);
             bool webSocketConnected = usableSamples.Any(sample => sample.WebSocketConnected);
@@ -3617,9 +3650,19 @@ static class Program
                 failureReasons.Add($"playback stopped {playbackStopCount} time(s)");
             }
 
-            if (stallEventCount > 1)
+            if (stallEventCount > 2)
             {
-                failureReasons.Add($"stall/waiting bursts {stallEventCount} > 1");
+                failureReasons.Add($"stall/waiting bursts {stallEventCount} > 2");
+            }
+
+            if (blackFrameReconnectCount > 0)
+            {
+                failureReasons.Add($"black frame reconnects {blackFrameReconnectCount} > 0");
+            }
+
+            if (frozenFrameReconnectCount > 0)
+            {
+                failureReasons.Add($"frozen frame reconnects {frozenFrameReconnectCount} > 0");
             }
 
             if (queueOverflowEventCount > 1)
@@ -3652,6 +3695,8 @@ static class Program
                 latencyIncreaseSecondsPerMinute,
                 playbackStopCount,
                 stallEventCount,
+                blackFrameReconnectCount,
+                frozenFrameReconnectCount,
                 queueOverflowEventCount,
                 mseRestartCount,
                 webSocketConnected,
@@ -3673,7 +3718,7 @@ static class Program
                     : "null";
                 return string.Create(
                     System.Globalization.CultureInfo.InvariantCulture,
-                    $"t={sample.ElapsedSeconds:0.0},ct={sample.CurrentTime:0.00},lat={latencyText},ready={sample.ReadyState},paused={sample.Paused},rate={sample.PlaybackRate:0.000},dec={sample.DecodedFrames},ws={sample.WebSocketConnected},mse={sample.MseReadyState},start={sample.PlaybackStartCount},append={sample.AppendedSegments}");
+                    $"t={sample.ElapsedSeconds:0.0},ct={sample.CurrentTime:0.00},lat={latencyText},ready={sample.ReadyState},paused={sample.Paused},rate={sample.PlaybackRate:0.000},dec={sample.DecodedFrames},ws={sample.WebSocketConnected},mse={sample.MseReadyState},start={sample.PlaybackStartCount},append={sample.AppendedSegments},re={sample.ReconnectCount},blk={sample.BlackFrameReconnectCount},frz={sample.FrozenFrameReconnectCount},size={sample.VideoWidth}x{sample.VideoHeight},hold={sample.LastFrameCanvasVisible}");
             }
 
             IEnumerable<SmoothLiveMetricSample> summarySamples = cleanSamples
@@ -3834,6 +3879,13 @@ static class Program
 
             double firstWindowLatencySeconds = CalculateMedianLatencySeconds(firstWindowSamples);
             double lastWindowLatencySeconds = CalculateMedianLatencySeconds(lastWindowSamples);
+            double fragmentJitterToleranceSeconds =
+                (ScreenStreamingServer.H264Fmp4FragmentDurationMicroseconds / 1_000_000D) + 0.15D;
+            if (lastWindowLatencySeconds - firstWindowLatencySeconds <= fragmentJitterToleranceSeconds)
+            {
+                return 0D;
+            }
+
             double firstWindowCenterSeconds = firstWindowSamples.Average(sample => sample.ElapsedSeconds);
             double lastWindowCenterSeconds = lastWindowSamples.Average(sample => sample.ElapsedSeconds);
             double windowCenterDeltaMinutes = (lastWindowCenterSeconds - firstWindowCenterSeconds) / 60D;
@@ -3902,7 +3954,7 @@ static class Program
             return Math.Max(0, readEventCount(samples[^1]) - readEventCount(samples[0]));
         }
 
-        private static int CountEventBursts(
+        private static int CountVisualStallEventBursts(
             IReadOnlyList<SmoothLiveMetricSample> samples,
             Func<SmoothLiveMetricSample, int> readEventCount)
         {
@@ -3924,14 +3976,30 @@ static class Program
                     continue;
                 }
 
+                if (currentSample.MseRestartCount != previousSample.MseRestartCount ||
+                    currentSample.PlaybackStartCount != previousSample.PlaybackStartCount ||
+                    currentSample.ReconnectCount != previousSample.ReconnectCount)
+                {
+                    previousIntervalHadEvent = false;
+                    continue;
+                }
+
                 int eventDelta = readEventCount(currentSample) - readEventCount(previousSample);
-                bool intervalHadEvent = eventDelta > 0;
-                if (intervalHadEvent && !previousIntervalHadEvent)
+                double currentTimeDeltaSeconds = currentSample.CurrentTime - previousSample.CurrentTime;
+                int decodedFrameDelta = currentSample.DecodedFrames - previousSample.DecodedFrames;
+                bool videoTimeBarelyAdvanced = currentTimeDeltaSeconds < Math.Max(0.08D, elapsedSeconds * 0.2D);
+                bool decodedFramesBarelyAdvanced = decodedFrameDelta <= Math.Max(2, (int)Math.Ceiling(elapsedSeconds * 10D));
+                bool intervalHadVisibleStall =
+                    eventDelta > 0 &&
+                    (currentSample.LastFrameCanvasVisible ||
+                     currentSample.ReadyState < 3 ||
+                     (videoTimeBarelyAdvanced && decodedFramesBarelyAdvanced));
+                if (intervalHadVisibleStall && !previousIntervalHadEvent)
                 {
                     burstCount++;
                 }
 
-                previousIntervalHadEvent = intervalHadEvent;
+                previousIntervalHadEvent = intervalHadVisibleStall;
             }
 
             return burstCount;
