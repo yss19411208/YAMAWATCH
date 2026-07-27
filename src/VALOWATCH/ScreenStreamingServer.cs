@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace VALOWATCH;
 
@@ -38,6 +39,10 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int MjpegFfmpegThresholdFramesPerSecond = 60;
     private const int FrameCaptureRetryCount = 3;
     private const long MaximumFmp4BoxBytes = 64L * 1024L * 1024L;
+    private const int CameraOverlayMarginPixels = 24;
+    private const int MinimumCameraOverlayWidth = 120;
+    private const int MaximumCameraOverlayWidth = 420;
+    private const int CameraOverlayBorderPixels = 6;
     private static readonly TimeSpan FrameCaptureRetryDelay = TimeSpan.FromMilliseconds(8);
     private static readonly TimeSpan Fmp4StartupTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Fmp4WebSocketFragmentWaitTimeout = TimeSpan.FromSeconds(8);
@@ -50,6 +55,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         new("h264_qsv", "h264_qsv", UsesCrf: false, ["-preset", "veryfast"]),
         new("h264_nvenc", "h264_nvenc", UsesCrf: false, ["-preset", "p1"])
     ];
+    private static readonly Regex FfmpegQuotedDeviceRegex = new(
+        "\"(?<name>.+?)\"",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static bool h264EncoderSelectionWasTested;
     private static H264EncoderProfile? selectedHardwareH264EncoderProfile;
 
@@ -64,6 +72,8 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private readonly ScreenCapturePlan capturePlan;
     private readonly string? ffmpegPath;
     private readonly H264EncoderProfile h264EncoderProfile;
+    private readonly string? cameraOverlayDeviceName;
+    private readonly string cameraOverlayStatusText;
     private readonly string streamWorkDirectory;
     private readonly string? hlsDirectory;
     private Process? hlsProcess;
@@ -92,6 +102,12 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         this.ffmpegPath = string.IsNullOrWhiteSpace(ffmpegPath) ? null : ffmpegPath;
         this.streamWorkDirectory = streamWorkDirectory;
         this.log = log;
+        cameraOverlayDeviceName = ResolveCameraOverlayDeviceName(
+            this.ffmpegPath,
+            options.CameraOverlayEnabled,
+            options.CameraDeviceName,
+            log,
+            out cameraOverlayStatusText);
         h264EncoderProfile = options.Method is ScreenStreamMethod.H264Fmp4 or ScreenStreamMethod.H264Hls
             ? SelectH264EncoderProfile(this.ffmpegPath, log)
             : Libx264EncoderProfile;
@@ -116,6 +132,12 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public int MaxWidth => Options.MaxWidth;
 
     public ScreenStreamMethod Method => Options.Method;
+
+    public bool CameraOverlayRequested => Options.CameraOverlayEnabled;
+
+    public bool CameraOverlayActive => !string.IsNullOrWhiteSpace(cameraOverlayDeviceName);
+
+    public string CameraOverlayStatusText => cameraOverlayStatusText;
 
     public string EngineName => Options.Method switch
     {
@@ -208,6 +230,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
             $"FPS: {options.FramesPerSecond}. Quality: {options.JpegQuality}. MaxWidth: {options.MaxWidth}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
             $"Engine: {server.EngineName}. " +
+            $"CameraOverlay: {server.CameraOverlayStatusText}. " +
             $"LocalOrigin: {server.LocalOrigin}.",
             null);
         return server;
@@ -2289,22 +2312,19 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("-loglevel");
         startInfo.ArgumentList.Add("warning");
         startInfo.ArgumentList.Add("-nostdin");
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add("gdigrab");
-        startInfo.ArgumentList.Add("-draw_mouse");
-        startInfo.ArgumentList.Add("1");
-        startInfo.ArgumentList.Add("-framerate");
-        startInfo.ArgumentList.Add(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        startInfo.ArgumentList.Add("-offset_x");
-        startInfo.ArgumentList.Add(capturePlan.Bounds.Left.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        startInfo.ArgumentList.Add("-offset_y");
-        startInfo.ArgumentList.Add(capturePlan.Bounds.Top.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        startInfo.ArgumentList.Add("-video_size");
-        startInfo.ArgumentList.Add($"{capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}");
-        startInfo.ArgumentList.Add("-i");
-        startInfo.ArgumentList.Add("desktop");
+        AddFfmpegCaptureInputArguments(startInfo);
+        AddFfmpegCameraOverlayInputArguments(startInfo);
 
-        if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
+        if (CameraOverlayActive)
+        {
+            startInfo.ArgumentList.Add("-filter_complex");
+            startInfo.ArgumentList.Add(BuildCameraOverlayFilterComplex(
+                BuildScreenOutputFilterChain(useDesktopDuplicationCapture: false, includeFrameTiming: false),
+                finalVideoFormat: null));
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("[vout]");
+        }
+        else if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
             capturePlan.OutputSize.Height != capturePlan.Bounds.Height)
         {
             startInfo.ArgumentList.Add("-vf");
@@ -2334,7 +2354,8 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             "FFmpeg screen stream process started. " +
             $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
-            $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}.",
+            $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
+            $"CameraOverlay: {CameraOverlayStatusText}.",
             null);
         return process;
     }
@@ -2344,6 +2365,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: true);
         bool useDesktopDuplicationCapture = ShouldUseDesktopDuplicationCapture();
         AddFfmpegH264CaptureInputArguments(startInfo, useDesktopDuplicationCapture);
+        AddFfmpegCameraOverlayInputArguments(startInfo);
         AddFfmpegH264OutputArguments(startInfo, useDesktopDuplicationCapture);
         startInfo.ArgumentList.Add("-movflags");
         startInfo.ArgumentList.Add("+frag_keyframe+empty_moov+default_base_moof+dash");
@@ -2368,6 +2390,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"CaptureEngine: {(useDesktopDuplicationCapture ? "ddagrab" : "gdigrab")}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
+            $"CameraOverlay: {CameraOverlayStatusText}. " +
             $"Encoder: {h264EncoderProfile.DisplayName}. " +
             $"{BuildH264QualityLogText()}. " +
             $"Profile: high. Level: {GetH264LevelText()}. MimeCodec: {GetH264MimeCodec()}. " +
@@ -2427,6 +2450,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: false);
         bool useDesktopDuplicationCapture = ShouldUseDesktopDuplicationCapture();
         AddFfmpegH264CaptureInputArguments(startInfo, useDesktopDuplicationCapture);
+        AddFfmpegCameraOverlayInputArguments(startInfo);
         AddFfmpegH264OutputArguments(startInfo, useDesktopDuplicationCapture);
         startInfo.ArgumentList.Add("-flags");
         startInfo.ArgumentList.Add("+cgop");
@@ -2449,6 +2473,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             $"CaptureEngine: {(useDesktopDuplicationCapture ? "ddagrab" : "gdigrab")}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
+            $"CameraOverlay: {CameraOverlayStatusText}. " +
             $"Encoder: {h264EncoderProfile.DisplayName}. {BuildH264QualityLogText()}. Playlist: {playlistPath}.",
             null);
         return process;
@@ -2578,7 +2603,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
             return process.ExitCode == 0;
         }
-        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or TimeoutException or System.ComponentModel.Win32Exception)
         {
             log($"H.264 hardware encoder test failed. Encoder: {encoderProfile.DisplayName}.", exception);
             return false;
@@ -2619,6 +2644,253 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             capturePlan.Bounds.Top >= 0;
     }
 
+    private static string? ResolveCameraOverlayDeviceName(
+        string? ffmpegPath,
+        bool cameraOverlayEnabled,
+        string cameraDeviceName,
+        Action<string, Exception?> log,
+        out string statusText)
+    {
+        if (!cameraOverlayEnabled)
+        {
+            statusText = "off";
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(ffmpegPath))
+        {
+            statusText = "requested but ffmpeg unavailable";
+            return null;
+        }
+
+        string requestedDeviceName = cameraDeviceName.Trim();
+        try
+        {
+            IReadOnlyList<string> cameraDeviceNames = ListDirectShowVideoDeviceNames(ffmpegPath, log);
+            if (cameraDeviceNames.Count == 0)
+            {
+                statusText = "requested but no DirectShow video device was found";
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(requestedDeviceName))
+            {
+                string? exactDeviceName = cameraDeviceNames.FirstOrDefault(deviceName =>
+                    string.Equals(deviceName, requestedDeviceName, StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(exactDeviceName))
+                {
+                    return ResolveUsableCameraDevice(ffmpegPath, exactDeviceName, $"active ({exactDeviceName})", log, out statusText);
+                }
+
+                string? partialDeviceName = cameraDeviceNames.FirstOrDefault(deviceName =>
+                    deviceName.Contains(requestedDeviceName, StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrWhiteSpace(partialDeviceName))
+                {
+                    return ResolveUsableCameraDevice(
+                        ffmpegPath,
+                        partialDeviceName,
+                        $"active ({partialDeviceName}; matched {requestedDeviceName})",
+                        log,
+                        out statusText);
+                }
+
+                string fallbackDeviceName = cameraDeviceNames[0];
+                return ResolveUsableCameraDevice(
+                    ffmpegPath,
+                    fallbackDeviceName,
+                    $"active ({fallbackDeviceName}; configured camera was not found: {requestedDeviceName})",
+                    log,
+                    out statusText);
+            }
+
+            return ResolveUsableCameraDevice(
+                ffmpegPath,
+                cameraDeviceNames[0],
+                $"active ({cameraDeviceNames[0]})",
+                log,
+                out statusText);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or TimeoutException or System.ComponentModel.Win32Exception)
+        {
+            log("Camera overlay device detection failed; stream will start without webcam overlay.", exception);
+            statusText = $"requested but camera detection failed: {exception.Message}";
+            return null;
+        }
+    }
+
+    private static string? ResolveUsableCameraDevice(
+        string ffmpegPath,
+        string deviceName,
+        string activeStatusText,
+        Action<string, Exception?> log,
+        out string statusText)
+    {
+        if (CanReadDirectShowCameraFrame(ffmpegPath, deviceName, log))
+        {
+            statusText = activeStatusText;
+            return deviceName;
+        }
+
+        statusText = $"requested but camera did not produce a test frame ({deviceName})";
+        return null;
+    }
+
+    private static IReadOnlyList<string> ListDirectShowVideoDeviceNames(
+        string ffmpegPath,
+        Action<string, Exception?> log)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+
+        process.StartInfo.ArgumentList.Add("-hide_banner");
+        process.StartInfo.ArgumentList.Add("-list_devices");
+        process.StartInfo.ArgumentList.Add("true");
+        process.StartInfo.ArgumentList.Add("-f");
+        process.StartInfo.ArgumentList.Add("dshow");
+        process.StartInfo.ArgumentList.Add("-i");
+        process.StartInfo.ArgumentList.Add("dummy");
+
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("FFmpeg DirectShow device listing could not be started.");
+        }
+
+        Task<string> standardErrorTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(5000))
+        {
+            TryKillProcess(process);
+            throw new TimeoutException("FFmpeg DirectShow device listing timed out.");
+        }
+
+        string standardErrorText = standardErrorTask.GetAwaiter().GetResult();
+        List<string> deviceNames = [];
+        bool insideVideoSection = false;
+        foreach (string rawLine in standardErrorText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            string line = rawLine.Trim();
+            if (line.Contains("DirectShow video devices", StringComparison.OrdinalIgnoreCase))
+            {
+                insideVideoSection = true;
+                continue;
+            }
+
+            if (insideVideoSection && line.Contains("DirectShow audio devices", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            bool lineLooksLikeStandaloneVideoDevice = line.Contains("(video)", StringComparison.OrdinalIgnoreCase);
+            if ((!insideVideoSection && !lineLooksLikeStandaloneVideoDevice) ||
+                line.Contains("Alternative name", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            Match match = FfmpegQuotedDeviceRegex.Match(line);
+            if (match.Success)
+            {
+                string deviceName = match.Groups["name"].Value.Trim();
+                if (!string.IsNullOrWhiteSpace(deviceName) &&
+                    !deviceNames.Contains(deviceName, StringComparer.OrdinalIgnoreCase))
+                {
+                    deviceNames.Add(deviceName);
+                }
+            }
+        }
+
+        log(
+            $"DirectShow camera devices detected for stream overlay. Count: {deviceNames.Count}. " +
+            $"Names: {string.Join(", ", deviceNames.Select(deviceName => deviceName.Length > 64 ? deviceName[..64] : deviceName))}.",
+            null);
+        return deviceNames;
+    }
+
+    private static bool CanReadDirectShowCameraFrame(
+        string ffmpegPath,
+        string deviceName,
+        Action<string, Exception?> log)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+
+        process.StartInfo.ArgumentList.Add("-hide_banner");
+        process.StartInfo.ArgumentList.Add("-loglevel");
+        process.StartInfo.ArgumentList.Add("warning");
+        process.StartInfo.ArgumentList.Add("-f");
+        process.StartInfo.ArgumentList.Add("dshow");
+        process.StartInfo.ArgumentList.Add("-i");
+        process.StartInfo.ArgumentList.Add($"video={deviceName}");
+        process.StartInfo.ArgumentList.Add("-frames:v");
+        process.StartInfo.ArgumentList.Add("1");
+        process.StartInfo.ArgumentList.Add("-an");
+        process.StartInfo.ArgumentList.Add("-f");
+        process.StartInfo.ArgumentList.Add("null");
+        process.StartInfo.ArgumentList.Add("-");
+
+        try
+        {
+            if (!process.Start())
+            {
+                return false;
+            }
+
+            Task<string> standardErrorTask = process.StandardError.ReadToEndAsync();
+            bool exited = process.WaitForExit(4000);
+            if (!exited)
+            {
+                TryKillProcess(process);
+                log($"Camera overlay preflight timed out. Device: {deviceName}.", null);
+                return false;
+            }
+
+            string standardErrorText = standardErrorTask.GetAwaiter().GetResult();
+            bool frameWasRead = process.ExitCode == 0;
+            log(
+                $"Camera overlay preflight {(frameWasRead ? "passed" : "failed")}. " +
+                $"Device: {deviceName}. ExitCode: {process.ExitCode}. " +
+                $"Detail: {TrimForLog(standardErrorText, 260)}",
+                null);
+            return frameWasRead;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            log($"Camera overlay preflight failed. Device: {deviceName}.", exception);
+            return false;
+        }
+    }
+
+    private static string TrimForLog(string text, int maximumLength)
+    {
+        string normalizedText = text
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        if (normalizedText.Length <= maximumLength)
+        {
+            return normalizedText;
+        }
+
+        return normalizedText[..maximumLength] + "...";
+    }
+
     private void DisableDesktopDuplicationCaptureForSessionIfNeeded(Exception exception)
     {
         if (!ShouldUseDesktopDuplicationCapture())
@@ -2650,6 +2922,23 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("desktop");
     }
 
+    private void AddFfmpegCameraOverlayInputArguments(ProcessStartInfo startInfo)
+    {
+        if (!CameraOverlayActive)
+        {
+            return;
+        }
+
+        startInfo.ArgumentList.Add("-thread_queue_size");
+        startInfo.ArgumentList.Add("256");
+        startInfo.ArgumentList.Add("-rtbufsize");
+        startInfo.ArgumentList.Add("128M");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("dshow");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add($"video={cameraOverlayDeviceName}");
+    }
+
     private void AddFfmpegH264CaptureInputArguments(ProcessStartInfo startInfo, bool useDesktopDuplicationCapture)
     {
         if (!useDesktopDuplicationCapture)
@@ -2669,24 +2958,24 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
     private void AddFfmpegH264OutputArguments(ProcessStartInfo startInfo, bool useDesktopDuplicationCapture)
     {
-        List<string> videoFilters = [];
-        if (useDesktopDuplicationCapture)
+        List<string> videoFilters = BuildScreenOutputFilterChain(
+            useDesktopDuplicationCapture,
+            includeFrameTiming: true);
+
+        if (CameraOverlayActive)
         {
-            videoFilters.Add("hwdownload");
-            videoFilters.Add("format=bgra");
+            startInfo.ArgumentList.Add("-filter_complex");
+            startInfo.ArgumentList.Add(BuildCameraOverlayFilterComplex(videoFilters, finalVideoFormat: "yuv420p"));
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("[vout]");
+        }
+        else
+        {
+            videoFilters.Add("format=yuv420p");
+            startInfo.ArgumentList.Add("-vf");
+            startInfo.ArgumentList.Add(string.Join(",", videoFilters));
         }
 
-        videoFilters.Add($"fps=fps={FramesPerSecond}:round=near");
-        videoFilters.Add($"setpts=N/({FramesPerSecond}*TB)");
-        if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
-            capturePlan.OutputSize.Height != capturePlan.Bounds.Height)
-        {
-            videoFilters.Add($"scale={capturePlan.OutputSize.Width}:{capturePlan.OutputSize.Height}:flags=fast_bilinear");
-        }
-
-        videoFilters.Add("format=yuv420p");
-        startInfo.ArgumentList.Add("-vf");
-        startInfo.ArgumentList.Add(string.Join(",", videoFilters));
         startInfo.ArgumentList.Add("-an");
         AddH264EncoderArguments(
             startInfo,
@@ -2695,6 +2984,64 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             FramesPerSecond,
             GetH264GroupOfPicturesSize(),
             GetH264LevelText());
+    }
+
+    private List<string> BuildScreenOutputFilterChain(
+        bool useDesktopDuplicationCapture,
+        bool includeFrameTiming)
+    {
+        List<string> videoFilters = [];
+        if (useDesktopDuplicationCapture)
+        {
+            videoFilters.Add("hwdownload");
+            videoFilters.Add("format=bgra");
+        }
+
+        if (includeFrameTiming)
+        {
+            videoFilters.Add($"fps=fps={FramesPerSecond}:round=near");
+            videoFilters.Add($"setpts=N/({FramesPerSecond}*TB)");
+        }
+
+        if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
+            capturePlan.OutputSize.Height != capturePlan.Bounds.Height)
+        {
+            videoFilters.Add($"scale={capturePlan.OutputSize.Width}:{capturePlan.OutputSize.Height}:flags=fast_bilinear");
+        }
+
+        videoFilters.Add("setsar=1");
+        return videoFilters;
+    }
+
+    private string BuildCameraOverlayFilterComplex(
+        IReadOnlyList<string> screenFilters,
+        string? finalVideoFormat)
+    {
+        int overlayWidth = CalculateCameraOverlayWidth();
+        int cameraFramesPerSecond = Math.Clamp(FramesPerSecond, 15, 30);
+        string screenFilterText = screenFilters.Count > 0
+            ? string.Join(",", screenFilters)
+            : "null";
+        string finalFormatFilter = string.IsNullOrWhiteSpace(finalVideoFormat)
+            ? string.Empty
+            : $",format={finalVideoFormat}";
+
+        return
+            $"[0:v]{screenFilterText},format=rgba[base];" +
+            $"[1:v]fps=fps={cameraFramesPerSecond}:round=near,setpts=N/({cameraFramesPerSecond}*TB)," +
+            $"scale={overlayWidth}:-2:flags=fast_bilinear,setsar=1,format=rgba," +
+            $"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.70:t={CameraOverlayBorderPixels}[camera];" +
+            $"[base][camera]overlay=x={CameraOverlayMarginPixels}:y={CameraOverlayMarginPixels}:format=auto{finalFormatFilter}[vout]";
+    }
+
+    private int CalculateCameraOverlayWidth()
+    {
+        int largestUsableWidth = Math.Max(2, capturePlan.OutputSize.Width - (CameraOverlayMarginPixels * 2));
+        int maximumWidth = Math.Min(MaximumCameraOverlayWidth, Math.Max(2, largestUsableWidth / 2));
+        int minimumWidth = Math.Min(MinimumCameraOverlayWidth, Math.Max(2, maximumWidth));
+        int preferredWidth = capturePlan.OutputSize.Width / 4;
+        int clampedWidth = Math.Clamp(preferredWidth, minimumWidth, maximumWidth);
+        return clampedWidth % 2 == 0 ? clampedWidth : clampedWidth - 1;
     }
 
     private static void AddH264EncoderArguments(
@@ -3858,9 +4205,12 @@ internal readonly record struct ScreenStreamOptions(
     int FramesPerSecond,
     long JpegQuality,
     int MaxWidth,
-    ScreenStreamMethod Method)
+    ScreenStreamMethod Method,
+    bool CameraOverlayEnabled,
+    string CameraDeviceName)
 {
     public bool RequiresFfmpeg =>
+        CameraOverlayEnabled ||
         Method is ScreenStreamMethod.H264Fmp4 or ScreenStreamMethod.H264Hls ||
         Method == ScreenStreamMethod.Mjpeg && FramesPerSecond >= ScreenStreamingServer.MjpegFfmpegThresholdFramesPerSecond;
 
@@ -3869,14 +4219,18 @@ internal readonly record struct ScreenStreamOptions(
         int framesPerSecond = ScreenStreamingServer.DefaultFramesPerSecond,
         long jpegQuality = ScreenStreamingServer.DefaultJpegQuality,
         int maxWidth = ScreenStreamingServer.DefaultMaxWidth,
-        ScreenStreamMethod method = ScreenStreamMethod.H264Fmp4)
+        ScreenStreamMethod method = ScreenStreamMethod.H264Fmp4,
+        bool cameraOverlayEnabled = false,
+        string? cameraDeviceName = null)
     {
         return new ScreenStreamOptions(
             target,
             NormalizeFramesPerSecond(framesPerSecond),
             NormalizeJpegQuality(jpegQuality),
             NormalizeMaxWidth(maxWidth),
-            method);
+            method,
+            cameraOverlayEnabled,
+            NormalizeCameraDeviceName(cameraDeviceName));
     }
 
     public static int NormalizeFramesPerSecond(int framesPerSecond)
@@ -3901,6 +4255,13 @@ internal readonly record struct ScreenStreamOptions(
             maxWidth,
             ScreenStreamingServer.MinimumMaxWidth,
             ScreenStreamingServer.MaximumMaxWidth);
+    }
+
+    public static string NormalizeCameraDeviceName(string? cameraDeviceName)
+    {
+        return string.IsNullOrWhiteSpace(cameraDeviceName)
+            ? string.Empty
+            : cameraDeviceName.Trim();
     }
 }
 

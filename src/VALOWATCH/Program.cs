@@ -642,7 +642,7 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] Stream slash command check: " +
                 $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status. Targets: full,valorant. " +
                 $"Methods: {ScreenStreamMethodNames.H264Fmp4},{ScreenStreamMethodNames.H264Hls},{ScreenStreamMethodNames.Mjpeg}. " +
-                $"Options: method,fps,quality,width. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
+                $"Options: method,fps,quality,width,camera. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)

@@ -66,4 +66,8 @@ public sealed class DiscordBotSettings
 
     public int StreamDefaultMaxWidth { get; set; } = ScreenStreamingServer.DefaultMaxWidth;
 
+    public bool StreamDefaultCameraOverlayEnabled { get; set; }
+
+    public string StreamCameraDeviceName { get; set; } = string.Empty;
+
 }

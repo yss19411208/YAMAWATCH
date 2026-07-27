@@ -104,7 +104,9 @@ public sealed class DiscordBotSettingsStore
             StreamCommandEnabled = true,
             StreamDefaultFramesPerSecond = ScreenStreamingServer.DefaultFramesPerSecond,
             StreamDefaultJpegQuality = ScreenStreamingServer.DefaultJpegQuality,
-            StreamDefaultMaxWidth = ScreenStreamingServer.DefaultMaxWidth
+            StreamDefaultMaxWidth = ScreenStreamingServer.DefaultMaxWidth,
+            StreamDefaultCameraOverlayEnabled = false,
+            StreamCameraDeviceName = string.Empty
         };
 
         Directory.CreateDirectory(appPaths.ConfigDirectory);
@@ -334,6 +336,26 @@ public sealed class DiscordBotSettingsStore
                 ScreenStreamOptions.NormalizeMaxWidth(streamDefaultMaxWidth);
         }
 
+        if (TryGetBoolean(
+            envValues,
+            out bool streamDefaultCameraOverlayEnabled,
+            "VALOWATCH_STREAM_DEFAULT_CAMERA",
+            "VALOWATCH_STREAM_CAMERA_OVERLAY",
+            "VALOWATCH_CAMERA_OVERLAY"))
+        {
+            settings.StreamDefaultCameraOverlayEnabled = streamDefaultCameraOverlayEnabled;
+        }
+
+        if (TryGetString(
+            envValues,
+            out string streamCameraDeviceName,
+            "VALOWATCH_STREAM_CAMERA_DEVICE_NAME",
+            "VALOWATCH_CAMERA_DEVICE_NAME",
+            "VALOWATCH_WEBCAM_DEVICE_NAME"))
+        {
+            settings.StreamCameraDeviceName = streamCameraDeviceName.Trim();
+        }
+
     }
 
     private void EnsureEnvExample()
@@ -367,7 +389,9 @@ public sealed class DiscordBotSettingsStore
             "VALOWATCH_STREAM_COMMAND_ENABLED=true",
             $"VALOWATCH_STREAM_DEFAULT_FPS={ScreenStreamingServer.DefaultFramesPerSecond}",
             $"VALOWATCH_STREAM_DEFAULT_JPEG_QUALITY={ScreenStreamingServer.DefaultJpegQuality}",
-            $"VALOWATCH_STREAM_DEFAULT_WIDTH={ScreenStreamingServer.DefaultMaxWidth}"
+            $"VALOWATCH_STREAM_DEFAULT_WIDTH={ScreenStreamingServer.DefaultMaxWidth}",
+            "VALOWATCH_STREAM_DEFAULT_CAMERA=false",
+            "VALOWATCH_STREAM_CAMERA_DEVICE_NAME="
         ];
 
         if (!File.Exists(appPaths.EnvExamplePath))

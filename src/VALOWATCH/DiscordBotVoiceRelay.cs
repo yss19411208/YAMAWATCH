@@ -72,6 +72,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StreamFramesPerSecondOptionName = "fps";
     private const string StreamQualityOptionName = "quality";
     private const string StreamWidthOptionName = "width";
+    private const string StreamCameraOverlayOptionName = "camera";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -1665,7 +1666,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     "配信開始準備中: " +
                     $"{ScreenCaptureTargetNames.ToOptionValue(streamOptions.Target)} / " +
                     $"{streamOptions.FramesPerSecond}fps / " +
-                    ScreenStreamMethodNames.ToOptionValue(streamOptions.Method)))
+                    $"{ScreenStreamMethodNames.ToOptionValue(streamOptions.Method)} / " +
+                    $"camera:{(streamOptions.CameraOverlayEnabled ? "on" : "off")}"))
                 .ConfigureAwait(false);
 
             StartScreenStreamCommandInBackground(streamOptions, targetChannel);
@@ -1740,8 +1742,19 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             onOption,
             StreamWidthOptionName,
             settings.StreamDefaultMaxWidth);
+        bool cameraOverlayEnabled = ReadBooleanSubcommandOption(
+            onOption,
+            StreamCameraOverlayOptionName,
+            settings.StreamDefaultCameraOverlayEnabled);
 
-        return ScreenStreamOptions.Create(target, framesPerSecond, jpegQuality, maxWidth, method);
+        return ScreenStreamOptions.Create(
+            target,
+            framesPerSecond,
+            jpegQuality,
+            maxWidth,
+            method,
+            cameraOverlayEnabled,
+            settings.StreamCameraDeviceName);
     }
 
     private static int ReadIntegerSubcommandOption(
@@ -1764,6 +1777,22 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture,
                 out int parsedValue) => parsedValue,
+            _ => defaultValue
+        };
+    }
+
+    private static bool ReadBooleanSubcommandOption(
+        SocketSlashCommandDataOption? subcommandOption,
+        string optionName,
+        bool defaultValue)
+    {
+        object? value = subcommandOption?.Options.FirstOrDefault(option =>
+            string.Equals(option.Name, optionName, StringComparison.OrdinalIgnoreCase))?.Value;
+        return value switch
+        {
+            null => defaultValue,
+            bool boolValue => boolValue,
+            string textValue when bool.TryParse(textValue, out bool parsedValue) => parsedValue,
             _ => defaultValue
         };
     }
@@ -1875,6 +1904,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"Target: {ScreenCaptureTargetNames.ToOptionValue(acceptedSession.Target)}. " +
                 $"FPS: {acceptedSession.FramesPerSecond}. Quality: {acceptedSession.JpegQuality}. Width: {acceptedSession.MaxWidth}. " +
                 $"Method: {ScreenStreamMethodNames.ToOptionValue(acceptedSession.Method)}. " +
+                $"CameraOverlay: {acceptedSession.CameraOverlayStatusText}. " +
                 $"Engine: {acceptedSession.EngineName}. " +
                 $"Url: {acceptedSession.PublicUrl}.");
             EnsureScreenStreamMonitorStarted();
@@ -2494,6 +2524,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"品質: {session.JpegQuality}{Environment.NewLine}" +
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                $"カメラ: {session.CameraOverlayStatusText}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 $"{BuildStreamSmoothLiveStatusText(session)}" +
                 $"{BuildStreamPublicUrlStatusText(session)}{Environment.NewLine}" +
@@ -2515,6 +2546,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"対象: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}{Environment.NewLine}" +
                 $"FPS: {session.FramesPerSecond}{Environment.NewLine}" +
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                $"カメラ: {session.CameraOverlayStatusText}{Environment.NewLine}" +
                 $"{BuildStreamSmoothLiveStatusText(session)}" +
                 BuildStreamPublicUrlStatusText(session),
             Color = new Discord.Color(88, 166, 255),
@@ -2549,6 +2581,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 $"品質: {session.JpegQuality}{Environment.NewLine}" +
                 $"最大横幅: {session.MaxWidth}px{Environment.NewLine}" +
                 $"方式: {ScreenStreamMethodNames.ToOptionValue(session.Method)}{Environment.NewLine}" +
+                $"カメラ: {session.CameraOverlayStatusText}{Environment.NewLine}" +
                 $"エンジン: {session.EngineName}{Environment.NewLine}" +
                 $"URL: {session.PublicUrl}{Environment.NewLine}" +
                 $"{BuildStreamSmoothLiveStatusText(session)}" +
@@ -3293,7 +3326,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         return new SlashCommandBuilder()
             .WithName(StreamCommandName)
-            .WithDescription("VALOWATCH stream controls v4")
+            .WithDescription("VALOWATCH stream controls v5")
             .WithContextTypes(InteractionContextType.Guild)
             .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
             .AddOption(
@@ -3335,6 +3368,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                             .WithName(StreamWidthOptionName)
                             .WithDescription("Maximum stream width: 320-3840. Default 720 for smoother 60fps")
                             .WithType(ApplicationCommandOptionType.Integer)
+                            .WithRequired(false))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(StreamCameraOverlayOptionName)
+                            .WithDescription("Show a small webcam overlay at top-left")
+                            .WithType(ApplicationCommandOptionType.Boolean)
                             .WithRequired(false)))
             .AddOption(
                 new SlashCommandOptionBuilder()

@@ -37,6 +37,10 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         MaxWidth = streamingServer.MaxWidth;
         Method = streamingServer.Method;
         EngineName = streamingServer.EngineName;
+        CameraOverlayRequested = streamingServer.CameraOverlayRequested;
+        CameraOverlayActive = streamingServer.CameraOverlayActive;
+        CameraOverlayStatusText = streamingServer.CameraOverlayStatusText;
+        CameraDeviceName = streamingServer.Options.CameraDeviceName;
         StartedAtUtc = DateTimeOffset.UtcNow;
     }
 
@@ -51,6 +55,14 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
     public ScreenStreamMethod Method { get; }
 
     public string EngineName { get; }
+
+    public bool CameraOverlayRequested { get; }
+
+    public bool CameraOverlayActive { get; }
+
+    public string CameraOverlayStatusText { get; }
+
+    public string CameraDeviceName { get; }
 
     public string TunnelBaseUrl { get; }
 
@@ -69,7 +81,9 @@ internal sealed class ScreenStreamSession : IAsyncDisposable, IDisposable
         FramesPerSecond,
         JpegQuality,
         MaxWidth,
-        Method);
+        Method,
+        CameraOverlayRequested,
+        CameraDeviceName);
 
     public bool IsTunnelProcessRunning
     {
