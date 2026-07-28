@@ -37,7 +37,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private static readonly TimeSpan ScreenStreamMonitorShutdownTimeout = TimeSpan.FromSeconds(3);
     private const int DiscordEmbedDescriptionLimit = 4096;
     private const int DiscordEmbedDescriptionSafetyMargin = 120;
-    private const int ScreenStreamPublicUrlFailureThreshold = 2;
+    private const int ScreenStreamPublicUrlDiagnosticNotificationThreshold = 2;
     private const int ScreenStreamStartValidationAttempts = 3;
     private static readonly TimeSpan DiscordNetworkWarningLogInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan ScreenStreamRestartFailureNotificationCooldown = TimeSpan.FromMinutes(1);
@@ -1604,11 +1604,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
             DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
             if (settings is null)
             {
                 await command
-                    .RespondAsync($"VALOWATCH settings are not usable: {statusText}", ephemeral: true)
+                    .FollowupAsync($"VALOWATCH settings are not usable: {statusText}", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1616,7 +1619,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
             {
                 await command
-                    .RespondAsync("This server is not configured for VALOWATCH stream commands.", ephemeral: true)
+                    .FollowupAsync("This server is not configured for VALOWATCH stream commands.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1624,7 +1627,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
             {
                 await command
-                    .RespondAsync("VALOWATCH stream commands require server management permission.", ephemeral: true)
+                    .FollowupAsync("VALOWATCH stream commands require server management permission.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1632,7 +1635,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (!settings.StreamCommandEnabled || !IsStreamCommandEnabled())
             {
                 await command
-                    .RespondAsync("VALOWATCH stream command is disabled by configuration.", ephemeral: true)
+                    .FollowupAsync("VALOWATCH stream command is disabled by configuration.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1641,15 +1644,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (string.Equals(actionName, StreamSubcommandStatusName, StringComparison.OrdinalIgnoreCase))
             {
                 await command
-                    .RespondAsync(embed: BuildStreamStatusEmbed(), ephemeral: true)
+                    .FollowupAsync(embed: BuildStreamStatusEmbed(), ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
 
             if (string.Equals(actionName, StreamSubcommandCamerasName, StringComparison.OrdinalIgnoreCase))
             {
-                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-                deferred = true;
                 Embed cameraDevicesEmbed = BuildStreamCameraDevicesEmbed(settings);
                 await command
                     .FollowupAsync(embed: cameraDevicesEmbed, ephemeral: true)
@@ -1661,15 +1662,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (targetChannel is null)
             {
                 await command
-                    .RespondAsync("Stream target channel is unavailable.", ephemeral: true)
+                    .FollowupAsync("Stream target channel is unavailable.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
 
             if (string.Equals(actionName, StreamSubcommandOffName, StringComparison.OrdinalIgnoreCase))
             {
-                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-                deferred = true;
                 bool stopped = await StopActiveScreenStreamAsync("Discord /stream off", targetChannel)
                     .ConfigureAwait(false);
                 await command
@@ -1681,14 +1680,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (!string.Equals(actionName, StreamSubcommandOnName, StringComparison.OrdinalIgnoreCase))
             {
                 await command
-                    .RespondAsync("Use /stream on, /stream off, /stream status, or /stream cameras.", ephemeral: true)
+                    .FollowupAsync("Use /stream on, /stream off, /stream status, or /stream cameras.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
 
             ScreenStreamOptions streamOptions = ParseStreamOptions(command, settings);
-            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-            deferred = true;
 
             await targetChannel
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed(
@@ -2268,22 +2265,27 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
-            WriteLog(
-                $"Screen stream public URL health check failed. " +
-                $"Failures: {failureCount}/{ScreenStreamPublicUrlFailureThreshold}. " +
-                $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}.");
-            if (failureCount < ScreenStreamPublicUrlFailureThreshold)
+            if (failureCount == 1 ||
+                failureCount == ScreenStreamPublicUrlDiagnosticNotificationThreshold ||
+                failureCount % 20 == 0)
             {
-                return;
+                WriteLog(
+                    $"Screen stream public URL health check failed. " +
+                    $"Failures: {failureCount}. " +
+                    $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}. " +
+                    "The existing quick tunnel URL will be kept while cloudflared is still running.");
+            }
+            if (failureCount >= ScreenStreamPublicUrlDiagnosticNotificationThreshold)
+            {
+                await SendScreenStreamHealthDiagnosticNotificationAsync(
+                        notifyChannelSnapshot,
+                        sessionSnapshot,
+                        healthStatus,
+                        failureCount)
+                    .ConfigureAwait(false);
             }
 
-            await SendScreenStreamHealthDiagnosticNotificationAsync(
-                    notifyChannelSnapshot,
-                    sessionSnapshot,
-                    healthStatus,
-                    failureCount)
-                .ConfigureAwait(false);
-            restartReason = $"{healthStatus.Detail} after {failureCount} consecutive checks";
+            return;
         }
 
         await RestartScreenStreamAsync(
@@ -2502,11 +2504,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             Environment.NewLine +
             $"URL: {session.PublicUrl}" +
             Environment.NewLine +
-            $"失敗回数: {failureCount}/{ScreenStreamPublicUrlFailureThreshold}" +
+            $"失敗回数: {failureCount} (通知しきい値: {ScreenStreamPublicUrlDiagnosticNotificationThreshold})" +
             Environment.NewLine +
             $"原因: {SanitizeStreamHealthDetail(healthStatus.Detail)}" +
             Environment.NewLine +
-            "対応: DNS反映待ち、または一時的なCloudflare Quick Tunnel不調として監視します。長く続く場合は自動でURLを更新します。";
+            "対応: DNS反映待ち、または一時的なCloudflare Quick Tunnel不調として監視します。cloudflaredが動いている間は同じURLを保持します。";
 
         try
         {
@@ -2514,13 +2516,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed(message))
                 .ConfigureAwait(false);
         }
-        catch (ObjectDisposedException)
+        catch (Exception responseException) when (responseException is InvalidOperationException or ObjectDisposedException or TaskCanceledException or Discord.Net.HttpException)
         {
-            WriteLog("Screen stream health diagnostic notification skipped because the Discord channel was already disposed.", null);
-        }
-        catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
-        {
-            WriteLog("Screen stream health diagnostic notification failed.", responseException);
+            WriteLog(
+                $"Screen stream health diagnostic notification skipped because Discord was unavailable: {FormatExceptionSummary(responseException)}");
         }
     }
 
@@ -2546,13 +2545,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .SendMessageAsync(embed: BuildStatusNotificationEmbed($"配信URLの自動復旧に失敗しました: {exception.Message}"))
                 .ConfigureAwait(false);
         }
-        catch (ObjectDisposedException)
+        catch (Exception responseException) when (responseException is InvalidOperationException or ObjectDisposedException or TaskCanceledException or Discord.Net.HttpException)
         {
-            WriteLog("Screen stream restart failure notification skipped because the Discord channel was already disposed.", null);
-        }
-        catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
-        {
-            WriteLog("Screen stream restart failure notification failed.", responseException);
+            WriteLog(
+                $"Screen stream restart failure notification skipped because Discord was unavailable: {FormatExceptionSummary(responseException)}");
         }
     }
 
@@ -2726,7 +2722,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         return
-            "接続確認: 確認中。開けない場合は数秒後に再読み込みしてください。長く開けない場合は自動でURLを更新します。" +
+            "接続確認: 確認中。開けない場合は数秒後に再読み込みしてください。cloudflaredが動いている間は同じURLを保持します。" +
             Environment.NewLine +
             $"直近原因: {SanitizeStreamHealthDetail(session.PublicUrlHealthDetail)}";
     }
