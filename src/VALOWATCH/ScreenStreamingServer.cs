@@ -90,6 +90,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     private DateTimeOffset lastCaptureFailureLoggedAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastFmp4WebSocketStopLoggedAtUtc = DateTimeOffset.MinValue;
     private bool disableDesktopDuplicationCaptureForSession;
+    private bool useDotNetFmp4FramePipeForSession;
     private int suppressedFmp4WebSocketStopCount;
     private Task? acceptTask;
 
@@ -1850,7 +1851,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             {
                 lastException = exception;
                 log("fMP4 live encoder did not produce an initial fragment; restarting it once.", exception);
-                DisableDesktopDuplicationCaptureForSessionIfNeeded(exception);
+                EnableDotNetFmp4FramePipeForSessionIfNeeded(exception);
                 ClearFmp4LiveFragmentSource(source);
             }
         }
@@ -1877,7 +1878,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             {
                 lastException = exception;
                 log("fMP4 live encoder did not produce a requested fragment; restarting it once.", exception);
-                DisableDesktopDuplicationCaptureForSessionIfNeeded(exception);
+                EnableDotNetFmp4FramePipeForSessionIfNeeded(exception);
                 ClearFmp4LiveFragmentSource(source);
             }
         }
@@ -1917,6 +1918,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 reasonPhrase: "Service Unavailable",
                 "fMP4 live stream is warming up.",
                 cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
+        {
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
@@ -1968,6 +1972,9 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 reasonPhrase: "Service Unavailable",
                 "fMP4 live fragment is warming up.",
                 cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsExpectedClientDisconnectException(exception))
+        {
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
@@ -2029,7 +2036,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             catch (Exception exception) when (exception is InvalidOperationException or TimeoutException)
             {
                 log("fMP4 WebSocket encoder did not produce an initial fragment; restarting it once.", exception);
-                DisableDesktopDuplicationCaptureForSessionIfNeeded(exception);
+                EnableDotNetFmp4FramePipeForSessionIfNeeded(exception);
                 ClearFmp4LiveFragmentSource(source);
                 source = GetOrStartFmp4LiveFragmentSource();
                 activeSource = source;
@@ -2368,9 +2375,26 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
     private Process StartFfmpegFmp4Process()
     {
-        ProcessStartInfo startInfo = CreateFfmpegStartInfo(redirectOutput: true);
-        bool useDesktopDuplicationCapture = ShouldUseDesktopDuplicationCapture();
-        AddFfmpegH264CaptureInputArguments(startInfo, useDesktopDuplicationCapture);
+        bool useDotNetFramePipe = ShouldUseDotNetFmp4FramePipe();
+        FullScreenScreenshotFrame? initialDotNetFrame = null;
+        if (useDotNetFramePipe)
+        {
+            initialDotNetFrame = GetFrameAsync(cancellationTokenSource.Token).GetAwaiter().GetResult();
+        }
+
+        ProcessStartInfo startInfo = CreateFfmpegStartInfo(
+            redirectOutput: true,
+            redirectInput: useDotNetFramePipe);
+        bool useDesktopDuplicationCapture = !useDotNetFramePipe && ShouldUseDesktopDuplicationCapture();
+        if (useDotNetFramePipe)
+        {
+            AddDotNetMjpegPipeInputArguments(startInfo);
+        }
+        else
+        {
+            AddFfmpegH264CaptureInputArguments(startInfo, useDesktopDuplicationCapture);
+        }
+
         AddFfmpegCameraOverlayInputArguments(startInfo);
         AddFfmpegH264OutputArguments(startInfo, useDesktopDuplicationCapture);
         startInfo.ArgumentList.Add("-movflags");
@@ -2390,10 +2414,18 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("pipe:1");
 
         Process process = StartFfmpegProcess(startInfo);
+        if (useDotNetFramePipe)
+        {
+            int initialWrittenFrames = WriteInitialDotNetMjpegFrameToFfmpeg(process, initialDotNetFrame);
+            _ = Task.Run(
+                () => WriteDotNetMjpegFramesToFfmpegAsync(process, initialWrittenFrames, cancellationTokenSource.Token),
+                CancellationToken.None);
+        }
+
         log(
             "FFmpeg fMP4 screen stream process started. " +
             $"Target: {ScreenCaptureTargetNames.ToOptionValue(Target)}. FPS: {FramesPerSecond}. " +
-            $"CaptureEngine: {(useDesktopDuplicationCapture ? "ddagrab" : "gdigrab")}. " +
+            $"CaptureEngine: {(useDotNetFramePipe ? "dotnet-mjpeg-pipe" : useDesktopDuplicationCapture ? "ddagrab" : "gdigrab")}. " +
             $"Capture: {capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}+{capturePlan.Bounds.Left}+{capturePlan.Bounds.Top}. " +
             $"Output: {capturePlan.OutputSize.Width}x{capturePlan.OutputSize.Height}. " +
             $"CameraOverlay: {CameraOverlayStatusText}. " +
@@ -2485,13 +2517,14 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         return process;
     }
 
-    private ProcessStartInfo CreateFfmpegStartInfo(bool redirectOutput)
+    private ProcessStartInfo CreateFfmpegStartInfo(bool redirectOutput, bool redirectInput = false)
     {
         string executablePath = ffmpegPath ?? throw new InvalidOperationException("FFmpeg path is unavailable.");
         ProcessStartInfo startInfo = new()
         {
             FileName = executablePath,
             UseShellExecute = false,
+            RedirectStandardInput = redirectInput,
             RedirectStandardOutput = redirectOutput,
             RedirectStandardError = true,
             CreateNoWindow = true
@@ -2499,7 +2532,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add("-hide_banner");
         startInfo.ArgumentList.Add("-loglevel");
         startInfo.ArgumentList.Add("warning");
-        startInfo.ArgumentList.Add("-nostdin");
+        if (!redirectInput)
+        {
+            startInfo.ArgumentList.Add("-nostdin");
+        }
+
         startInfo.ArgumentList.Add("-probesize");
         startInfo.ArgumentList.Add("1000000");
         startInfo.ArgumentList.Add("-analyzeduration");
@@ -2520,6 +2557,83 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         }
 
         return process;
+    }
+
+    private static int WriteInitialDotNetMjpegFrameToFfmpeg(Process process, FullScreenScreenshotFrame? initialFrame)
+    {
+        if (initialFrame is null)
+        {
+            return 0;
+        }
+
+        Stream ffmpegInputStream = process.StandardInput.BaseStream;
+        ffmpegInputStream.Write(initialFrame.JpegBytes, 0, initialFrame.JpegBytes.Length);
+        ffmpegInputStream.Flush();
+        return 1;
+    }
+
+    private async Task WriteDotNetMjpegFramesToFfmpegAsync(
+        Process process,
+        int initialWrittenFrames,
+        CancellationToken cancellationToken)
+    {
+        int writtenFrames = initialWrittenFrames;
+        DateTimeOffset startedAtUtc = DateTimeOffset.UtcNow;
+        try
+        {
+            await using Stream ffmpegInputStream = process.StandardInput.BaseStream;
+            DateTimeOffset nextFrameAtUtc = DateTimeOffset.UtcNow + frameInterval;
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        break;
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    break;
+                }
+
+                DateTimeOffset frameStartedAtUtc = DateTimeOffset.UtcNow;
+                FullScreenScreenshotFrame frame = await GetFrameAsync(cancellationToken).ConfigureAwait(false);
+                await ffmpegInputStream
+                    .WriteAsync(frame.JpegBytes.AsMemory(0, frame.JpegBytes.Length), cancellationToken)
+                    .ConfigureAwait(false);
+                await ffmpegInputStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                writtenFrames++;
+
+                nextFrameAtUtc = nextFrameAtUtc <= frameStartedAtUtc
+                    ? frameStartedAtUtc + frameInterval
+                    : nextFrameAtUtc + frameInterval;
+                TimeSpan delay = nextFrameAtUtc - DateTimeOffset.UtcNow;
+                if (delay > TimeSpan.Zero)
+                {
+                    await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (!IsExpectedClientDisconnectException(exception))
+            {
+                log(".NET MJPEG frame pipe stopped.", exception);
+            }
+        }
+        finally
+        {
+            double elapsedSeconds = Math.Max(0.001D, (DateTimeOffset.UtcNow - startedAtUtc).TotalSeconds);
+            log(
+                ".NET MJPEG frame pipe closed. " +
+                $"Frames: {writtenFrames}. " +
+                $"AverageFPS: {(writtenFrames / elapsedSeconds).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}.",
+                null);
+        }
     }
 
     private static H264EncoderProfile SelectH264EncoderProfile(string? ffmpegPath, Action<string, Exception?> log)
@@ -2632,6 +2746,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
     private bool ShouldUseDesktopDuplicationCapture()
     {
+        if (useDotNetFmp4FramePipeForSession)
+        {
+            return false;
+        }
+
         if (disableDesktopDuplicationCaptureForSession)
         {
             return false;
@@ -2653,6 +2772,31 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         return capturePlan.ScreenCount == 1 &&
             capturePlan.Bounds.Left >= 0 &&
             capturePlan.Bounds.Top >= 0;
+    }
+
+    private bool ShouldUseDotNetFmp4FramePipe()
+    {
+        return useDotNetFmp4FramePipeForSession ||
+            string.Equals(
+                Environment.GetEnvironmentVariable("VALOWATCH_FORCE_DOTNET_FMP4_PIPE"),
+                "1",
+                StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void EnableDotNetFmp4FramePipeForSessionIfNeeded(Exception exception)
+    {
+        if (ShouldUseDotNetFmp4FramePipe())
+        {
+            return;
+        }
+
+        useDotNetFmp4FramePipeForSession = true;
+        disableDesktopDuplicationCaptureForSession = true;
+        DateTimeOffset disabledUntilUtc = DisableDesktopDuplicationTemporarily();
+        log(
+            "FFmpeg screen capture was unavailable; switching this fMP4 stream session to the .NET MJPEG frame pipe " +
+            $"and suppressing desktop duplication until {disabledUntilUtc.LocalDateTime:yyyy-MM-dd HH:mm:ss}.",
+            exception);
     }
 
     private static bool IsDesktopDuplicationTemporarilyDisabled()
@@ -3066,6 +3210,20 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
         startInfo.ArgumentList.Add($"{capturePlan.Bounds.Width}x{capturePlan.Bounds.Height}");
         startInfo.ArgumentList.Add("-i");
         startInfo.ArgumentList.Add("desktop");
+    }
+
+    private void AddDotNetMjpegPipeInputArguments(ProcessStartInfo startInfo)
+    {
+        startInfo.ArgumentList.Add("-thread_queue_size");
+        startInfo.ArgumentList.Add("512");
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add("image2pipe");
+        startInfo.ArgumentList.Add("-framerate");
+        startInfo.ArgumentList.Add(FramesPerSecond.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add("-vcodec");
+        startInfo.ArgumentList.Add("mjpeg");
+        startInfo.ArgumentList.Add("-i");
+        startInfo.ArgumentList.Add("pipe:0");
     }
 
     private void AddFfmpegCameraOverlayInputArguments(ProcessStartInfo startInfo)

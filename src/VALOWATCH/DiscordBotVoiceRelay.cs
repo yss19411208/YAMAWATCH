@@ -1365,6 +1365,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             exception.Message.Contains("Unknown interaction", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsDiscordInteractionAlreadyAcknowledged(Discord.Net.HttpException exception)
+    {
+        return exception.Message.Contains("40060", StringComparison.OrdinalIgnoreCase) ||
+            exception.Message.Contains("already been acknowledged", StringComparison.OrdinalIgnoreCase);
+    }
+
     private async Task HandleScreenshotSlashCommandAsync(SocketSlashCommand command)
     {
         bool deferred = false;
@@ -1604,8 +1610,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
-            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-            deferred = true;
+            try
+            {
+                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+                deferred = true;
+            }
+            catch (Discord.Net.HttpException httpException) when (IsDiscordInteractionAlreadyAcknowledged(httpException))
+            {
+                WriteLog("Stream slash command was already acknowledged before defer; continuing with follow-up responses.");
+                deferred = true;
+            }
 
             DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
             if (settings is null)
@@ -2275,7 +2289,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}. " +
                     "The existing quick tunnel URL will be kept while cloudflared is still running.");
             }
-            if (failureCount >= ScreenStreamPublicUrlDiagnosticNotificationThreshold)
+            if (failureCount == ScreenStreamPublicUrlDiagnosticNotificationThreshold ||
+                failureCount % 80 == 0)
             {
                 await SendScreenStreamHealthDiagnosticNotificationAsync(
                         notifyChannelSnapshot,
