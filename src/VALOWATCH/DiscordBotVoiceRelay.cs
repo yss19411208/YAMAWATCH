@@ -5622,7 +5622,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         foreach (SocketVoiceChannel candidateChannel in guild.VoiceChannels)
         {
-            if (candidateChannel.Users.Any(user => user.Id == userId))
+            if (candidateChannel.Users.Any(user => ShouldTrackDiscordVoiceStateUser(userId, user.Id, user.IsBot)))
             {
                 voiceChannel = candidateChannel;
                 return true;
@@ -5978,52 +5978,44 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         lock (stateLock)
         {
-            List<string> statusLines = [];
-            bool discordAppRunning = RunningApplicationSnapshot.IsDiscordProcessRunning();
-            statusLines.Add($"Discordアプリ: {(discordAppRunning ? "実行中" : "未検出")}");
-
-            if (IsRunning &&
-                !string.IsNullOrWhiteSpace(currentVoiceGuildName) &&
-                !string.IsNullOrWhiteSpace(currentVoiceChannelName))
-            {
-                statusLines.Add("BOT: VC接続中");
-                statusLines.Add($"鯖: {NormalizeDiscordDisplayName(currentVoiceGuildName, "不明な鯖")}");
-                statusLines.Add($"VC: {NormalizeDiscordDisplayName(currentVoiceChannelName, "不明なVC")}");
-            }
-            else if (IsOnline)
-            {
-                statusLines.Add("BOT: オンライン / VC未接続");
-            }
-            else
-            {
-                statusLines.Add("BOT: オフライン");
-            }
-
-            if (!string.IsNullOrWhiteSpace(currentDiscordConversationGuildName) &&
-                !string.IsNullOrWhiteSpace(currentDiscordConversationChannelName))
-            {
-                statusLines.Add(string.Empty);
-                statusLines.Add("Discord会話: 検知中");
-                statusLines.Add($"鯖: {NormalizeDiscordDisplayName(currentDiscordConversationGuildName, "不明な鯖")}");
-                statusLines.Add($"VC: {NormalizeDiscordDisplayName(currentDiscordConversationChannelName, "不明なVC")}");
-            }
-            else if (currentMonitoredDiscordUserId == 0)
-            {
-                statusLines.Add(string.Empty);
-                statusLines.Add("Discord会話: 対象ユーザー未設定");
-            }
-            else
-            {
-                statusLines.Add(string.Empty);
-                statusLines.Add("Discord会話: 検知なし");
-                if (discordAppRunning)
-                {
-                    statusLines.Add("Bot未参加の鯖/DMはVC名取得不可");
-                }
-            }
-
-            return string.Join(Environment.NewLine, statusLines);
+            return BuildDiscordVoiceStatusForSnapshot(
+                RunningApplicationSnapshot.IsDiscordProcessRunning(),
+                currentDiscordConversationGuildName,
+                currentDiscordConversationChannelName,
+                currentMonitoredDiscordUserId);
         }
+    }
+
+    internal static string BuildDiscordVoiceStatusForSnapshot(
+        bool discordAppRunning,
+        string discordConversationGuildName,
+        string discordConversationChannelName,
+        ulong monitoredDiscordUserId)
+    {
+        List<string> statusLines = [];
+        statusLines.Add($"Discordアプリ: {(discordAppRunning ? "実行中" : "未検出")}");
+
+        if (!string.IsNullOrWhiteSpace(discordConversationGuildName) &&
+            !string.IsNullOrWhiteSpace(discordConversationChannelName))
+        {
+            statusLines.Add("配信者: VC検知中");
+            statusLines.Add($"鯖: {NormalizeDiscordDisplayName(discordConversationGuildName, "不明な鯖")}");
+            statusLines.Add($"VC: {NormalizeDiscordDisplayName(discordConversationChannelName, "不明なVC")}");
+        }
+        else if (monitoredDiscordUserId == 0)
+        {
+            statusLines.Add("配信者: 対象ユーザー未設定");
+        }
+        else
+        {
+            statusLines.Add("配信者: VC検知なし");
+            if (discordAppRunning)
+            {
+                statusLines.Add("Bot未参加の鯖/DMはVC名取得不可");
+            }
+        }
+
+        return string.Join(Environment.NewLine, statusLines);
     }
 
     private static string GetCurrentVersionLabel()
