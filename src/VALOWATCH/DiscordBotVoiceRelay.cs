@@ -1166,10 +1166,26 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
-    private async Task OnSlashCommandExecutedAsync(SocketSlashCommand command)
+    private Task OnSlashCommandExecutedAsync(SocketSlashCommand command)
     {
         WriteLog($"Slash command received: /{command.Data.Name}. User: {command.User.Id}.");
 
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await DispatchSlashCommandAsync(command).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                WriteLog($"Slash command background dispatch failed: /{command.Data.Name}.", exception);
+            }
+        });
+        return Task.CompletedTask;
+    }
+
+    private async Task DispatchSlashCommandAsync(SocketSlashCommand command)
+    {
         if (string.Equals(command.Data.Name, StartCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleStartSlashCommandAsync(command).ConfigureAwait(false);
@@ -1586,14 +1602,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
         catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException)
         {
-            WriteLog("Running application slash command handling failed.", exception);
             if (exception is Discord.Net.HttpException httpException &&
                 IsDiscordUnknownInteraction(httpException))
             {
-                WriteLog("Running application slash command response skipped because the interaction had already expired.", null);
+                WriteLog("Running application slash command expired before acknowledgement; skipped.");
                 return;
             }
 
+            WriteLog("Running application slash command handling failed.", exception);
             try
             {
                 if (deferred)
@@ -1611,6 +1627,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
             catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
             {
+                if (responseException is Discord.Net.HttpException responseHttpException &&
+                    (IsDiscordUnknownInteraction(responseHttpException) ||
+                        IsDiscordInteractionAlreadyAcknowledged(responseHttpException)))
+                {
+                    WriteLog("Running application slash command error response skipped because the interaction was no longer writable.");
+                    return;
+                }
+
                 WriteLog("Running application slash command error response failed.", responseException);
             }
         }

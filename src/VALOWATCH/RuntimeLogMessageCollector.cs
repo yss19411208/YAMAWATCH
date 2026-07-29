@@ -300,7 +300,8 @@ internal static class RuntimeLogMessageCollector
 
         if (trimmedLine.StartsWith("at Discord.", StringComparison.Ordinal) ||
             trimmedLine.StartsWith("at System.Net.", StringComparison.Ordinal) ||
-            trimmedLine.StartsWith("at System.Threading.Tasks.", StringComparison.Ordinal))
+            trimmedLine.StartsWith("at System.Threading.Tasks.", StringComparison.Ordinal) ||
+            trimmedLine.StartsWith("at VALOWATCH.", StringComparison.Ordinal))
         {
             return false;
         }
