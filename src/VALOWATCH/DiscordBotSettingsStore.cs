@@ -37,6 +37,7 @@ public sealed class DiscordBotSettingsStore
         DiscordBotSettings settings = LoadJsonSettings() ?? new DiscordBotSettings();
         ApplyEnvSettings(settings);
         settings.LineAudioVolume = NormalizeLineAudioVolume(settings.LineAudioVolume);
+        settings.ValorantAudioVolume = Math.Clamp(settings.ValorantAudioVolume, 0.0F, 1.0F);
 
         if (!settings.Enabled)
         {
@@ -95,6 +96,10 @@ public sealed class DiscordBotSettingsStore
             DiscordAudioProcessNames = ["Discord", "DiscordCanary", "DiscordPTB"],
             DiscordAudioVolume = 0.45F,
             DiscordAudioCommandEnabled = true,
+            StreamValorantAudioWhenRunning = false,
+            ValorantAudioProcessNames = ["VALORANT-Win64-Shipping", "VALORANT"],
+            ValorantAudioVolume = 0.55F,
+            ValorantAudioCommandEnabled = true,
             TranscriptionEnabled = false,
             TranscriptionEngine = "vosk",
             TranscriptionModelPath = string.Empty,
@@ -269,6 +274,39 @@ public sealed class DiscordBotSettingsStore
             settings.DiscordAudioCommandEnabled = discordAudioCommandEnabled;
         }
 
+        if (TryGetBoolean(
+            envValues,
+            out bool streamValorantAudio,
+            "DISCORD_STREAM_VALORANT_AUDIO",
+            "DISCORD_STREAM_VALORANT_OUTPUT_AUDIO",
+            "VALOWATCH_VALORANT_AUDIO_ENABLED"))
+        {
+            settings.StreamValorantAudioWhenRunning = streamValorantAudio;
+        }
+
+        if (TryGetString(envValues, out string valorantProcessNames, "DISCORD_VALORANT_PROCESS_NAMES", "VALORANT_PROCESS_NAMES"))
+        {
+            string[] parsedProcessNames = ParseProcessNameList(valorantProcessNames);
+            if (parsedProcessNames.Length > 0)
+            {
+                settings.ValorantAudioProcessNames = parsedProcessNames;
+            }
+        }
+
+        if (TryGetSingle(envValues, out float valorantAudioVolume, "DISCORD_VALORANT_AUDIO_VOLUME", "VALORANT_AUDIO_VOLUME"))
+        {
+            settings.ValorantAudioVolume = Math.Clamp(valorantAudioVolume, 0.0F, 1.0F);
+        }
+
+        if (TryGetBoolean(
+            envValues,
+            out bool valorantAudioCommandEnabled,
+            "DISCORD_VALORANT_AUDIO_COMMAND_ENABLED",
+            "VALOWATCH_VALORANT_AUDIO_COMMAND_ENABLED"))
+        {
+            settings.ValorantAudioCommandEnabled = valorantAudioCommandEnabled;
+        }
+
         bool transcriptionEnabledWasConfigured = TryGetBoolean(
             envValues,
             out bool transcriptionEnabled,
@@ -380,6 +418,10 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_AUDIO_PROCESS_NAMES=Discord,DiscordCanary,DiscordPTB",
             "DISCORD_AUDIO_VOLUME=0.45",
             "DISCORD_AUDIO_COMMAND_ENABLED=true",
+            "DISCORD_STREAM_VALORANT_AUDIO=false",
+            "DISCORD_VALORANT_PROCESS_NAMES=VALORANT-Win64-Shipping,VALORANT",
+            "DISCORD_VALORANT_AUDIO_VOLUME=0.55",
+            "DISCORD_VALORANT_AUDIO_COMMAND_ENABLED=true",
             "VALOWATCH_TRANSCRIPTION_ENABLED=false",
             "VALOWATCH_TRANSCRIPTION_ENGINE=vosk",
             "VALOWATCH_TRANSCRIPTION_MODEL_PATH=",

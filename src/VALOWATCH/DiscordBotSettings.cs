@@ -46,6 +46,14 @@ public sealed class DiscordBotSettings
 
     public bool DiscordAudioCommandEnabled { get; set; } = true;
 
+    public bool StreamValorantAudioWhenRunning { get; set; }
+
+    public string[] ValorantAudioProcessNames { get; set; } = ["VALORANT-Win64-Shipping", "VALORANT"];
+
+    public float ValorantAudioVolume { get; set; } = 0.55F;
+
+    public bool ValorantAudioCommandEnabled { get; set; } = true;
+
     public bool TranscriptionEnabled { get; set; }
 
     public string TranscriptionEngine { get; set; } = "vosk";

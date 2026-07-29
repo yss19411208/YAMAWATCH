@@ -187,6 +187,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-valorant-audio-command", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunValorantAudioCommandDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-screenshot-capture", StringComparison.OrdinalIgnoreCase)))
         {
             RunScreenshotCaptureDiagnostic();
@@ -580,12 +586,37 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Debug slash command check: " +
                 $"{(ready ? "ready" : "failed")}. Subcommands: status,audio,logs,diagnostics,update,help. " +
-                "DiagnosticsOptions: download. UpdateOptions: download.");
+                "DiagnosticsOptions: download. UpdateOptions: download. RelatedCommands: /valowatch-valorant-audio.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
         {
             TryWriteDiagnosticFailure(logFilePath, "Debug slash command check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunValorantAudioCommandDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            object builtCommand = DiscordBotVoiceRelay
+                .BuildValorantAudioSlashCommandBuilder()
+                .Build();
+            bool ready = builtCommand is not null;
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] VALORANT audio slash command check: " +
+                $"{(ready ? "ready" : "failed")}. Command: /valowatch-valorant-audio. Options: enabled.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "VALORANT audio slash command check", exception);
             Environment.ExitCode = 1;
         }
     }
@@ -2588,6 +2619,27 @@ static class Program
                 0,
                 discordMixedBytesRead);
 
+            byte[] valorantMixedFrameBuffer = new byte[3840];
+            IWaveProvider valorantMixedProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
+                new DiagnosticToneWaveProvider(440F, 0.14F),
+                0.85F,
+                0F,
+                new DiagnosticToneWaveProvider(880F, 0.14F),
+                DiscordBotSettings.DefaultLineAudioVolume,
+                new DiagnosticToneWaveProvider(660F, 0.14F),
+                0.45F,
+                new DiagnosticToneWaveProvider(550F, 0.14F),
+                0.55F);
+            int valorantMixedBytesRead = valorantMixedProvider.Read(
+                valorantMixedFrameBuffer,
+                0,
+                valorantMixedFrameBuffer.Length);
+            float valorantMixedPeak = DiscordBotVoiceRelay.CalculateAudioPeak(
+                valorantMixedProvider.WaveFormat,
+                valorantMixedFrameBuffer,
+                0,
+                valorantMixedBytesRead);
+
             byte[] quietVoiceFrameBuffer = new byte[3840];
             IWaveProvider quietVoiceProvider = DiscordBotVoiceRelay.CreateDiscordPcmProvider(
                 new DiagnosticToneWaveProvider(440F, 0.008F),
@@ -2672,6 +2724,8 @@ static class Program
                 lineOnlyPeak >= 0.08F &&
                 discordMixedBytesRead == discordMixedFrameBuffer.Length &&
                 discordMixedPeak > micOnlyPeak * 1.05F &&
+                valorantMixedBytesRead == valorantMixedFrameBuffer.Length &&
+                valorantMixedPeak > micOnlyPeak * 1.05F &&
                 quietVoiceBytesRead == quietVoiceFrameBuffer.Length &&
                 quietVoicePeak >= 0.03F &&
                 loudVoiceBytesRead == loudVoiceFrameBuffer.Length &&
@@ -2688,15 +2742,17 @@ static class Program
                 $"{DateTimeOffset.Now:O} [Diagnostics] Discord audio mix check: {(mixLooksReady ? "ready" : "failed")}. " +
                 $"MicOnlyBytes: {micOnlyBytesRead}. MixedBytes: {mixedBytesRead}. " +
                 $"LineOnlyBytes: {lineOnlyBytesRead}. DiscordMixedBytes: {discordMixedBytesRead}. " +
+                $"ValorantMixedBytes: {valorantMixedBytesRead}. " +
                 $"MicOnlyPeak: {micOnlyPeak:0.0000}. MixedPeak: {mixedPeak:0.0000}. " +
                 $"LineOnlyPeak: {lineOnlyPeak:0.0000}. DiscordMixedPeak: {discordMixedPeak:0.0000}. " +
+                $"ValorantMixedPeak: {valorantMixedPeak:0.0000}. " +
                 $"QuietVoiceBytes: {quietVoiceBytesRead}. QuietVoicePeak: {quietVoicePeak:0.0000}. " +
                 $"LoudVoiceBytes: {loudVoiceBytesRead}. LoudVoicePeak: {loudVoicePeak:0.0000}. " +
                 $"LowNoiseBytes: {lowNoiseBytesRead}. LowNoisePeak: {lowNoisePeak:0.0000}. " +
                 $"LegacyLineVolumeBoosted: {legacyLineVolumeBoosted}. " +
                 $"WatchdogHealthy: {watchdogAllowsHealthyFrames}. WatchdogStalled: {watchdogRecoversStalledFrames}. " +
                 $"WatchdogStopped: {watchdogIgnoresStoppedRelay}. " +
-                "Sources: microphone+LINE+Discord-process. OutputPlayback: unchanged; no render device opened by this diagnostic." +
+                "Sources: microphone+LINE+Discord-process+VALORANT-process. OutputPlayback: unchanged; no render device opened by this diagnostic." +
                 $"{Environment.NewLine}");
             Environment.ExitCode = mixLooksReady ? 0 : 1;
         }
