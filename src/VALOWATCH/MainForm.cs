@@ -223,7 +223,8 @@ public sealed class MainForm : Form
         }
 
         bool lineDetected = RefreshLineStatus();
-        bool voiceTriggerDetected = ShouldKeepDiscordVoiceRunning(valorantDetected, lineDetected);
+        DiscordVoiceJoinMode voiceJoinMode = discordBotVoiceRelay.LoadVoiceJoinMode();
+        bool voiceTriggerDetected = ShouldKeepDiscordVoiceRunning(valorantDetected, lineDetected, voiceJoinMode);
 
         if (voiceTriggerDetected != lastVoiceTriggerDetected)
         {
@@ -255,7 +256,20 @@ public sealed class MainForm : Form
 
     internal static bool ShouldKeepDiscordVoiceRunning(bool valorantDetected, bool lineDetected)
     {
-        return valorantDetected || lineDetected;
+        return ShouldKeepDiscordVoiceRunning(
+            valorantDetected,
+            lineDetected,
+            DiscordVoiceJoinMode.ActivityOnly);
+    }
+
+    internal static bool ShouldKeepDiscordVoiceRunning(
+        bool valorantDetected,
+        bool lineDetected,
+        DiscordVoiceJoinMode voiceJoinMode)
+    {
+        return voiceJoinMode == DiscordVoiceJoinMode.AlwaysWhilePcOpen ||
+            valorantDetected ||
+            lineDetected;
     }
 
     private bool RefreshLineStatus()

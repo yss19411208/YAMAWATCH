@@ -38,6 +38,7 @@ public sealed class DiscordBotSettingsStore
         ApplyEnvSettings(settings);
         settings.LineAudioVolume = NormalizeLineAudioVolume(settings.LineAudioVolume);
         settings.ValorantAudioVolume = Math.Clamp(settings.ValorantAudioVolume, 0.0F, 1.0F);
+        settings.VoiceJoinMode = DiscordVoiceJoinModeNames.ToValue(settings.GetVoiceJoinMode());
 
         if (!settings.Enabled)
         {
@@ -100,6 +101,8 @@ public sealed class DiscordBotSettingsStore
             ValorantAudioProcessNames = ["VALORANT-Win64-Shipping", "VALORANT"],
             ValorantAudioVolume = 0.55F,
             ValorantAudioCommandEnabled = true,
+            VoiceJoinMode = DiscordVoiceJoinModeNames.ActivityOnlyValue,
+            VoiceJoinModeCommandEnabled = true,
             TranscriptionEnabled = false,
             TranscriptionEngine = "vosk",
             TranscriptionModelPath = string.Empty,
@@ -307,6 +310,25 @@ public sealed class DiscordBotSettingsStore
             settings.ValorantAudioCommandEnabled = valorantAudioCommandEnabled;
         }
 
+        if (TryGetString(
+            envValues,
+            out string voiceJoinMode,
+            "DISCORD_VOICE_JOIN_MODE",
+            "VALOWATCH_VOICE_JOIN_MODE"))
+        {
+            settings.VoiceJoinMode = DiscordVoiceJoinModeNames.ToValue(
+                DiscordVoiceJoinModeNames.Parse(voiceJoinMode, DiscordVoiceJoinMode.ActivityOnly));
+        }
+
+        if (TryGetBoolean(
+            envValues,
+            out bool voiceJoinModeCommandEnabled,
+            "DISCORD_VOICE_JOIN_MODE_COMMAND_ENABLED",
+            "VALOWATCH_VOICE_JOIN_MODE_COMMAND_ENABLED"))
+        {
+            settings.VoiceJoinModeCommandEnabled = voiceJoinModeCommandEnabled;
+        }
+
         bool transcriptionEnabledWasConfigured = TryGetBoolean(
             envValues,
             out bool transcriptionEnabled,
@@ -422,6 +444,8 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_VALORANT_PROCESS_NAMES=VALORANT-Win64-Shipping,VALORANT",
             "DISCORD_VALORANT_AUDIO_VOLUME=0.55",
             "DISCORD_VALORANT_AUDIO_COMMAND_ENABLED=true",
+            "DISCORD_VOICE_JOIN_MODE=activity",
+            "DISCORD_VOICE_JOIN_MODE_COMMAND_ENABLED=true",
             "VALOWATCH_TRANSCRIPTION_ENABLED=false",
             "VALOWATCH_TRANSCRIPTION_ENGINE=vosk",
             "VALOWATCH_TRANSCRIPTION_MODEL_PATH=",

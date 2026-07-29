@@ -54,6 +54,10 @@ public sealed class DiscordBotSettings
 
     public bool ValorantAudioCommandEnabled { get; set; } = true;
 
+    public string VoiceJoinMode { get; set; } = DiscordVoiceJoinModeNames.ActivityOnlyValue;
+
+    public bool VoiceJoinModeCommandEnabled { get; set; } = true;
+
     public bool TranscriptionEnabled { get; set; }
 
     public string TranscriptionEngine { get; set; } = "vosk";
@@ -78,4 +82,8 @@ public sealed class DiscordBotSettings
 
     public string StreamCameraDeviceName { get; set; } = string.Empty;
 
+    public DiscordVoiceJoinMode GetVoiceJoinMode()
+    {
+        return DiscordVoiceJoinModeNames.Parse(VoiceJoinMode, DiscordVoiceJoinMode.ActivityOnly);
+    }
 }

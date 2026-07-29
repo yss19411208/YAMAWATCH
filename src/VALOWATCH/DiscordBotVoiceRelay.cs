@@ -56,6 +56,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string DiscordAudioCommandName = "valowatch-discord-audio";
     private const string DiscordAudioCommandEnabledOptionName = "enabled";
     private const string ValorantAudioCommandName = "valowatch-valorant-audio";
+    private const string VoiceJoinModeCommandName = "valowatch-voice-mode";
+    private const string VoiceJoinModeOptionName = "mode";
+    private const string VoiceJoinModeCommandDescription = "VALOWATCHのVC参加条件を切り替えます v1";
     private const string StartCommandName = "start";
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
@@ -95,6 +98,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private readonly DiscordBotSettingsStore settingsStore;
     private readonly ScreenshotCommandStateStore screenshotCommandStateStore;
+    private readonly DiscordVoiceJoinModeStore voiceJoinModeStateStore;
     private readonly AppPaths appPaths;
     private readonly string logFilePath;
     private readonly object logLock = new();
@@ -171,6 +175,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private bool discordAudioCommandEnabled;
     private bool valorantProcessAudioRuntimeEnabled;
     private bool valorantAudioCommandEnabled;
+    private bool voiceJoinModeCommandEnabled = true;
     private bool screenshotCommandEnabled;
     private bool streamCommandEnabled = true;
     private ScreenStreamSession? activeScreenStreamSession;
@@ -201,6 +206,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         this.settingsStore = settingsStore;
         this.appPaths = appPaths;
         screenshotCommandStateStore = new ScreenshotCommandStateStore(appPaths);
+        voiceJoinModeStateStore = new DiscordVoiceJoinModeStore(appPaths);
         logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         settingsStore.EnsureSampleConfig();
     }
@@ -212,6 +218,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     public bool IsOnline { get; private set; }
 
     public bool IsRunning { get; private set; }
+
+    public DiscordVoiceJoinMode LoadVoiceJoinMode()
+    {
+        DiscordVoiceJoinMode defaultMode = LoadDefaultVoiceJoinMode();
+        return voiceJoinModeStateStore.Load(defaultMode);
+    }
 
     public async Task StartPresenceAsync()
     {
@@ -274,8 +286,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ConfigureScreenshotCommandState(settings);
             ConfigureStreamCommandState(settings);
             ConfigureProcessAudioCommandState(settings);
+            ConfigureVoiceJoinModeCommandState(settings);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureValorantAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
+            await EnsureVoiceJoinModeCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -348,6 +362,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"StreamValorantAudio: {settings.StreamValorantAudioWhenRunning}. " +
             $"ValorantAudioProcesses: {string.Join(",", settings.ValorantAudioProcessNames)}. " +
             $"ValorantAudioCommand: {settings.ValorantAudioCommandEnabled}. " +
+            $"VoiceJoinMode: {DiscordVoiceJoinModeNames.ToValue(LoadVoiceJoinMode())}. " +
+            $"VoiceJoinModeCommand: {settings.VoiceJoinModeCommandEnabled}. " +
             $"Transcription: {settings.TranscriptionEnabled}. " +
             $"TranscriptionEngine: {settings.TranscriptionEngine}. " +
             $"TranscriptionChunkSeconds: {settings.TranscriptionChunkSeconds}.");
@@ -388,6 +404,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             EnsureVoiceChannelPermissions(guild, voiceChannel);
             await EnsureDiscordAudioCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureValorantAudioCommandAsync(guild, settings).ConfigureAwait(false);
+            await EnsureVoiceJoinModeCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
@@ -535,6 +552,19 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             statusText = $"Discord config failed: {exception.Message}";
             WriteLog("Discord settings failed to load.", exception);
             return null;
+        }
+    }
+
+    private DiscordVoiceJoinMode LoadDefaultVoiceJoinMode()
+    {
+        try
+        {
+            DiscordBotSettings? settings = settingsStore.Load(out _);
+            return settings?.GetVoiceJoinMode() ?? DiscordVoiceJoinMode.ActivityOnly;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return DiscordVoiceJoinMode.ActivityOnly;
         }
     }
 
@@ -1182,6 +1212,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
+        if (string.Equals(command.Data.Name, VoiceJoinModeCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleVoiceJoinModeSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (!string.Equals(command.Data.Name, DiscordAudioCommandName, StringComparison.OrdinalIgnoreCase))
         {
             return;
@@ -1331,6 +1367,118 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private async Task HandleVoiceJoinModeSlashCommandAsync(SocketSlashCommand command)
+    {
+        bool deferred = false;
+        try
+        {
+            if (!voiceJoinModeCommandEnabled)
+            {
+                await command
+                    .RespondAsync("VALOWATCHのVC参加モード切替コマンドは無効です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHのVC参加モードを切り替えるにはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+            if (settings is null)
+            {
+                await command
+                    .RespondAsync($"VALOWATCH設定が使えません: {statusText}", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
+            {
+                await command
+                    .RespondAsync("このサーバーではVALOWATCHのVC参加モードを操作できません。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            object? optionValue = command.Data.Options
+                .FirstOrDefault(option => string.Equals(
+                    option.Name,
+                    VoiceJoinModeOptionName,
+                    StringComparison.OrdinalIgnoreCase))
+                ?.Value;
+            if (optionValue is not string requestedModeText ||
+                !DiscordVoiceJoinModeNames.TryParse(requestedModeText, out DiscordVoiceJoinMode requestedMode))
+            {
+                await command
+                    .RespondAsync("mode に activity または always を指定してください。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
+            DiscordVoiceJoinMode previousMode = LoadVoiceJoinMode();
+            voiceJoinModeStateStore.Save(requestedMode);
+            string modeValue = DiscordVoiceJoinModeNames.ToValue(requestedMode);
+            string modeDisplayText = DiscordVoiceJoinModeNames.ToDisplayText(requestedMode);
+            WriteLog(
+                "Voice join mode changed by slash command. " +
+                $"Previous: {DiscordVoiceJoinModeNames.ToValue(previousMode)}. " +
+                $"Current: {modeValue}. User: {command.User.Id}.");
+
+            if (requestedMode == DiscordVoiceJoinMode.AlwaysWhilePcOpen)
+            {
+                await StartForVoiceActivityAsync(valorantDetected: false, lineDetected: false)
+                    .ConfigureAwait(false);
+            }
+            else if (!ValorantProcessMonitor.IsValorantRunning() && !LineProcessMonitor.IsLineRunning())
+            {
+                await StopForValorantAsync().ConfigureAwait(false);
+            }
+
+            await command
+                .FollowupAsync($"VALOWATCH VC参加モード: {modeDisplayText}", ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or HttpRequestException or TaskCanceledException or Discord.Net.HttpException or IOException or UnauthorizedAccessException)
+        {
+            WriteLog("Voice join mode slash command handling failed.", exception);
+            try
+            {
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync("VALOWATCHのVC参加モード切替に失敗しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync("VALOWATCHのVC参加モード切替に失敗しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Voice join mode slash command error response failed.", responseException);
+            }
+        }
+    }
+
     private async Task HandleStartSlashCommandAsync(SocketSlashCommand command)
     {
         bool deferred = false;
@@ -1359,13 +1507,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
             {
                 await command
-                    .RespondAsync("このサーバーではVALOWATCHを起動できません。", ephemeral: true)
+                    .FollowupAsync("このサーバーではVALOWATCHを起動できません。", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
-
-            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-            deferred = true;
 
             await StartForVoiceActivityAsync(valorantDetected: false, lineDetected: true)
                 .ConfigureAwait(false);
@@ -3248,6 +3393,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         bool discordAudioCommandEnabledSnapshot;
         bool valorantAudioRuntimeEnabledSnapshot;
         bool valorantAudioCommandEnabledSnapshot;
+        bool voiceJoinModeCommandEnabledSnapshot;
         bool streamRestartInProgressSnapshot;
         ulong monitoredDiscordUserId;
         string statusText;
@@ -3266,6 +3412,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             discordAudioCommandEnabledSnapshot = discordAudioCommandEnabled;
             valorantAudioRuntimeEnabledSnapshot = valorantProcessAudioRuntimeEnabled;
             valorantAudioCommandEnabledSnapshot = valorantAudioCommandEnabled;
+            voiceJoinModeCommandEnabledSnapshot = voiceJoinModeCommandEnabled;
             streamRestartInProgressSnapshot = screenStreamRestartInProgress;
             monitoredDiscordUserId = currentMonitoredDiscordUserId;
             statusText = StatusText;
@@ -3286,13 +3433,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             discordConversationChannelName,
             monitoredDiscordUserId);
         string streamText = BuildDebugStreamText(session, streamRestartInProgressSnapshot);
+        DiscordVoiceJoinMode voiceJoinMode = voiceJoinModeStateStore.Load(settings.GetVoiceJoinMode());
         string commandText =
             $"screenshot: {(screenshotEnabled ? "on" : "off")}{Environment.NewLine}" +
             $"stream: {(streamEnabled ? "on" : "off")}{Environment.NewLine}" +
             $"discord-audio-command: {(discordAudioCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
             $"discord-audio-runtime: {(discordAudioRuntimeEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
             $"valorant-audio-command: {(valorantAudioCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
-            $"valorant-audio-runtime: {(valorantAudioRuntimeEnabledSnapshot ? "on" : "off")}";
+            $"valorant-audio-runtime: {(valorantAudioRuntimeEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
+            $"voice-mode-command: {(voiceJoinModeCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
+            $"voice-mode: {DiscordVoiceJoinModeNames.ToValue(voiceJoinMode)}";
 
         EmbedBuilder embedBuilder = new()
         {
@@ -3473,6 +3623,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             "/valowatch-debug update download:false - check GitHub update status without launching installer" + Environment.NewLine +
             "/valowatch-valorant-audio enabled:true - mix VALORANT audio into the bot VC" + Environment.NewLine +
             "/valowatch-valorant-audio enabled:false - stop VALORANT audio mixing" + Environment.NewLine +
+            "/valowatch-voice-mode mode:activity - join VC only during VALORANT/LINE activity" + Environment.NewLine +
+            "/valowatch-voice-mode mode:always - keep VC joined while the PC app is running" + Environment.NewLine +
             "/stream status - show current stream state" + Environment.NewLine +
             "/stream debug - check public URL, tunnel, and Smooth Live state" + Environment.NewLine +
             "/stream link - send the current URL again without rebuilding" + Environment.NewLine +
@@ -4029,6 +4181,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         ConfigureProcessAudioCommandState(settings);
         ConfigureScreenshotCommandState(settings);
         ConfigureStreamCommandState(settings);
+        ConfigureVoiceJoinModeCommandState(settings);
 
         WriteLog(
             "Discord conversation state configured. " +
@@ -4038,6 +4191,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"DiscordAudioVolume: {currentDiscordAudioVolume:0.00}. " +
             $"ValorantAudioDefault: {valorantProcessAudioRuntimeEnabled}. " +
             $"ValorantAudioVolume: {currentValorantAudioVolume:0.00}. " +
+            $"VoiceJoinMode: {DiscordVoiceJoinModeNames.ToValue(LoadVoiceJoinMode())}. " +
+            $"VoiceJoinModeCommand: {voiceJoinModeCommandEnabled}. " +
             $"ScreenshotCommand: {screenshotCommandEnabled}. " +
             $"StreamCommand: {streamCommandEnabled}.");
     }
@@ -4061,6 +4216,20 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         WriteLog($"Stream slash command state configured. Enabled: {settings.StreamCommandEnabled}.");
+    }
+
+    private void ConfigureVoiceJoinModeCommandState(DiscordBotSettings settings)
+    {
+        DiscordVoiceJoinMode mode = LoadVoiceJoinMode();
+        lock (stateLock)
+        {
+            voiceJoinModeCommandEnabled = settings.VoiceJoinModeCommandEnabled;
+        }
+
+        WriteLog(
+            "Voice join mode command state configured. " +
+            $"Mode: {DiscordVoiceJoinModeNames.ToValue(mode)}. " +
+            $"Command: {settings.VoiceJoinModeCommandEnabled}.");
     }
 
     private void ConfigureProcessAudioCommandState(DiscordBotSettings settings)
@@ -4199,6 +4368,65 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 ApplicationCommandOptionType.Boolean,
                 "trueでON、falseでOFF",
                 isRequired: true);
+    }
+
+    private async Task EnsureVoiceJoinModeCommandAsync(SocketGuild guild, DiscordBotSettings settings)
+    {
+        if (!settings.VoiceJoinModeCommandEnabled)
+        {
+            WriteLog("Voice join mode slash command registration is disabled.");
+            return;
+        }
+
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, VoiceJoinModeCommandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
+            {
+                if (string.Equals(existingCommand.Description, VoiceJoinModeCommandDescription, StringComparison.Ordinal))
+                {
+                    WriteLog($"Voice join mode slash command already exists: /{VoiceJoinModeCommandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Voice join mode slash command replaced: /{VoiceJoinModeCommandName}.");
+            }
+
+            SlashCommandBuilder commandBuilder = BuildVoiceJoinModeSlashCommandBuilder();
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Voice join mode slash command registered: /{VoiceJoinModeCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Voice join mode slash command could not be registered. " +
+                "Existing voice automation will still run; command control may be unavailable until the next startup.",
+                exception);
+        }
+    }
+
+    internal static SlashCommandBuilder BuildVoiceJoinModeSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(VoiceJoinModeCommandName)
+            .WithDescription(VoiceJoinModeCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(VoiceJoinModeOptionName)
+                    .WithDescription("activity=VALORANT/LINE中だけ、always=PC起動中ずっと")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true)
+                    .AddChoice(DiscordVoiceJoinModeNames.ActivityOnlyValue, DiscordVoiceJoinModeNames.ActivityOnlyValue)
+                    .AddChoice(DiscordVoiceJoinModeNames.AlwaysWhilePcOpenValue, DiscordVoiceJoinModeNames.AlwaysWhilePcOpenValue));
     }
 
     private async Task EnsureStartCommandAsync(SocketGuild guild)

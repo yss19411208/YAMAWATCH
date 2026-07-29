@@ -14,6 +14,7 @@ public sealed class AppPaths
         PendingInstallerReportPath = Path.Combine(dataDirectory, "logs", "installer-result.pending.log");
         RuntimeLogCursorPath = Path.Combine(dataDirectory, "logs", "runtime-log-cursors.json");
         ScreenshotCommandStatePath = Path.Combine(dataDirectory, "state", "screenshot-command-enabled.txt");
+        DiscordVoiceJoinModeStatePath = Path.Combine(dataDirectory, "state", "discord-voice-join-mode.txt");
         ScreenshotTempDirectory = Path.Combine(dataDirectory, "temp-screenshots");
         ToolDirectory = Path.Combine(dataDirectory, "tools");
         CloudflaredPath = Path.Combine(ToolDirectory, "cloudflared.exe");
@@ -37,6 +38,8 @@ public sealed class AppPaths
     public string RuntimeLogCursorPath { get; }
 
     public string ScreenshotCommandStatePath { get; }
+
+    public string DiscordVoiceJoinModeStatePath { get; }
 
     public string ScreenshotTempDirectory { get; }
 

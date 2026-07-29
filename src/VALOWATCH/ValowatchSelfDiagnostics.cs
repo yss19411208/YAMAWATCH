@@ -85,6 +85,7 @@ internal static class ValowatchSelfDiagnostics
             new("LINE音声取得", appExecutablePath, AppContext.BaseDirectory, ["--check-line-loopback"]),
             new("Discord音声ミックス", appExecutablePath, AppContext.BaseDirectory, ["--check-discord-audio-mix"]),
             new("VALORANT音声コマンド", appExecutablePath, AppContext.BaseDirectory, ["--check-valorant-audio-command"]),
+            new("VC参加モードコマンド", appExecutablePath, AppContext.BaseDirectory, ["--check-voice-join-mode-command"]),
             new("文字起こし", appExecutablePath, AppContext.BaseDirectory, ["--check-transcription-local"]),
             new("タスクバーアプリ", appExecutablePath, AppContext.BaseDirectory, ["--check-running-app-snapshot"]),
             new("実行中プログラム", appExecutablePath, AppContext.BaseDirectory, ["--check-running-process-snapshot"]),

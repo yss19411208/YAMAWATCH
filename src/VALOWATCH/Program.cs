@@ -193,6 +193,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-voice-join-mode-command", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunVoiceJoinModeCommandDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-screenshot-capture", StringComparison.OrdinalIgnoreCase)))
         {
             RunScreenshotCaptureDiagnostic();
@@ -586,7 +592,8 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Debug slash command check: " +
                 $"{(ready ? "ready" : "failed")}. Subcommands: status,audio,logs,diagnostics,update,help. " +
-                "DiagnosticsOptions: download. UpdateOptions: download. RelatedCommands: /valowatch-valorant-audio.");
+                "DiagnosticsOptions: download. UpdateOptions: download. " +
+                "RelatedCommands: /valowatch-valorant-audio,/valowatch-voice-mode.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
@@ -617,6 +624,68 @@ static class Program
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
         {
             TryWriteDiagnosticFailure(logFilePath, "VALORANT audio slash command check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void RunVoiceJoinModeCommandDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            object builtCommand = DiscordBotVoiceRelay
+                .BuildVoiceJoinModeSlashCommandBuilder()
+                .Build();
+            bool commandReady = builtCommand is not null;
+            bool activityValorantOnlyKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: true,
+                lineDetected: false,
+                DiscordVoiceJoinMode.ActivityOnly);
+            bool activityLineOnlyKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: false,
+                lineDetected: true,
+                DiscordVoiceJoinMode.ActivityOnly);
+            bool activityBothClosedStopsVoice = !MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: false,
+                lineDetected: false,
+                DiscordVoiceJoinMode.ActivityOnly);
+            bool alwaysBothClosedKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: false,
+                lineDetected: false,
+                DiscordVoiceJoinMode.AlwaysWhilePcOpen);
+            bool parserAcceptsActivity = DiscordVoiceJoinModeNames.TryParse(
+                DiscordVoiceJoinModeNames.ActivityOnlyValue,
+                out DiscordVoiceJoinMode parsedActivityMode) &&
+                parsedActivityMode == DiscordVoiceJoinMode.ActivityOnly;
+            bool parserAcceptsAlways = DiscordVoiceJoinModeNames.TryParse(
+                DiscordVoiceJoinModeNames.AlwaysWhilePcOpenValue,
+                out DiscordVoiceJoinMode parsedAlwaysMode) &&
+                parsedAlwaysMode == DiscordVoiceJoinMode.AlwaysWhilePcOpen;
+            bool ready = commandReady &&
+                activityValorantOnlyKeepsVoice &&
+                activityLineOnlyKeepsVoice &&
+                activityBothClosedStopsVoice &&
+                alwaysBothClosedKeepsVoice &&
+                parserAcceptsActivity &&
+                parserAcceptsAlways;
+
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Voice join mode slash command check: " +
+                $"{(ready ? "ready" : "failed")}. Command: /valowatch-voice-mode. Options: mode. " +
+                $"ActivityValorantOnly: {activityValorantOnlyKeepsVoice}. " +
+                $"ActivityLineOnly: {activityLineOnlyKeepsVoice}. " +
+                $"ActivityBothClosedStops: {activityBothClosedStopsVoice}. " +
+                $"AlwaysBothClosedKeeps: {alwaysBothClosedKeepsVoice}. " +
+                $"ParserActivity: {parserAcceptsActivity}. ParserAlways: {parserAcceptsAlways}.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Voice join mode slash command check", exception);
             Environment.ExitCode = 1;
         }
     }
@@ -2848,20 +2917,29 @@ static class Program
         {
             bool valorantOnlyKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
                 valorantDetected: true,
-                lineDetected: false);
+                lineDetected: false,
+                DiscordVoiceJoinMode.ActivityOnly);
             bool lineOnlyKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
                 valorantDetected: false,
-                lineDetected: true);
+                lineDetected: true,
+                DiscordVoiceJoinMode.ActivityOnly);
             bool bothClosedStopsVoice = !MainForm.ShouldKeepDiscordVoiceRunning(
                 valorantDetected: false,
-                lineDetected: false);
+                lineDetected: false,
+                DiscordVoiceJoinMode.ActivityOnly);
             bool bothOpenKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
                 valorantDetected: true,
-                lineDetected: true);
+                lineDetected: true,
+                DiscordVoiceJoinMode.ActivityOnly);
+            bool alwaysModeKeepsVoice = MainForm.ShouldKeepDiscordVoiceRunning(
+                valorantDetected: false,
+                lineDetected: false,
+                DiscordVoiceJoinMode.AlwaysWhilePcOpen);
             bool ready = valorantOnlyKeepsVoice &&
                 lineOnlyKeepsVoice &&
                 bothClosedStopsVoice &&
-                bothOpenKeepsVoice;
+                bothOpenKeepsVoice &&
+                alwaysModeKeepsVoice;
 
             AppendDiagnosticLogLine(
                 logFilePath,
@@ -2870,7 +2948,8 @@ static class Program
                 $"ValorantOnly: {valorantOnlyKeepsVoice}. " +
                 $"LineOnly: {lineOnlyKeepsVoice}. " +
                 $"BothClosedStops: {bothClosedStopsVoice}. " +
-                $"BothOpen: {bothOpenKeepsVoice}.");
+                $"BothOpen: {bothOpenKeepsVoice}. " +
+                $"AlwaysModeKeeps: {alwaysModeKeepsVoice}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
