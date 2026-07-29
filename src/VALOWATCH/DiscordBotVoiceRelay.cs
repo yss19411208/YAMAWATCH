@@ -614,17 +614,65 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task<IAudioClient> ConnectVoiceChannelWithTimeoutAsync(SocketVoiceChannel voiceChannel)
     {
+        string connectionDiagnosticText = BuildVoiceConnectionDiagnosticText(voiceChannel);
+        WriteLog($"Discord voice connect starting. {connectionDiagnosticText}");
+
         Task<IAudioClient> connectTask = voiceChannel.ConnectAsync(selfDeaf: true, selfMute: false);
         Task timeoutTask = Task.Delay(DiscordVoiceConnectTimeout);
         Task completedTask = await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
         if (ReferenceEquals(completedTask, connectTask))
         {
-            return await connectTask.ConfigureAwait(false);
+            try
+            {
+                IAudioClient connectedAudioClient = await connectTask.ConfigureAwait(false);
+                WriteLog(
+                    "Discord voice connect completed. " +
+                    $"State: {connectedAudioClient.ConnectionState}. {connectionDiagnosticText}");
+                return connectedAudioClient;
+            }
+            catch (Exception exception)
+            {
+                WriteLog($"Discord voice connect task failed before timeout. {connectionDiagnosticText}", exception);
+                throw;
+            }
         }
 
         _ = CleanupLateVoiceConnectAsync(connectTask, voiceChannel.Id);
+        WriteLog(
+            "Discord voice connect timed out before Discord.Net returned an audio client. " +
+            connectionDiagnosticText);
         throw new TimeoutException(
-            $"Discord voice channel connect did not complete within {DiscordVoiceConnectTimeout.TotalSeconds:0} seconds.");
+            "Discord voice channel connect did not complete within " +
+            $"{DiscordVoiceConnectTimeout.TotalSeconds:0} seconds. {connectionDiagnosticText}");
+    }
+
+    private static string BuildVoiceConnectionDiagnosticText(SocketVoiceChannel voiceChannel)
+    {
+        try
+        {
+            SocketGuild guild = voiceChannel.Guild;
+            SocketGuildUser currentUser = guild.CurrentUser;
+            ChannelPermissions permissions = currentUser.GetPermissions(voiceChannel);
+            string botVoiceChannelText = TryFindVoiceChannelForUser(
+                guild,
+                currentUser.Id,
+                out SocketVoiceChannel? currentBotVoiceChannel)
+                ? $"{NormalizeDiscordDisplayName(currentBotVoiceChannel?.Name ?? string.Empty, "unknown")} ({currentBotVoiceChannel?.Id})"
+                : "none";
+            int channelUserCount = voiceChannel.Users.Count;
+
+            return
+                $"Guild: {NormalizeDiscordDisplayName(guild.Name, "unknown")} ({guild.Id}). " +
+                $"Voice: {NormalizeDiscordDisplayName(voiceChannel.Name, "unknown")} ({voiceChannel.Id}). " +
+                $"Connect: {permissions.Connect}. Speak: {permissions.Speak}. " +
+                $"BotVoice: {botVoiceChannelText}. ChannelUsers: {channelUserCount}.";
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or NullReferenceException)
+        {
+            return
+                $"Voice: {voiceChannel.Id}. " +
+                $"DiagnosticUnavailable: {RuntimeLogMessageCollector.SanitizeLine(exception.Message)}.";
+        }
     }
 
     private async Task CleanupLateVoiceConnectAsync(Task<IAudioClient> connectTask, ulong voiceChannelId)
