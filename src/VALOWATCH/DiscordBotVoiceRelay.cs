@@ -59,6 +59,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
     private const string SelfDiagnosticsDownloadOptionName = "download";
+    private const string DebugCommandName = "valowatch-debug";
+    private const string DebugSubcommandStatusName = "status";
+    private const string DebugSubcommandLogsName = "logs";
+    private const string DebugSubcommandDiagnosticsName = "diagnostics";
+    private const string DebugSubcommandAudioName = "audio";
+    private const string DebugSubcommandUpdateName = "update";
+    private const string DebugSubcommandHelpName = "help";
+    private const string DebugDownloadOptionName = "download";
+    private const string DebugCommandDescription = "VALOWATCH debug tools v1";
     private const string ScreenshotCommandName = "screenshot";
     private const string ScreenshotSubcommandOnName = "on";
     private const string ScreenshotSubcommandOffName = "off";
@@ -68,13 +77,18 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StreamSubcommandOffName = "off";
     private const string StreamSubcommandStatusName = "status";
     private const string StreamSubcommandCamerasName = "cameras";
+    private const string StreamSubcommandLinkName = "link";
+    private const string StreamSubcommandRestartName = "restart";
+    private const string StreamSubcommandPresetName = "preset";
+    private const string StreamSubcommandDebugName = "debug";
     private const string StreamTargetOptionName = "target";
     private const string StreamMethodOptionName = "method";
     private const string StreamFramesPerSecondOptionName = "fps";
     private const string StreamQualityOptionName = "quality";
     private const string StreamWidthOptionName = "width";
     private const string StreamCameraOverlayOptionName = "camera";
-    private const string StreamCommandDescription = "VALOWATCH stream controls v7";
+    private const string StreamPresetOptionName = "preset";
+    private const string StreamCommandDescription = "VALOWATCH stream controls v8";
 
     internal static WaveFormat DiscordPcmWaveFormat => DiscordPcmFormat;
 
@@ -255,6 +269,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureDebugCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureScreenshotCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureStreamCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await SendObservedDiscordVoiceContextIfNeededAsync(gatewayContext.Client).ConfigureAwait(false);
@@ -362,6 +377,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStartCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
+            await EnsureDebugCommandAsync(guild).ConfigureAwait(false);
             await EnsureScreenshotCommandAsync(guild).ConfigureAwait(false);
             await EnsureStreamCommandAsync(guild, settings).ConfigureAwait(false);
 
@@ -1080,6 +1096,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
+        if (string.Equals(command.Data.Name, DebugCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleDebugSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (string.Equals(command.Data.Name, ScreenshotCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleScreenshotSlashCommandAsync(command).ConfigureAwait(false);
@@ -1373,6 +1395,140 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
             {
                 WriteLog("Self diagnostics slash command error response failed.", responseException);
+            }
+        }
+    }
+
+    private async Task HandleDebugSlashCommandAsync(SocketSlashCommand command)
+    {
+        bool deferred = false;
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("This command can only be used inside the configured Discord server.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCH debug commands require server management permission.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            DiscordBotSettings? settings = LoadUsableSettings(out string statusText);
+            if (settings is null)
+            {
+                await command
+                    .RespondAsync($"VALOWATCH settings are not usable: {statusText}", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (settings.GuildId != 0 && guildUser.Guild.Id != settings.GuildId)
+            {
+                await command
+                    .RespondAsync("This server is not configured for VALOWATCH debug commands.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            string actionName = command.Data.Options.FirstOrDefault()?.Name ?? DebugSubcommandHelpName;
+            await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+            deferred = true;
+
+            if (string.Equals(actionName, DebugSubcommandStatusName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command
+                    .FollowupAsync(embed: BuildDebugStatusEmbed(settings), ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, DebugSubcommandAudioName, StringComparison.OrdinalIgnoreCase))
+            {
+                await command
+                    .FollowupAsync(embed: BuildDebugAudioEmbed(settings), ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, DebugSubcommandLogsName, StringComparison.OrdinalIgnoreCase))
+            {
+                await SendRuntimeLogUpdatesAsync().ConfigureAwait(false);
+                await command
+                    .FollowupAsync("Runtime logs and the current app snapshot were requested. New entries are posted to the configured log channel.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, DebugSubcommandDiagnosticsName, StringComparison.OrdinalIgnoreCase))
+            {
+                SocketSlashCommandDataOption? diagnosticsOption = command.Data.Options.FirstOrDefault(option =>
+                    string.Equals(option.Name, DebugSubcommandDiagnosticsName, StringComparison.OrdinalIgnoreCase));
+                bool includeUpdateDownload = ReadBooleanSubcommandOption(
+                    diagnosticsOption,
+                    DebugDownloadOptionName,
+                    defaultValue: false);
+                using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(includeUpdateDownload ? 8 : 5));
+                IReadOnlyList<Embed> embeds = await ValowatchSelfDiagnostics
+                    .BuildDiscordEmbedsAsync(appPaths, includeUpdateDownload, timeout.Token)
+                    .ConfigureAwait(false);
+
+                foreach (Embed embed in embeds)
+                {
+                    await command.FollowupAsync(embed: embed, ephemeral: true).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), CancellationToken.None).ConfigureAwait(false);
+                }
+
+                return;
+            }
+
+            if (string.Equals(actionName, DebugSubcommandUpdateName, StringComparison.OrdinalIgnoreCase))
+            {
+                SocketSlashCommandDataOption? updateOption = command.Data.Options.FirstOrDefault(option =>
+                    string.Equals(option.Name, DebugSubcommandUpdateName, StringComparison.OrdinalIgnoreCase));
+                bool validateDownload = ReadBooleanSubcommandOption(
+                    updateOption,
+                    DebugDownloadOptionName,
+                    defaultValue: false);
+                using CancellationTokenSource timeout = new(TimeSpan.FromMinutes(validateDownload ? 5 : 1));
+                Embed updateEmbed = await BuildDebugUpdateEmbedAsync(validateDownload, timeout.Token).ConfigureAwait(false);
+                await command
+                    .FollowupAsync(embed: updateEmbed, ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command
+                .FollowupAsync(embed: BuildDebugHelpEmbed(), ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is OperationCanceledException or InvalidOperationException or IOException or UnauthorizedAccessException or HttpRequestException or TaskCanceledException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("Debug slash command handling failed.", exception);
+            try
+            {
+                if (deferred)
+                {
+                    await command
+                        .FollowupAsync($"VALOWATCH debug command failed: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync($"VALOWATCH debug command failed: {exception.Message}", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("Debug slash command error response failed.", responseException);
             }
         }
     }
@@ -1690,11 +1846,87 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            if (string.Equals(actionName, StreamSubcommandDebugName, StringComparison.OrdinalIgnoreCase))
+            {
+                using CancellationTokenSource streamDebugTimeout = new(ScreenStreamHealthRequestTimeout + TimeSpan.FromSeconds(2));
+                Embed streamDebugEmbed = await BuildStreamDebugEmbedAsync(streamDebugTimeout.Token).ConfigureAwait(false);
+                await command
+                    .FollowupAsync(embed: streamDebugEmbed, ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             IMessageChannel? targetChannel = ResolveStreamTargetChannel(command);
             if (targetChannel is null)
             {
                 await command
                     .FollowupAsync("Stream target channel is unavailable.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, StreamSubcommandLinkName, StringComparison.OrdinalIgnoreCase))
+            {
+                ScreenStreamSession? activeSession = GetActiveScreenStreamSession();
+                if (activeSession is null)
+                {
+                    await command
+                        .FollowupAsync("No active stream. Use /stream on or /stream preset first.", ephemeral: true)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                await targetChannel
+                    .SendMessageAsync(embed: BuildStreamLinkEmbed(activeSession))
+                    .ConfigureAwait(false);
+                await command
+                    .FollowupAsync("Current stream link was sent without restarting the stream.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, StreamSubcommandRestartName, StringComparison.OrdinalIgnoreCase))
+            {
+                ScreenStreamSession? activeSession = GetActiveScreenStreamSession();
+                if (activeSession is null)
+                {
+                    await command
+                        .FollowupAsync("No active stream to restart. Use /stream on or /stream preset first.", ephemeral: true)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                ScreenStreamOptions currentStreamOptions = activeSession.Options;
+                await targetChannel
+                    .SendMessageAsync(embed: BuildStatusNotificationEmbed(
+                        "Stream restart requested: " +
+                        $"{ScreenCaptureTargetNames.ToOptionValue(currentStreamOptions.Target)} / " +
+                        $"{currentStreamOptions.FramesPerSecond}fps / " +
+                        $"{ScreenStreamMethodNames.ToOptionValue(currentStreamOptions.Method)} / " +
+                        $"camera:{(currentStreamOptions.CameraOverlayEnabled ? "on" : "off")}"))
+                    .ConfigureAwait(false);
+                StartScreenStreamCommandInBackground(currentStreamOptions, targetChannel);
+                await command
+                    .FollowupAsync("Stream restart was queued with the current settings.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(actionName, StreamSubcommandPresetName, StringComparison.OrdinalIgnoreCase))
+            {
+                ScreenStreamOptions presetStreamOptions = ParseStreamPresetOptions(command, settings, out string presetName);
+                await targetChannel
+                    .SendMessageAsync(embed: BuildStatusNotificationEmbed(
+                        $"Stream preset start queued: {presetName} / " +
+                        $"{ScreenCaptureTargetNames.ToOptionValue(presetStreamOptions.Target)} / " +
+                        $"{presetStreamOptions.FramesPerSecond}fps / " +
+                        $"{ScreenStreamMethodNames.ToOptionValue(presetStreamOptions.Method)} / " +
+                        $"quality:{presetStreamOptions.JpegQuality} / width:{presetStreamOptions.MaxWidth} / " +
+                        $"camera:{(presetStreamOptions.CameraOverlayEnabled ? "on" : "off")}"))
+                    .ConfigureAwait(false);
+                StartScreenStreamCommandInBackground(presetStreamOptions, targetChannel);
+                await command
+                    .FollowupAsync("Stream preset start was queued.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1712,7 +1944,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             if (!string.Equals(actionName, StreamSubcommandOnName, StringComparison.OrdinalIgnoreCase))
             {
                 await command
-                    .FollowupAsync("Use /stream on, /stream off, /stream status, or /stream cameras.", ephemeral: true)
+                    .FollowupAsync("Use /stream on, /stream off, /stream status, /stream cameras, /stream link, /stream restart, /stream preset, or /stream debug.", ephemeral: true)
                     .ConfigureAwait(false);
                 return;
             }
@@ -1813,6 +2045,167 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             method,
             cameraOverlayEnabled,
             settings.StreamCameraDeviceName);
+    }
+
+    private ScreenStreamOptions ParseStreamPresetOptions(
+        SocketSlashCommand command,
+        DiscordBotSettings settings,
+        out string presetName)
+    {
+        SocketSlashCommandDataOption? presetOption = command.Data.Options.FirstOrDefault(option =>
+            string.Equals(option.Name, StreamSubcommandPresetName, StringComparison.OrdinalIgnoreCase));
+        string requestedPresetName = presetOption?.Options.FirstOrDefault(option =>
+            string.Equals(option.Name, StreamPresetOptionName, StringComparison.OrdinalIgnoreCase))?.Value?.ToString() ?? "stable";
+        return BuildStreamPresetOptions(requestedPresetName, settings, out presetName);
+    }
+
+    private static ScreenStreamOptions BuildStreamPresetOptions(
+        string requestedPresetName,
+        DiscordBotSettings settings,
+        out string presetName)
+    {
+        string normalizedPresetName = requestedPresetName.Trim().ToLowerInvariant();
+        bool defaultCameraEnabled = settings.StreamDefaultCameraOverlayEnabled;
+        string cameraDeviceName = settings.StreamCameraDeviceName;
+        switch (normalizedPresetName)
+        {
+            case "low-bandwidth":
+            case "low":
+                presetName = "low-bandwidth";
+                return ScreenStreamOptions.Create(
+                    ScreenCaptureTarget.FullScreen,
+                    framesPerSecond: 30,
+                    jpegQuality: 72,
+                    maxWidth: 960,
+                    method: ScreenStreamMethod.H264Fmp4,
+                    cameraOverlayEnabled: false,
+                    cameraDeviceName);
+
+            case "smooth":
+                presetName = "smooth";
+                return ScreenStreamOptions.Create(
+                    ScreenCaptureTarget.FullScreen,
+                    framesPerSecond: 60,
+                    jpegQuality: 88,
+                    maxWidth: 1280,
+                    method: ScreenStreamMethod.H264Fmp4,
+                    cameraOverlayEnabled: defaultCameraEnabled,
+                    cameraDeviceName);
+
+            case "source":
+            case "quality":
+                presetName = "source";
+                return ScreenStreamOptions.Create(
+                    ScreenCaptureTarget.FullScreen,
+                    framesPerSecond: 60,
+                    jpegQuality: 90,
+                    maxWidth: 1920,
+                    method: ScreenStreamMethod.H264Fmp4,
+                    cameraOverlayEnabled: defaultCameraEnabled,
+                    cameraDeviceName);
+
+            case "valorant":
+            case "valo":
+                presetName = "valorant";
+                return ScreenStreamOptions.Create(
+                    ScreenCaptureTarget.Valorant,
+                    framesPerSecond: 60,
+                    jpegQuality: 85,
+                    maxWidth: 1280,
+                    method: ScreenStreamMethod.H264Fmp4,
+                    cameraOverlayEnabled: defaultCameraEnabled,
+                    cameraDeviceName);
+
+            default:
+                presetName = "stable";
+                return ScreenStreamOptions.Create(
+                    ScreenCaptureTarget.FullScreen,
+                    framesPerSecond: 60,
+                    jpegQuality: 82,
+                    maxWidth: 1280,
+                    method: ScreenStreamMethod.H264Fmp4,
+                    cameraOverlayEnabled: defaultCameraEnabled,
+                    cameraDeviceName);
+        }
+    }
+
+    private ScreenStreamSession? GetActiveScreenStreamSession()
+    {
+        lock (stateLock)
+        {
+            return activeScreenStreamSession;
+        }
+    }
+
+    private async Task<Embed> BuildStreamDebugEmbedAsync(CancellationToken cancellationToken)
+    {
+        ScreenStreamSession? session = GetActiveScreenStreamSession();
+        if (session is null)
+        {
+            return new EmbedBuilder()
+            {
+                Title = "VALOWATCH Stream Debug",
+                Description = "Stream: inactive",
+                Color = new Discord.Color(139, 148, 158),
+                Timestamp = DateTimeOffset.Now
+            }.Build();
+        }
+
+        ScreenStreamHealthStatus healthStatus;
+        using (HttpClient httpClient = new()
+        {
+            Timeout = ScreenStreamHealthRequestTimeout
+        })
+        {
+            healthStatus = await session
+                .CheckPublicUrlHealthAsync(httpClient, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        session.UpdatePublicUrlHealth(healthStatus);
+        StringBuilder descriptionBuilder = new();
+        descriptionBuilder.AppendLine($"URL: {session.PublicUrl}");
+        descriptionBuilder.AppendLine($"Health: {(healthStatus.IsHealthy ? "OK" : "NG")}");
+        descriptionBuilder.AppendLine($"Detail: {SanitizeStreamHealthDetail(healthStatus.Detail)}");
+        descriptionBuilder.AppendLine($"Tunnel: {RuntimeLogMessageCollector.SanitizeLine(session.TunnelProcessStatusText)}");
+        descriptionBuilder.AppendLine($"Method: {ScreenStreamMethodNames.ToOptionValue(session.Method)}");
+        descriptionBuilder.AppendLine($"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}");
+        descriptionBuilder.AppendLine($"FPS: {session.FramesPerSecond}");
+        descriptionBuilder.AppendLine($"Quality: {session.JpegQuality}");
+        descriptionBuilder.AppendLine($"Width: {session.MaxWidth}");
+        descriptionBuilder.AppendLine($"Camera: {session.CameraOverlayStatusText}");
+        descriptionBuilder.AppendLine($"Engine: {session.EngineName}");
+        if (session.Method == ScreenStreamMethod.H264Fmp4)
+        {
+            descriptionBuilder.AppendLine($"SmoothLive: {RuntimeLogMessageCollector.SanitizeLine(session.SmoothLiveStatusText)}");
+        }
+
+        return new EmbedBuilder()
+        {
+            Title = "VALOWATCH Stream Debug",
+            Description = TrimEmbedDescription(descriptionBuilder.ToString()),
+            Color = healthStatus.IsHealthy ? new Discord.Color(63, 185, 80) : new Discord.Color(210, 153, 34),
+            Timestamp = DateTimeOffset.Now
+        }.Build();
+    }
+
+    private static Embed BuildStreamLinkEmbed(ScreenStreamSession session)
+    {
+        StringBuilder descriptionBuilder = new();
+        descriptionBuilder.AppendLine($"URL: {session.PublicUrl}");
+        descriptionBuilder.AppendLine($"Target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}");
+        descriptionBuilder.AppendLine($"Method: {ScreenStreamMethodNames.ToOptionValue(session.Method)}");
+        descriptionBuilder.AppendLine($"FPS: {session.FramesPerSecond}");
+        descriptionBuilder.AppendLine($"Width: {session.MaxWidth}");
+        descriptionBuilder.AppendLine($"Camera: {session.CameraOverlayStatusText}");
+        descriptionBuilder.AppendLine(BuildStreamPublicUrlStatusText(session));
+        return new EmbedBuilder()
+        {
+            Title = "VALOWATCH Stream Link",
+            Description = TrimEmbedDescription(descriptionBuilder.ToString()),
+            Color = new Discord.Color(88, 166, 255),
+            Timestamp = DateTimeOffset.Now
+        }.Build();
     }
 
     private static int ReadIntegerSubcommandOption(
@@ -2704,6 +3097,326 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         return embedBuilder.Build();
     }
 
+    private Embed BuildDebugStatusEmbed(DiscordBotSettings settings)
+    {
+        bool isOnline;
+        bool isRunning;
+        bool screenshotEnabled;
+        bool streamEnabled;
+        bool discordAudioRuntimeEnabledSnapshot;
+        bool discordAudioCommandEnabledSnapshot;
+        bool streamRestartInProgressSnapshot;
+        ulong monitoredDiscordUserId;
+        string statusText;
+        string voiceGuildName;
+        string voiceChannelName;
+        string discordConversationGuildName;
+        string discordConversationChannelName;
+        ScreenStreamSession? session;
+        lock (stateLock)
+        {
+            isOnline = IsOnline;
+            isRunning = IsRunning;
+            screenshotEnabled = screenshotCommandEnabled;
+            streamEnabled = streamCommandEnabled;
+            discordAudioRuntimeEnabledSnapshot = discordProcessAudioRuntimeEnabled;
+            discordAudioCommandEnabledSnapshot = discordAudioCommandEnabled;
+            streamRestartInProgressSnapshot = screenStreamRestartInProgress;
+            monitoredDiscordUserId = currentMonitoredDiscordUserId;
+            statusText = StatusText;
+            voiceGuildName = currentVoiceGuildName;
+            voiceChannelName = currentVoiceChannelName;
+            discordConversationGuildName = currentDiscordConversationGuildName;
+            discordConversationChannelName = currentDiscordConversationChannelName;
+            session = activeScreenStreamSession;
+        }
+
+        string processText = BuildCurrentProcessStatusText();
+        string voiceText = BuildDebugVoiceText(
+            isRunning,
+            isOnline,
+            voiceGuildName,
+            voiceChannelName,
+            discordConversationGuildName,
+            discordConversationChannelName,
+            monitoredDiscordUserId);
+        string streamText = BuildDebugStreamText(session, streamRestartInProgressSnapshot);
+        string commandText =
+            $"screenshot: {(screenshotEnabled ? "on" : "off")}{Environment.NewLine}" +
+            $"stream: {(streamEnabled ? "on" : "off")}{Environment.NewLine}" +
+            $"discord-audio-command: {(discordAudioCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
+            $"discord-audio-runtime: {(discordAudioRuntimeEnabledSnapshot ? "on" : "off")}";
+
+        EmbedBuilder embedBuilder = new()
+        {
+            Title = "VALOWATCH Debug Status",
+            Description =
+                $"Version: {GetCurrentVersionLabel()}{Environment.NewLine}" +
+                $"Status: {RuntimeLogMessageCollector.SanitizeLine(statusText)}{Environment.NewLine}" +
+                processText,
+            Color = isOnline || isRunning ? new Discord.Color(63, 185, 80) : new Discord.Color(210, 153, 34),
+            Timestamp = DateTimeOffset.Now
+        };
+        embedBuilder.AddField("Voice", voiceText, inline: false);
+        embedBuilder.AddField("Stream", streamText, inline: false);
+        embedBuilder.AddField("Commands", commandText, inline: true);
+        embedBuilder.AddField("Paths", BuildDebugPathsText(), inline: false);
+        embedBuilder.WithFooter("No token, env value, process path, or command line is shown.");
+        return embedBuilder.Build();
+    }
+
+    private Embed BuildDebugAudioEmbed(DiscordBotSettings settings)
+    {
+        long capturedCallbacksSnapshot;
+        long capturedBytesSnapshot;
+        long capturedAudibleCallbacksSnapshot;
+        long writtenFramesSnapshot;
+        long writtenAudibleFramesSnapshot;
+        long writtenSilenceFramesSnapshot;
+        long writtenShortFramesSnapshot;
+        float capturedPeakSnapshot;
+        float writtenPeakSnapshot;
+        DateTimeOffset lastMicrophoneCallbackAtSnapshot;
+        DateTimeOffset lastDiscordFrameWrittenAtSnapshot;
+        string microphoneNameSnapshot;
+        string captureDeviceListSnapshot;
+        string lineSourceSnapshot;
+        string discordSourceSnapshot;
+        bool discordAudioRuntimeEnabledSnapshot;
+        lock (audioStatsLock)
+        {
+            capturedCallbacksSnapshot = capturedCallbackCount;
+            capturedBytesSnapshot = capturedByteCount;
+            capturedAudibleCallbacksSnapshot = capturedAudibleCallbackCount;
+            writtenFramesSnapshot = writtenFrameCount;
+            writtenAudibleFramesSnapshot = writtenAudibleFrameCount;
+            writtenSilenceFramesSnapshot = writtenSilenceFrameCount;
+            writtenShortFramesSnapshot = writtenShortFrameCount;
+            capturedPeakSnapshot = capturedPeak;
+            writtenPeakSnapshot = writtenPeak;
+            lastMicrophoneCallbackAtSnapshot = lastMicrophoneCallbackAt;
+            lastDiscordFrameWrittenAtSnapshot = lastDiscordFrameWrittenAt;
+        }
+
+        LineProcessLoopbackWaveProvider? lineProviderSnapshot;
+        LineProcessLoopbackWaveProvider? discordProviderSnapshot;
+        lock (stateLock)
+        {
+            microphoneNameSnapshot = currentMicrophoneDeviceName;
+            captureDeviceListSnapshot = currentCaptureDeviceList;
+            lineSourceSnapshot = currentLineLoopbackSourceName;
+            discordSourceSnapshot = currentDiscordLoopbackSourceName;
+            discordAudioRuntimeEnabledSnapshot = discordProcessAudioRuntimeEnabled;
+            lineProviderSnapshot = lineProcessLoopbackProvider;
+            discordProviderSnapshot = discordProcessLoopbackProvider;
+        }
+
+        string selectedMicrophone = string.IsNullOrWhiteSpace(microphoneNameSnapshot)
+            ? (string.IsNullOrWhiteSpace(settings.MicrophoneDeviceName) ? "(auto)" : settings.MicrophoneDeviceName)
+            : microphoneNameSnapshot;
+        string lineStats = lineProviderSnapshot?.GetStatusSummary() ?? "LINELoopbackCapturing: False.";
+        string discordStats = discordProviderSnapshot?.GetStatusSummary() ?? "DiscordLoopbackCapturing: False.";
+
+        StringBuilder descriptionBuilder = new();
+        descriptionBuilder.AppendLine($"Mic: {SanitizeCameraDeviceText(selectedMicrophone)}");
+        descriptionBuilder.AppendLine($"Mic candidates: {TrimOneLine(captureDeviceListSnapshot, 900)}");
+        descriptionBuilder.AppendLine($"Mic enabled: {settings.StreamMicrophoneAudio}");
+        descriptionBuilder.AppendLine($"Mic volume: {settings.MicrophoneVolume.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"Mic noise gate: {settings.MicrophoneNoiseGate.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"Captured callbacks: {capturedCallbacksSnapshot}");
+        descriptionBuilder.AppendLine($"Captured audible callbacks: {capturedAudibleCallbacksSnapshot}");
+        descriptionBuilder.AppendLine($"Captured bytes: {capturedBytesSnapshot}");
+        descriptionBuilder.AppendLine($"Captured peak: {capturedPeakSnapshot.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"Written frames: {writtenFramesSnapshot}");
+        descriptionBuilder.AppendLine($"Written audible frames: {writtenAudibleFramesSnapshot}");
+        descriptionBuilder.AppendLine($"Written silence frames: {writtenSilenceFramesSnapshot}");
+        descriptionBuilder.AppendLine($"Written short frames: {writtenShortFramesSnapshot}");
+        descriptionBuilder.AppendLine($"Written peak: {writtenPeakSnapshot.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"Last mic callback: {FormatDebugLocalTime(lastMicrophoneCallbackAtSnapshot)}");
+        descriptionBuilder.AppendLine($"Last Discord frame: {FormatDebugLocalTime(lastDiscordFrameWrittenAtSnapshot)}");
+        descriptionBuilder.AppendLine($"LINE source: {TrimOneLine(lineSourceSnapshot, 500)}");
+        descriptionBuilder.AppendLine($"LINE volume: {settings.LineAudioVolume.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"LINE stats: {TrimOneLine(lineStats, 900)}");
+        descriptionBuilder.AppendLine($"Discord mix runtime: {discordAudioRuntimeEnabledSnapshot}");
+        descriptionBuilder.AppendLine($"Discord mix source: {TrimOneLine(discordSourceSnapshot, 500)}");
+        descriptionBuilder.AppendLine($"Discord mix volume: {currentDiscordAudioVolume.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"Discord mix stats: {TrimOneLine(discordStats, 900)}");
+
+        return new EmbedBuilder()
+        {
+            Title = "VALOWATCH Debug Audio",
+            Description = TrimEmbedDescription(descriptionBuilder.ToString()),
+            Color = capturedPeakSnapshot > 0 || writtenPeakSnapshot > 0
+                ? new Discord.Color(63, 185, 80)
+                : new Discord.Color(210, 153, 34),
+            Timestamp = DateTimeOffset.Now
+        }.Build();
+    }
+
+    private async Task<Embed> BuildDebugUpdateEmbedAsync(
+        bool validateDownload,
+        CancellationToken cancellationToken)
+    {
+        GitUpdateSettingsStore gitUpdateSettingsStore = new(appPaths);
+        GitUpdateCheckResult updateResult = await new GitUpdateChecker(gitUpdateSettingsStore)
+            .CheckLatestReleaseAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        StringBuilder descriptionBuilder = new();
+        descriptionBuilder.AppendLine($"Status: {updateResult.Status}");
+        descriptionBuilder.AppendLine($"Current: {RuntimeLogMessageCollector.SanitizeLine(updateResult.CurrentVersion)}");
+        descriptionBuilder.AppendLine($"Latest: {RuntimeLogMessageCollector.SanitizeLine(updateResult.LatestVersion)}");
+        descriptionBuilder.AppendLine($"Has update: {updateResult.HasUpdate}");
+        descriptionBuilder.AppendLine($"Message: {RuntimeLogMessageCollector.SanitizeLine(updateResult.Message)}");
+        descriptionBuilder.AppendLine($"Release URL: {updateResult.ReleaseUri?.ToString() ?? "(none)"}");
+        descriptionBuilder.AppendLine($"Installer asset: {(updateResult.DownloadUri is null ? "(none)" : "available")}");
+        descriptionBuilder.AppendLine($"SHA-256 digest: {(string.IsNullOrWhiteSpace(updateResult.ExpectedSha256) ? "not provided" : "provided")}");
+
+        if (validateDownload)
+        {
+            GitAutoUpdateResult downloadResult = await new GitAutoUpdater(gitUpdateSettingsStore, appPaths)
+                .DownloadAndValidateInstallerAsync(updateResult, cancellationToken)
+                .ConfigureAwait(false);
+            descriptionBuilder.AppendLine();
+            descriptionBuilder.AppendLine("Download validation:");
+            descriptionBuilder.AppendLine($"Status: {downloadResult.Status}");
+            descriptionBuilder.AppendLine($"Installer ready: {downloadResult.InstallerReady}");
+            descriptionBuilder.AppendLine($"Message: {RuntimeLogMessageCollector.SanitizeLine(downloadResult.Message)}");
+            descriptionBuilder.AppendLine($"Path: {RuntimeLogMessageCollector.SanitizeLine(downloadResult.DownloadPath ?? "(none)")}");
+        }
+        else
+        {
+            descriptionBuilder.AppendLine();
+            descriptionBuilder.AppendLine("Download validation: skipped");
+        }
+
+        Discord.Color color = updateResult.Status switch
+        {
+            GitUpdateCheckStatus.UpToDate => new Discord.Color(63, 185, 80),
+            GitUpdateCheckStatus.UpdateAvailable => new Discord.Color(88, 166, 255),
+            _ => new Discord.Color(210, 153, 34)
+        };
+        return new EmbedBuilder()
+        {
+            Title = "VALOWATCH Debug Update",
+            Description = TrimEmbedDescription(descriptionBuilder.ToString()),
+            Color = color,
+            Timestamp = DateTimeOffset.Now
+        }.Build();
+    }
+
+    private static Embed BuildDebugHelpEmbed()
+    {
+        string description =
+            "/valowatch-debug status - show bot, voice, stream, command, and folder status" + Environment.NewLine +
+            "/valowatch-debug audio - show microphone, LINE, Discord mix, and PCM counters" + Environment.NewLine +
+            "/valowatch-debug logs - push new runtime log embeds to the configured log channel" + Environment.NewLine +
+            "/valowatch-debug diagnostics download:false - run self diagnostics" + Environment.NewLine +
+            "/valowatch-debug update download:false - check GitHub update status without launching installer" + Environment.NewLine +
+            "/stream status - show current stream state" + Environment.NewLine +
+            "/stream debug - check public URL, tunnel, and Smooth Live state" + Environment.NewLine +
+            "/stream link - send the current URL again without rebuilding" + Environment.NewLine +
+            "/stream restart - rebuild the current stream with the same settings" + Environment.NewLine +
+            "/stream preset preset:stable - start a preset stream" + Environment.NewLine +
+            "/stream cameras - list webcam devices visible to ffmpeg";
+
+        return new EmbedBuilder()
+        {
+            Title = "VALOWATCH Debug Help",
+            Description = description,
+            Color = new Discord.Color(88, 166, 255),
+            Timestamp = DateTimeOffset.Now
+        }.Build();
+    }
+
+    private string BuildDebugPathsText()
+    {
+        return
+            $"base: {RuntimeLogMessageCollector.SanitizeLine(AppContext.BaseDirectory)}{Environment.NewLine}" +
+            $"data: {RuntimeLogMessageCollector.SanitizeLine(appPaths.DataDirectory)}{Environment.NewLine}" +
+            $"logs: {RuntimeLogMessageCollector.SanitizeLine(Path.Combine(appPaths.DataDirectory, "logs"))}{Environment.NewLine}" +
+            $"tools: {RuntimeLogMessageCollector.SanitizeLine(appPaths.ToolDirectory)}{Environment.NewLine}" +
+            $"config: {(File.Exists(appPaths.DurableEnvPath) || File.Exists(appPaths.DiscordBotConfigPath) ? "present" : "missing")}{Environment.NewLine}" +
+            $"ffmpeg: {(File.Exists(appPaths.FfmpegPath) ? "present" : "missing")}{Environment.NewLine}" +
+            $"cloudflared: {(File.Exists(appPaths.CloudflaredPath) ? "present" : "missing")}";
+    }
+
+    private static string BuildCurrentProcessStatusText()
+    {
+        try
+        {
+            using Process currentProcess = Process.GetCurrentProcess();
+            string memoryMegabytes = (currentProcess.PrivateMemorySize64 / 1024D / 1024D)
+                .ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+            return
+                $"PID: {currentProcess.Id}{Environment.NewLine}" +
+                $"Memory: {memoryMegabytes} MB";
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return $"Process: unavailable ({exception.Message})";
+        }
+    }
+
+    private static string BuildDebugVoiceText(
+        bool isRunning,
+        bool isOnline,
+        string voiceGuildName,
+        string voiceChannelName,
+        string discordConversationGuildName,
+        string discordConversationChannelName,
+        ulong monitoredDiscordUserId)
+    {
+        StringBuilder voiceBuilder = new();
+        voiceBuilder.AppendLine($"Bot online: {isOnline}");
+        voiceBuilder.AppendLine($"Bot in VC: {isRunning}");
+        if (!string.IsNullOrWhiteSpace(voiceGuildName) || !string.IsNullOrWhiteSpace(voiceChannelName))
+        {
+            voiceBuilder.AppendLine($"Bot guild: {NormalizeDiscordDisplayName(voiceGuildName, "(unknown)")}");
+            voiceBuilder.AppendLine($"Bot VC: {NormalizeDiscordDisplayName(voiceChannelName, "(unknown)")}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(discordConversationGuildName) ||
+            !string.IsNullOrWhiteSpace(discordConversationChannelName))
+        {
+            voiceBuilder.AppendLine($"Observed Discord guild: {NormalizeDiscordDisplayName(discordConversationGuildName, "(unknown)")}");
+            voiceBuilder.AppendLine($"Observed Discord VC: {NormalizeDiscordDisplayName(discordConversationChannelName, "(unknown)")}");
+        }
+        else
+        {
+            voiceBuilder.AppendLine(monitoredDiscordUserId == 0
+                ? "Observed Discord VC: disabled; monitored user id is not configured"
+                : "Observed Discord VC: not detected");
+        }
+
+        return TrimEmbedDescription(voiceBuilder.ToString());
+    }
+
+    private static string BuildDebugStreamText(
+        ScreenStreamSession? session,
+        bool restartInProgress)
+    {
+        if (session is null)
+        {
+            return $"active: false{Environment.NewLine}restart in progress: {restartInProgress}";
+        }
+
+        StringBuilder streamBuilder = new();
+        streamBuilder.AppendLine("active: true");
+        streamBuilder.AppendLine($"restart in progress: {restartInProgress}");
+        streamBuilder.AppendLine($"URL: {session.PublicUrl}");
+        streamBuilder.AppendLine($"target: {ScreenCaptureTargetNames.ToOptionValue(session.Target)}");
+        streamBuilder.AppendLine($"method: {ScreenStreamMethodNames.ToOptionValue(session.Method)}");
+        streamBuilder.AppendLine($"fps: {session.FramesPerSecond}");
+        streamBuilder.AppendLine($"width: {session.MaxWidth}");
+        streamBuilder.AppendLine($"quality: {session.JpegQuality}");
+        streamBuilder.AppendLine($"camera: {session.CameraOverlayStatusText}");
+        streamBuilder.AppendLine($"tunnel: {RuntimeLogMessageCollector.SanitizeLine(session.TunnelProcessStatusText)}");
+        streamBuilder.AppendLine($"healthy: {session.PublicUrlHasBeenHealthy}");
+        streamBuilder.AppendLine($"health detail: {SanitizeStreamHealthDetail(session.PublicUrlHealthDetail)}");
+        return TrimEmbedDescription(streamBuilder.ToString());
+    }
+
     private static string SanitizeCameraDeviceText(string text)
     {
         string sanitizedText = RuntimeLogMessageCollector
@@ -2717,6 +3430,34 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
 
         return sanitizedText.Length <= 160 ? sanitizedText : sanitizedText[..160] + "...";
+    }
+
+    private static string TrimOneLine(string text, int maximumLength)
+    {
+        string sanitizedText = RuntimeLogMessageCollector
+            .SanitizeLine(string.IsNullOrWhiteSpace(text) ? "(empty)" : text)
+            .Replace('\r', ' ')
+            .Replace('\n', ' ')
+            .Trim();
+        if (string.IsNullOrWhiteSpace(sanitizedText))
+        {
+            sanitizedText = "(empty)";
+        }
+
+        int safeMaximumLength = Math.Clamp(maximumLength, 16, DiscordEmbedDescriptionLimit);
+        return sanitizedText.Length <= safeMaximumLength
+            ? sanitizedText
+            : sanitizedText[..safeMaximumLength] + "...";
+    }
+
+    private static string FormatDebugLocalTime(DateTimeOffset value)
+    {
+        if (value == DateTimeOffset.MinValue)
+        {
+            return "(never)";
+        }
+
+        return value.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static string BuildStreamSmoothLiveStatusText(ScreenStreamSession session)
@@ -3348,6 +4089,94 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private async Task EnsureDebugCommandAsync(SocketGuild guild)
+    {
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, DebugCommandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
+            {
+                if (string.Equals(existingCommand.Description, DebugCommandDescription, StringComparison.Ordinal))
+                {
+                    WriteLog($"Debug slash command already exists: /{DebugCommandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Debug slash command replaced: /{DebugCommandName}.");
+            }
+
+            SlashCommandBuilder commandBuilder = BuildDebugSlashCommandBuilder();
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Debug slash command registered: /{DebugCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "Debug slash command could not be registered. " +
+                "The bot will retry registration on the next startup.",
+                exception);
+        }
+    }
+
+    internal static SlashCommandBuilder BuildDebugSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(DebugCommandName)
+            .WithDescription(DebugCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(DebugSubcommandStatusName)
+                    .WithDescription("Show bot, voice, stream, command, and folder status")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(DebugSubcommandAudioName)
+                    .WithDescription("Show microphone, LINE, Discord mix, and PCM counters")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(DebugSubcommandLogsName)
+                    .WithDescription("Send new VALOWATCH runtime log embeds to the log channel")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(DebugSubcommandDiagnosticsName)
+                    .WithDescription("Run VALOWATCH self diagnostics")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(DebugDownloadOptionName)
+                            .WithDescription("Also validate update download without launching installer")
+                            .WithType(ApplicationCommandOptionType.Boolean)
+                            .WithRequired(false)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(DebugSubcommandUpdateName)
+                    .WithDescription("Check GitHub update status")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(DebugDownloadOptionName)
+                            .WithDescription("Validate update download without launching installer")
+                            .WithType(ApplicationCommandOptionType.Boolean)
+                            .WithRequired(false)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(DebugSubcommandHelpName)
+                    .WithDescription("Show useful VALOWATCH debug and stream commands")
+                    .WithType(ApplicationCommandOptionType.SubCommand));
+    }
+
     private async Task EnsureScreenshotCommandAsync(SocketGuild guild)
     {
         const string description = "VALOWATCH screenshot controls";
@@ -3519,6 +4348,37 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 new SlashCommandOptionBuilder()
                     .WithName(StreamSubcommandCamerasName)
                     .WithDescription("List webcam devices visible to VALOWATCH")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandLinkName)
+                    .WithDescription("Send the current stream URL again without restarting")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandRestartName)
+                    .WithDescription("Restart the current stream with the same settings")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandPresetName)
+                    .WithDescription("Start a stream using a connection preset")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(StreamPresetOptionName)
+                            .WithDescription("Preset: stable is the default balance")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)
+                            .AddChoice("stable", "stable")
+                            .AddChoice("low-bandwidth", "low-bandwidth")
+                            .AddChoice("smooth", "smooth")
+                            .AddChoice("source", "source")
+                            .AddChoice("valorant", "valorant")))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(StreamSubcommandDebugName)
+                    .WithDescription("Check stream URL, tunnel, and Smooth Live health")
                     .WithType(ApplicationCommandOptionType.SubCommand));
     }
 

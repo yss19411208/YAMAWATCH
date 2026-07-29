@@ -90,6 +90,7 @@ internal static class ValowatchSelfDiagnostics
             new("LINE起動トリガー", appExecutablePath, AppContext.BaseDirectory, ["--check-line-voice-trigger"]),
             new("Discord VC表示", appExecutablePath, AppContext.BaseDirectory, ["--check-discord-voice-context"]),
             new("Discord VC検知対象", appExecutablePath, AppContext.BaseDirectory, ["--check-discord-voice-state-filter"]),
+            new("Debugコマンド", appExecutablePath, AppContext.BaseDirectory, ["--check-debug-command"]),
             new("監視エージェント起動計画", appExecutablePath, AppContext.BaseDirectory, ["--check-watch-agent-supervisor"]),
             new("ランタイムログ送信", appExecutablePath, AppContext.BaseDirectory, ["--check-runtime-log-messages"]),
             new("GITHUB更新パス回復", githubAgentPath, Path.GetDirectoryName(githubAgentPath) ?? AppContext.BaseDirectory, ["--check-download-path-recovery"]),

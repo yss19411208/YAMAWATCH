@@ -181,6 +181,12 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--check-debug-command", StringComparison.OrdinalIgnoreCase)))
+        {
+            RunDebugCommandDiagnostic();
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--check-screenshot-capture", StringComparison.OrdinalIgnoreCase)))
         {
             RunScreenshotCaptureDiagnostic();
@@ -558,6 +564,32 @@ static class Program
         }
     }
 
+    private static void RunDebugCommandDiagnostic()
+    {
+        AppPaths appPaths = AppPaths.CreateDefault();
+        appPaths.EnsureDirectories();
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+
+        try
+        {
+            object builtCommand = DiscordBotVoiceRelay
+                .BuildDebugSlashCommandBuilder()
+                .Build();
+            bool ready = builtCommand is not null;
+            AppendDiagnosticLogLine(
+                logFilePath,
+                $"{DateTimeOffset.Now:O} [Diagnostics] Debug slash command check: " +
+                $"{(ready ? "ready" : "failed")}. Subcommands: status,audio,logs,diagnostics,update,help. " +
+                "DiagnosticsOptions: download. UpdateOptions: download.");
+            Environment.ExitCode = ready ? 0 : 1;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
+        {
+            TryWriteDiagnosticFailure(logFilePath, "Debug slash command check", exception);
+            Environment.ExitCode = 1;
+        }
+    }
+
     private static void RunScreenshotCaptureDiagnostic()
     {
         AppPaths appPaths = AppPaths.CreateDefault();
@@ -640,9 +672,9 @@ static class Program
             AppendDiagnosticLogLine(
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Stream slash command check: " +
-                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status,cameras. Targets: full,valorant. " +
+                $"{(ready ? "ready" : "failed")}. Subcommands: on,off,status,cameras,link,restart,preset,debug. Targets: full,valorant. " +
                 $"Methods: {ScreenStreamMethodNames.H264Fmp4},{ScreenStreamMethodNames.H264Hls},{ScreenStreamMethodNames.Mjpeg}. " +
-                $"Options: method,fps,quality,width,camera. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
+                $"Options: method,fps,quality,width,camera,preset. MaxFPS: {ScreenStreamingServer.MaximumFramesPerSecond}.");
             Environment.ExitCode = ready ? 0 : 1;
         }
         catch (Exception exception) when (exception is InvalidOperationException or ArgumentException)
