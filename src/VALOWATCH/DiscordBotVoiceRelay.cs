@@ -56,6 +56,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string DiscordAudioCommandName = "valowatch-discord-audio";
     private const string DiscordAudioCommandEnabledOptionName = "enabled";
     private const string ValorantAudioCommandName = "valowatch-valorant-audio";
+    private const string SystemAudioCommandName = "valowatch-pc-audio";
     private const string VoiceJoinModeCommandName = "valowatch-voice-mode";
     private const string VoiceJoinModeOptionName = "mode";
     private const string VoiceJoinModeCommandDescription = "VALOWATCHのVC参加条件を切り替えます v1";
@@ -119,6 +120,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private LineProcessLoopbackWaveProvider? lineProcessLoopbackProvider;
     private LineProcessLoopbackWaveProvider? discordProcessLoopbackProvider;
     private LineProcessLoopbackWaveProvider? valorantProcessLoopbackProvider;
+    private SystemLoopbackWaveProvider? systemAudioLoopbackProvider;
     private IWaveProvider? discordPcmProvider;
     private AudioOutStream? discordStream;
     private AudioTranscriptionWorker? audioTranscriptionWorker;
@@ -128,6 +130,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private SwitchingSampleProvider? microphoneSourceSwitcher;
     private SwitchingSampleProvider? discordAudioSourceSwitcher;
     private SwitchingSampleProvider? valorantAudioSourceSwitcher;
+    private SwitchingSampleProvider? systemAudioSourceSwitcher;
     private IReadOnlyList<MicrophoneDeviceCandidate> microphoneCandidates = [];
     private int currentMicrophoneCandidateIndex = -1;
     private bool microphoneCaptureFaulted;
@@ -167,14 +170,18 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private string currentLineLoopbackSourceName = string.Empty;
     private string currentDiscordLoopbackSourceName = string.Empty;
     private string currentValorantLoopbackSourceName = string.Empty;
+    private string currentSystemLoopbackSourceName = string.Empty;
     private string[] currentDiscordAudioProcessNames = [];
     private string[] currentValorantAudioProcessNames = [];
     private float currentDiscordAudioVolume;
     private float currentValorantAudioVolume;
+    private float currentSystemAudioVolume;
     private bool discordProcessAudioRuntimeEnabled;
     private bool discordAudioCommandEnabled;
     private bool valorantProcessAudioRuntimeEnabled;
     private bool valorantAudioCommandEnabled;
+    private bool systemAudioRuntimeEnabled;
+    private bool systemAudioCommandEnabled;
     private bool voiceJoinModeCommandEnabled = true;
     private bool screenshotCommandEnabled;
     private bool streamCommandEnabled = true;
@@ -289,6 +296,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ConfigureVoiceJoinModeCommandState(settings);
             await EnsureDiscordAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureValorantAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
+            await EnsureSystemAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureVoiceJoinModeCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -324,15 +332,43 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task StartForVoiceActivityCoreAsync(bool valorantDetected, bool lineDetected)
     {
+        bool repairExistingVoiceSession = false;
         lock (stateLock)
         {
             if (IsRunning)
             {
-                return;
+                bool audioRelayLooksActive =
+                    audioClient is not null &&
+                    audioClient.ConnectionState == ConnectionState.Connected &&
+                    discordPcmProvider is not null &&
+                    discordStream is not null &&
+                    relayTask is not null &&
+                    !relayTask.IsCompleted &&
+                    !stopRequested;
+                if (audioRelayLooksActive)
+                {
+                    return;
+                }
+
+                repairExistingVoiceSession = true;
             }
 
             stopRequested = false;
             StatusText = settingsStore.HasConfig ? "Discord connecting" : "Discord config missing";
+        }
+
+        if (repairExistingVoiceSession)
+        {
+            WriteLog("Discord voice session was marked running but the audio relay was inactive; rebuilding the voice connection.");
+            await StopCoreAsync(
+                    resetValorantNotificationSession: false,
+                    keepDiscordGatewayOnline: true)
+                .ConfigureAwait(false);
+            lock (stateLock)
+            {
+                stopRequested = false;
+                StatusText = settingsStore.HasConfig ? "Discord reconnecting" : "Discord config missing";
+            }
         }
 
         string triggerLabel = valorantDetected
@@ -362,6 +398,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"StreamValorantAudio: {settings.StreamValorantAudioWhenRunning}. " +
             $"ValorantAudioProcesses: {string.Join(",", settings.ValorantAudioProcessNames)}. " +
             $"ValorantAudioCommand: {settings.ValorantAudioCommandEnabled}. " +
+            $"StreamSystemAudio: {settings.StreamSystemAudioWhenRunning}. " +
+            $"SystemAudioVolume: {settings.SystemAudioVolume:0.00}. " +
+            $"SystemAudioCommand: {settings.SystemAudioCommandEnabled}. " +
             $"VoiceJoinMode: {DiscordVoiceJoinModeNames.ToValue(LoadVoiceJoinMode())}. " +
             $"VoiceJoinModeCommand: {settings.VoiceJoinModeCommandEnabled}. " +
             $"Transcription: {settings.TranscriptionEnabled}. " +
@@ -404,6 +443,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             EnsureVoiceChannelPermissions(guild, voiceChannel);
             await EnsureDiscordAudioCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureValorantAudioCommandAsync(guild, settings).ConfigureAwait(false);
+            await EnsureSystemAudioCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureVoiceJoinModeCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
@@ -1228,6 +1268,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             return;
         }
 
+        if (string.Equals(command.Data.Name, SystemAudioCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleSystemAudioSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
         if (string.Equals(command.Data.Name, VoiceJoinModeCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleVoiceJoinModeSlashCommandAsync(command).ConfigureAwait(false);
@@ -1379,6 +1425,79 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
             {
                 WriteLog("VALORANT audio slash command error response failed.", responseException);
+            }
+        }
+    }
+
+    private async Task HandleSystemAudioSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (!systemAudioCommandEnabled)
+            {
+                await command
+                    .RespondAsync("VALOWATCH PC audio command is disabled.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (command.User is not SocketGuildUser guildUser ||
+                (currentVoiceGuildId != 0 && guildUser.Guild.Id != currentVoiceGuildId))
+            {
+                await command
+                    .RespondAsync("This server is not configured for VALOWATCH PC audio control.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCH PC audio control requires server management permission.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            object? optionValue = command.Data.Options
+                .FirstOrDefault(option => string.Equals(
+                    option.Name,
+                    DiscordAudioCommandEnabledOptionName,
+                    StringComparison.OrdinalIgnoreCase))
+                ?.Value;
+            if (optionValue is not bool enabled)
+            {
+                await command
+                    .RespondAsync("Set enabled to true or false.", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            bool stateChanged = SetSystemAudioEnabled(enabled, "PC audio slash command");
+            bool enabledAfterCommand = systemAudioLoopbackProvider is not null;
+            string statusText = enabledAfterCommand ? "ON" : "OFF";
+            string changedText = stateChanged
+                ? "changed"
+                : enabled == enabledAfterCommand
+                    ? "already in that state"
+                    : "not available until the voice relay is running";
+            await command
+                .RespondAsync(
+                    $"VALOWATCH PC audio mix: {statusText} ({changedText})",
+                    ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or HttpRequestException or TaskCanceledException or Discord.Net.HttpException)
+        {
+            WriteLog("PC audio slash command handling failed.", exception);
+            try
+            {
+                await command
+                    .RespondAsync("VALOWATCH PC audio control failed.", ephemeral: true)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+            {
+                WriteLog("PC audio slash command error response failed.", responseException);
             }
         }
     }
@@ -3417,6 +3536,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         bool discordAudioCommandEnabledSnapshot;
         bool valorantAudioRuntimeEnabledSnapshot;
         bool valorantAudioCommandEnabledSnapshot;
+        bool systemAudioRuntimeEnabledSnapshot;
+        bool systemAudioCommandEnabledSnapshot;
         bool voiceJoinModeCommandEnabledSnapshot;
         bool streamRestartInProgressSnapshot;
         ulong monitoredDiscordUserId;
@@ -3436,6 +3557,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             discordAudioCommandEnabledSnapshot = discordAudioCommandEnabled;
             valorantAudioRuntimeEnabledSnapshot = valorantProcessAudioRuntimeEnabled;
             valorantAudioCommandEnabledSnapshot = valorantAudioCommandEnabled;
+            systemAudioRuntimeEnabledSnapshot = systemAudioRuntimeEnabled;
+            systemAudioCommandEnabledSnapshot = systemAudioCommandEnabled;
             voiceJoinModeCommandEnabledSnapshot = voiceJoinModeCommandEnabled;
             streamRestartInProgressSnapshot = screenStreamRestartInProgress;
             monitoredDiscordUserId = currentMonitoredDiscordUserId;
@@ -3465,6 +3588,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"discord-audio-runtime: {(discordAudioRuntimeEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
             $"valorant-audio-command: {(valorantAudioCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
             $"valorant-audio-runtime: {(valorantAudioRuntimeEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
+            $"pc-audio-command: {(systemAudioCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
+            $"pc-audio-runtime: {(systemAudioRuntimeEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
             $"voice-mode-command: {(voiceJoinModeCommandEnabledSnapshot ? "on" : "off")}{Environment.NewLine}" +
             $"voice-mode: {DiscordVoiceJoinModeNames.ToValue(voiceJoinMode)}";
 
@@ -3504,8 +3629,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         string lineSourceSnapshot;
         string discordSourceSnapshot;
         string valorantSourceSnapshot;
+        string systemSourceSnapshot;
         bool discordAudioRuntimeEnabledSnapshot;
         bool valorantAudioRuntimeEnabledSnapshot;
+        bool systemAudioRuntimeEnabledSnapshot;
         lock (audioStatsLock)
         {
             capturedCallbacksSnapshot = capturedCallbackCount;
@@ -3524,6 +3651,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         LineProcessLoopbackWaveProvider? lineProviderSnapshot;
         LineProcessLoopbackWaveProvider? discordProviderSnapshot;
         LineProcessLoopbackWaveProvider? valorantProviderSnapshot;
+        SystemLoopbackWaveProvider? systemProviderSnapshot;
         lock (stateLock)
         {
             microphoneNameSnapshot = currentMicrophoneDeviceName;
@@ -3531,11 +3659,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             lineSourceSnapshot = currentLineLoopbackSourceName;
             discordSourceSnapshot = currentDiscordLoopbackSourceName;
             valorantSourceSnapshot = currentValorantLoopbackSourceName;
+            systemSourceSnapshot = currentSystemLoopbackSourceName;
             discordAudioRuntimeEnabledSnapshot = discordProcessAudioRuntimeEnabled;
             valorantAudioRuntimeEnabledSnapshot = valorantProcessAudioRuntimeEnabled;
+            systemAudioRuntimeEnabledSnapshot = systemAudioRuntimeEnabled;
             lineProviderSnapshot = lineProcessLoopbackProvider;
             discordProviderSnapshot = discordProcessLoopbackProvider;
             valorantProviderSnapshot = valorantProcessLoopbackProvider;
+            systemProviderSnapshot = systemAudioLoopbackProvider;
         }
 
         string selectedMicrophone = string.IsNullOrWhiteSpace(microphoneNameSnapshot)
@@ -3544,6 +3675,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         string lineStats = lineProviderSnapshot?.GetStatusSummary() ?? "LINELoopbackCapturing: False.";
         string discordStats = discordProviderSnapshot?.GetStatusSummary() ?? "DiscordLoopbackCapturing: False.";
         string valorantStats = valorantProviderSnapshot?.GetStatusSummary() ?? "VALORANTLoopbackCapturing: False.";
+        string systemStats = systemProviderSnapshot?.GetStatusSummary() ?? "SystemLoopbackCapturing: False.";
 
         StringBuilder descriptionBuilder = new();
         descriptionBuilder.AppendLine($"Mic: {SanitizeCameraDeviceText(selectedMicrophone)}");
@@ -3573,6 +3705,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         descriptionBuilder.AppendLine($"VALORANT mix source: {TrimOneLine(valorantSourceSnapshot, 500)}");
         descriptionBuilder.AppendLine($"VALORANT mix volume: {currentValorantAudioVolume.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}");
         descriptionBuilder.AppendLine($"VALORANT mix stats: {TrimOneLine(valorantStats, 900)}");
+        descriptionBuilder.AppendLine($"PC audio mix runtime: {systemAudioRuntimeEnabledSnapshot}");
+        descriptionBuilder.AppendLine($"PC audio mix source: {TrimOneLine(systemSourceSnapshot, 500)}");
+        descriptionBuilder.AppendLine($"PC audio mix volume: {currentSystemAudioVolume.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)}");
+        descriptionBuilder.AppendLine($"PC audio mix stats: {TrimOneLine(systemStats, 900)}");
 
         return new EmbedBuilder()
         {
@@ -3647,6 +3783,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             "/valowatch-debug update download:false - check GitHub update status without launching installer" + Environment.NewLine +
             "/valowatch-valorant-audio enabled:true - mix VALORANT audio into the bot VC" + Environment.NewLine +
             "/valowatch-valorant-audio enabled:false - stop VALORANT audio mixing" + Environment.NewLine +
+            "/valowatch-pc-audio enabled:true - mix all current PC output audio into the bot VC" + Environment.NewLine +
+            "/valowatch-pc-audio enabled:false - stop all-PC output audio mixing" + Environment.NewLine +
             "/valowatch-voice-mode mode:activity - join VC only during VALORANT/LINE activity" + Environment.NewLine +
             "/valowatch-voice-mode mode:always - keep VC joined while the PC app is running" + Environment.NewLine +
             "/stream status - show current stream state" + Environment.NewLine +
@@ -4215,6 +4353,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"DiscordAudioVolume: {currentDiscordAudioVolume:0.00}. " +
             $"ValorantAudioDefault: {valorantProcessAudioRuntimeEnabled}. " +
             $"ValorantAudioVolume: {currentValorantAudioVolume:0.00}. " +
+            $"SystemAudioDefault: {systemAudioRuntimeEnabled}. " +
+            $"SystemAudioVolume: {currentSystemAudioVolume:0.00}. " +
             $"VoiceJoinMode: {DiscordVoiceJoinModeNames.ToValue(LoadVoiceJoinMode())}. " +
             $"VoiceJoinModeCommand: {voiceJoinModeCommandEnabled}. " +
             $"ScreenshotCommand: {screenshotCommandEnabled}. " +
@@ -4268,10 +4408,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 : settings.ValorantAudioProcessNames;
             currentDiscordAudioVolume = Math.Clamp(settings.DiscordAudioVolume, 0.0F, 1.0F);
             currentValorantAudioVolume = Math.Clamp(settings.ValorantAudioVolume, 0.0F, 1.0F);
+            currentSystemAudioVolume = Math.Clamp(settings.SystemAudioVolume, 0.0F, 1.0F);
             discordProcessAudioRuntimeEnabled = settings.StreamDiscordAudioWhenRunning;
             discordAudioCommandEnabled = settings.DiscordAudioCommandEnabled;
             valorantProcessAudioRuntimeEnabled = settings.StreamValorantAudioWhenRunning;
             valorantAudioCommandEnabled = settings.ValorantAudioCommandEnabled;
+            systemAudioRuntimeEnabled = settings.StreamSystemAudioWhenRunning;
+            systemAudioCommandEnabled = settings.SystemAudioCommandEnabled;
         }
 
         WriteLog(
@@ -4279,7 +4422,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"DiscordAudioDefault: {settings.StreamDiscordAudioWhenRunning}. " +
             $"DiscordAudioCommand: {settings.DiscordAudioCommandEnabled}. " +
             $"VALORANTAudioDefault: {settings.StreamValorantAudioWhenRunning}. " +
-            $"VALORANTAudioCommand: {settings.ValorantAudioCommandEnabled}.");
+            $"VALORANTAudioCommand: {settings.ValorantAudioCommandEnabled}. " +
+            $"SystemAudioDefault: {settings.StreamSystemAudioWhenRunning}. " +
+            $"SystemAudioCommand: {settings.SystemAudioCommandEnabled}.");
     }
 
     private void ConfigureDiscordUserVoiceTracking(DiscordBotSettings settings, SocketGuild guild)
@@ -4391,6 +4536,57 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 DiscordAudioCommandEnabledOptionName,
                 ApplicationCommandOptionType.Boolean,
                 "trueでON、falseでOFF",
+                isRequired: true);
+    }
+
+    private async Task EnsureSystemAudioCommandAsync(SocketGuild guild, DiscordBotSettings settings)
+    {
+        if (!settings.SystemAudioCommandEnabled)
+        {
+            WriteLog("PC audio slash command registration is disabled.");
+            return;
+        }
+
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            bool commandAlreadyExists = commands.Any(command =>
+                string.Equals(command.Name, SystemAudioCommandName, StringComparison.OrdinalIgnoreCase));
+            if (commandAlreadyExists)
+            {
+                WriteLog($"PC audio slash command already exists: /{SystemAudioCommandName}.");
+                return;
+            }
+
+            SlashCommandBuilder commandBuilder = BuildSystemAudioSlashCommandBuilder();
+
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"PC audio slash command registered: /{SystemAudioCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                "PC audio slash command could not be registered. " +
+                "Existing audio relay will still run; command control may be unavailable until the next startup.",
+                exception);
+        }
+    }
+
+    internal static SlashCommandBuilder BuildSystemAudioSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(SystemAudioCommandName)
+            .WithDescription("Mix all current PC output audio into the VALOWATCH bot VC")
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                DiscordAudioCommandEnabledOptionName,
+                ApplicationCommandOptionType.Boolean,
+                "true to turn on, false to turn off",
                 isRequired: true);
     }
 
@@ -5020,6 +5216,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
         }
 
+        SystemLoopbackWaveProvider? systemProvider = systemAudioLoopbackProvider;
+        if (systemAudioRuntimeEnabled && systemProvider?.HasRecentAudibleSignal == true)
+        {
+            labels.Add("PC音声");
+        }
+
         return labels.Count == 0 ? "マイク" : string.Join(Environment.NewLine, labels);
     }
 
@@ -5048,6 +5250,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         IWaveProvider discordAudioSwitchProvider = new SampleToWaveProvider(discordAudioSourceSwitcher);
         valorantAudioSourceSwitcher = new SwitchingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
         IWaveProvider valorantAudioSwitchProvider = new SampleToWaveProvider(valorantAudioSourceSwitcher);
+        systemAudioSourceSwitcher = new SwitchingSampleProvider(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1));
+        IWaveProvider systemAudioSwitchProvider = new SampleToWaveProvider(systemAudioSourceSwitcher);
         discordPcmProvider = CreateDiscordPcmProvider(
             new SampleToWaveProvider(microphoneSourceSwitcher),
             settings.MicrophoneVolume,
@@ -5057,6 +5261,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             discordAudioSwitchProvider,
             1.0F,
             valorantAudioSwitchProvider,
+            1.0F,
+            systemAudioSwitchProvider,
             1.0F);
         if (settings.StreamDiscordAudioWhenRunning)
         {
@@ -5065,6 +5271,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (settings.StreamValorantAudioWhenRunning)
         {
             SetValorantProcessAudioEnabled(true, "startup default setting");
+        }
+        if (settings.StreamSystemAudioWhenRunning)
+        {
+            SetSystemAudioEnabled(true, "startup default setting");
         }
 
         discordStream = audioClient.CreatePCMStream(AudioApplication.Voice);
@@ -5085,6 +5295,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             $"Discord volume: {currentDiscordAudioVolume:0.00}. " +
             $"VALORANT loopback: {(settings.StreamValorantAudioWhenRunning ? currentValorantLoopbackSourceName : "off")}. " +
             $"VALORANT volume: {currentValorantAudioVolume:0.00}. " +
+            $"System loopback: {(settings.StreamSystemAudioWhenRunning ? currentSystemLoopbackSourceName : "off")}. " +
+            $"System volume: {currentSystemAudioVolume:0.00}. " +
             "Output playback: unchanged; capture-only relay. " +
             $"Preferred device: {settings.MicrophoneDeviceName}.");
 
@@ -5169,6 +5381,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 continue;
             }
 
+            bool alwaysVoiceJoinMode = LoadVoiceJoinMode() == DiscordVoiceJoinMode.AlwaysWhilePcOpen;
             if (!hasRecentMicrophoneActivity && TryFindActiveMicrophoneCandidate(out int activeCandidateIndex))
             {
                 if (activeCandidateIndex != currentMicrophoneCandidateIndex)
@@ -5193,6 +5406,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             if (shouldRotateSilentCandidate)
             {
+                if (alwaysVoiceJoinMode)
+                {
+                    lock (audioStatsLock)
+                    {
+                        lastMicrophoneActivityAt = DateTimeOffset.Now;
+                    }
+
+                    WriteLog("Skipped silent microphone candidate rotation because voice join mode is always.");
+                    continue;
+                }
+
                 TrySwitchMicrophoneCapture(
                     settings,
                     "no microphone activity detected for 30 seconds",
@@ -5626,6 +5850,72 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    private bool SetSystemAudioEnabled(bool enabled, string reason)
+    {
+        if (enabled)
+        {
+            bool alreadyEnabled = systemAudioRuntimeEnabled && systemAudioLoopbackProvider is not null;
+            if (alreadyEnabled)
+            {
+                WriteLog($"System loopback audio is already enabled. Reason: {reason}.");
+                return false;
+            }
+
+            systemAudioRuntimeEnabled = true;
+            return TryStartSystemLoopbackAudio(reason);
+        }
+
+        bool wasEnabled = systemAudioRuntimeEnabled || systemAudioLoopbackProvider is not null;
+        systemAudioRuntimeEnabled = false;
+        DisposeSystemLoopbackObjects();
+        WriteLog($"System loopback audio disabled. Reason: {reason}.");
+        return wasEnabled;
+    }
+
+    private bool TryStartSystemLoopbackAudio(string reason)
+    {
+        if (systemAudioSourceSwitcher is null)
+        {
+            WriteLog($"System loopback audio could not start because the mixer is not ready. Reason: {reason}.");
+            return false;
+        }
+
+        if (systemAudioLoopbackProvider is not null)
+        {
+            WriteLog($"System loopback audio is already enabled. Reason: {reason}.");
+            return false;
+        }
+
+        try
+        {
+            systemAudioLoopbackProvider = new SystemLoopbackWaveProvider(
+                LineLoopbackBufferDuration,
+                (message, exception) => WriteLog(message, exception));
+            currentSystemLoopbackSourceName = systemAudioLoopbackProvider.CurrentSourceDescription;
+
+            ISampleProvider systemLoopbackSampleProvider = CreateMono48KhzSampleProvider(
+                systemAudioLoopbackProvider,
+                "system loopback");
+            systemLoopbackSampleProvider = new SimpleVolumeSampleProvider(
+                systemLoopbackSampleProvider,
+                currentSystemAudioVolume);
+            systemAudioSourceSwitcher.SetSource(systemLoopbackSampleProvider);
+
+            WriteLog(
+                $"System loopback provider enabled. Reason: {reason}. " +
+                $"Format: {systemAudioLoopbackProvider.WaveFormat}. Buffer: {LineLoopbackBufferDuration.TotalMilliseconds:0}ms. " +
+                $"Source: {currentSystemLoopbackSourceName}. Volume: {currentSystemAudioVolume:0.00}. " +
+                "Output playback remains unchanged.");
+            return true;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or COMException or ArgumentException)
+        {
+            WriteLog("System loopback provider could not start. Continuing without all-PC audio.", exception);
+            DisposeSystemLoopbackObjects();
+            return false;
+        }
+    }
+
     private void OnMicrophoneRecordingStopped(object? sender, StoppedEventArgs eventArgs)
     {
         if (!ReferenceEquals(sender, microphoneCapture) || stopRequested)
@@ -5666,8 +5956,10 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         DisposeLineLoopbackObjects();
         DisposeDiscordLoopbackObjects();
         DisposeValorantLoopbackObjects();
+        DisposeSystemLoopbackObjects();
         discordAudioSourceSwitcher = null;
         valorantAudioSourceSwitcher = null;
+        systemAudioSourceSwitcher = null;
         discordStream?.Dispose();
 
         discordStream = null;
@@ -5715,6 +6007,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         valorantProcessLoopbackProvider?.Dispose();
         valorantProcessLoopbackProvider = null;
         currentValorantLoopbackSourceName = string.Empty;
+    }
+
+    private void DisposeSystemLoopbackObjects()
+    {
+        systemAudioSourceSwitcher?.ClearSource();
+        systemAudioLoopbackProvider?.Dispose();
+        systemAudioLoopbackProvider = null;
+        currentSystemLoopbackSourceName = string.Empty;
     }
 
     internal static MMDevice GetDefaultMicrophoneDevice(string? preferredDeviceName = null)
@@ -5800,7 +6100,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         IWaveProvider? discordLoopbackWaveProvider = null,
         float discordLoopbackVolume = 0.45F,
         IWaveProvider? valorantLoopbackWaveProvider = null,
-        float valorantLoopbackVolume = 0.55F)
+        float valorantLoopbackVolume = 0.55F,
+        IWaveProvider? systemLoopbackWaveProvider = null,
+        float systemLoopbackVolume = 0.45F)
     {
         ISampleProvider microphoneSampleProvider = CreateMono48KhzSampleProvider(microphoneWaveProvider, "microphone");
         microphoneSampleProvider = new MicrophoneVoiceSampleProvider(microphoneSampleProvider, microphoneVolume, microphoneNoiseGate);
@@ -5838,6 +6140,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             additionalSampleProviders.Add(valorantLoopbackSampleProvider);
         }
 
+        if (systemLoopbackWaveProvider is not null)
+        {
+            ISampleProvider systemLoopbackSampleProvider = CreateMono48KhzSampleProvider(
+                systemLoopbackWaveProvider,
+                "system loopback");
+            systemLoopbackSampleProvider = new SimpleVolumeSampleProvider(
+                systemLoopbackSampleProvider,
+                Math.Clamp(systemLoopbackVolume, 0.0F, 1.0F));
+            additionalSampleProviders.Add(systemLoopbackSampleProvider);
+        }
+
         if (additionalSampleProviders.Count > 0)
         {
             MixingSampleProvider mixer = new(WaveFormat.CreateIeeeFloatWaveFormat(48000, 1))
@@ -5871,7 +6184,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
         else if (sampleProvider.WaveFormat.Channels != 1)
         {
-            throw new InvalidOperationException($"Unsupported {sourceLabel} channel count: {sampleProvider.WaveFormat.Channels}");
+            sampleProvider = new DownmixToMonoSampleProvider(sampleProvider);
         }
 
         if (sampleProvider.WaveFormat.SampleRate != 48000)
@@ -6073,6 +6386,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         string lineLoopbackStats = lineProcessLoopbackProvider?.GetStatusSummary() ?? "LINELoopbackCapturing: False.";
         string discordLoopbackStats = discordProcessLoopbackProvider?.GetStatusSummary() ?? "DiscordLoopbackCapturing: False.";
         string valorantLoopbackStats = valorantProcessLoopbackProvider?.GetStatusSummary() ?? "VALORANTLoopbackCapturing: False.";
+        string systemLoopbackStats = systemAudioLoopbackProvider?.GetStatusSummary() ?? "SystemLoopbackCapturing: False.";
 
         lock (audioStatsLock)
         {
@@ -6088,7 +6402,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     $"WrittenFrames: {writtenFrameCount}. WrittenAudibleFrames: {writtenAudibleFrameCount}. " +
                     $"WrittenSilenceFrames: {writtenSilenceFrameCount}. WrittenShortFrames: {writtenShortFrameCount}. " +
                     $"WrittenPeak: {writtenPeak:0.0000}. " +
-                    $"{lineLoopbackStats} {discordLoopbackStats} {valorantLoopbackStats}";
+                    $"{lineLoopbackStats} {discordLoopbackStats} {valorantLoopbackStats} {systemLoopbackStats}";
             }
         }
 
@@ -6883,6 +7197,52 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
 
             return samplesRead;
+        }
+    }
+
+    private sealed class DownmixToMonoSampleProvider : ISampleProvider
+    {
+        private readonly ISampleProvider sourceProvider;
+        private float[] sourceBuffer = [];
+
+        public DownmixToMonoSampleProvider(ISampleProvider sourceProvider)
+        {
+            if (sourceProvider.WaveFormat.Channels <= 1)
+            {
+                throw new InvalidOperationException("Downmix requires multi-channel input.");
+            }
+
+            this.sourceProvider = sourceProvider;
+            WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sourceProvider.WaveFormat.SampleRate, 1);
+        }
+
+        public WaveFormat WaveFormat { get; }
+
+        public int Read(float[] buffer, int offset, int count)
+        {
+            int channelCount = sourceProvider.WaveFormat.Channels;
+            int requestedSourceSamples = checked(count * channelCount);
+            if (sourceBuffer.Length < requestedSourceSamples)
+            {
+                sourceBuffer = new float[requestedSourceSamples];
+            }
+
+            int sourceSamplesRead = sourceProvider.Read(sourceBuffer, 0, requestedSourceSamples);
+            int completeFrameCount = sourceSamplesRead / channelCount;
+            for (int frameIndex = 0; frameIndex < completeFrameCount; frameIndex++)
+            {
+                float sampleSum = 0F;
+                int sourceFrameOffset = frameIndex * channelCount;
+                for (int channelIndex = 0; channelIndex < channelCount; channelIndex++)
+                {
+                    float channelSample = sourceBuffer[sourceFrameOffset + channelIndex];
+                    sampleSum += float.IsFinite(channelSample) ? channelSample : 0F;
+                }
+
+                buffer[offset + frameIndex] = sampleSum / channelCount;
+            }
+
+            return completeFrameCount;
         }
     }
 

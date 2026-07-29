@@ -54,6 +54,12 @@ public sealed class DiscordBotSettings
 
     public bool ValorantAudioCommandEnabled { get; set; } = true;
 
+    public bool StreamSystemAudioWhenRunning { get; set; }
+
+    public float SystemAudioVolume { get; set; } = 0.45F;
+
+    public bool SystemAudioCommandEnabled { get; set; } = true;
+
     public string VoiceJoinMode { get; set; } = DiscordVoiceJoinModeNames.ActivityOnlyValue;
 
     public bool VoiceJoinModeCommandEnabled { get; set; } = true;

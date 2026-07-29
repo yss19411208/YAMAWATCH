@@ -38,6 +38,7 @@ public sealed class DiscordBotSettingsStore
         ApplyEnvSettings(settings);
         settings.LineAudioVolume = NormalizeLineAudioVolume(settings.LineAudioVolume);
         settings.ValorantAudioVolume = Math.Clamp(settings.ValorantAudioVolume, 0.0F, 1.0F);
+        settings.SystemAudioVolume = Math.Clamp(settings.SystemAudioVolume, 0.0F, 1.0F);
         settings.VoiceJoinMode = DiscordVoiceJoinModeNames.ToValue(settings.GetVoiceJoinMode());
 
         if (!settings.Enabled)
@@ -101,6 +102,9 @@ public sealed class DiscordBotSettingsStore
             ValorantAudioProcessNames = ["VALORANT-Win64-Shipping", "VALORANT"],
             ValorantAudioVolume = 0.55F,
             ValorantAudioCommandEnabled = true,
+            StreamSystemAudioWhenRunning = false,
+            SystemAudioVolume = 0.45F,
+            SystemAudioCommandEnabled = true,
             VoiceJoinMode = DiscordVoiceJoinModeNames.ActivityOnlyValue,
             VoiceJoinModeCommandEnabled = true,
             TranscriptionEnabled = false,
@@ -310,6 +314,34 @@ public sealed class DiscordBotSettingsStore
             settings.ValorantAudioCommandEnabled = valorantAudioCommandEnabled;
         }
 
+        if (TryGetBoolean(
+            envValues,
+            out bool streamSystemAudio,
+            "DISCORD_STREAM_SYSTEM_AUDIO",
+            "DISCORD_STREAM_ALL_PC_AUDIO",
+            "VALOWATCH_SYSTEM_AUDIO_ENABLED"))
+        {
+            settings.StreamSystemAudioWhenRunning = streamSystemAudio;
+        }
+
+        if (TryGetSingle(
+            envValues,
+            out float systemAudioVolume,
+            "DISCORD_SYSTEM_AUDIO_VOLUME",
+            "VALOWATCH_SYSTEM_AUDIO_VOLUME"))
+        {
+            settings.SystemAudioVolume = Math.Clamp(systemAudioVolume, 0.0F, 1.0F);
+        }
+
+        if (TryGetBoolean(
+            envValues,
+            out bool systemAudioCommandEnabled,
+            "DISCORD_SYSTEM_AUDIO_COMMAND_ENABLED",
+            "VALOWATCH_SYSTEM_AUDIO_COMMAND_ENABLED"))
+        {
+            settings.SystemAudioCommandEnabled = systemAudioCommandEnabled;
+        }
+
         if (TryGetString(
             envValues,
             out string voiceJoinMode,
@@ -444,6 +476,9 @@ public sealed class DiscordBotSettingsStore
             "DISCORD_VALORANT_PROCESS_NAMES=VALORANT-Win64-Shipping,VALORANT",
             "DISCORD_VALORANT_AUDIO_VOLUME=0.55",
             "DISCORD_VALORANT_AUDIO_COMMAND_ENABLED=true",
+            "DISCORD_STREAM_SYSTEM_AUDIO=false",
+            "DISCORD_SYSTEM_AUDIO_VOLUME=0.45",
+            "DISCORD_SYSTEM_AUDIO_COMMAND_ENABLED=true",
             "DISCORD_VOICE_JOIN_MODE=activity",
             "DISCORD_VOICE_JOIN_MODE_COMMAND_ENABLED=true",
             "VALOWATCH_TRANSCRIPTION_ENABLED=false",
