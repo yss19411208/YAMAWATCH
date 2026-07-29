@@ -2034,8 +2034,8 @@ static class Program
 
         try
         {
-            bool voiceConnectTimeoutRecyclesGateway =
-                !DiscordBotVoiceRelay.ShouldKeepGatewayOnlineAfterStartupTimeout(
+            bool voiceConnectTimeoutKeepsGateway =
+                DiscordBotVoiceRelay.ShouldKeepGatewayOnlineAfterStartupTimeout(
                     DiscordBotVoiceRelay.DiscordVoiceChannelConnectStartupStage,
                     isOnline: true,
                     hasDiscordClient: true);
@@ -2055,7 +2055,7 @@ static class Program
                     isOnline: true,
                     hasDiscordClient: false);
             bool retryPolicyReady =
-                voiceConnectTimeoutRecyclesGateway &&
+                voiceConnectTimeoutKeepsGateway &&
                 gatewayTimeoutKeepsReusableGateway &&
                 disconnectedGatewayIsNotKept &&
                 missingClientIsNotKept;
@@ -2065,7 +2065,7 @@ static class Program
                 logFilePath,
                 $"{DateTimeOffset.Now:O} [Diagnostics] Discord retry policy check: " +
                 $"{(retryPolicyReady ? "ready" : "failed")}. " +
-                $"VoiceConnectRecyclesGateway: {voiceConnectTimeoutRecyclesGateway}. " +
+                $"VoiceConnectKeepsGateway: {voiceConnectTimeoutKeepsGateway}. " +
                 $"ReusableGatewayKept: {gatewayTimeoutKeepsReusableGateway}. " +
                 $"DisconnectedGatewayNotKept: {disconnectedGatewayIsNotKept}. " +
                 $"MissingClientNotKept: {missingClientIsNotKept}.");

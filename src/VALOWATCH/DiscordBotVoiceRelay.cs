@@ -421,15 +421,32 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
         catch (TimeoutException exception)
         {
-            WriteLog($"Discord startup timed out during {startupStage}. Stopping Discord client before retry.", exception);
+            bool keepGatewayOnline = ShouldKeepGatewayOnlineAfterStartupTimeout(
+                startupStage,
+                IsOnline,
+                discordClient is not null);
+            WriteLog(
+                keepGatewayOnline
+                    ? $"Discord startup timed out during {startupStage}. Keeping Discord gateway online before retry."
+                    : $"Discord startup timed out during {startupStage}. Stopping Discord client before retry.",
+                exception);
             await StopCoreAsync(
                     resetValorantNotificationSession: false,
-                    keepDiscordGatewayOnline: ShouldKeepGatewayOnlineAfterStartupTimeout(
-                        startupStage,
-                        IsOnline,
-                        discordClient is not null))
+                    keepDiscordGatewayOnline: keepGatewayOnline)
                 .ConfigureAwait(false);
             StatusText = $"Discord timed out: {startupStage}";
+        }
+        catch (ObjectDisposedException) when (string.Equals(
+                   startupStage,
+                   DiscordVoiceChannelConnectStartupStage,
+                   StringComparison.Ordinal))
+        {
+            WriteLog("Discord voice channel connect observed a disposed voice client during retry; keeping the gateway online.");
+            await StopCoreAsync(
+                    resetValorantNotificationSession: false,
+                    keepDiscordGatewayOnline: IsOnline && discordClient is not null)
+                .ConfigureAwait(false);
+            StatusText = $"Discord retrying: {startupStage}";
         }
         catch (Exception exception)
         {
@@ -596,6 +613,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
         catch (Exception exception)
         {
+            if (exception is ObjectDisposedException)
+            {
+                WriteLog("Discord voice channel connect finished after timeout after cleanup; no stale voice client remained.");
+                return;
+            }
+
             WriteLog(
                 "Discord voice channel connect finished after timeout with no reusable voice client.",
                 exception);
@@ -607,12 +630,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         bool isOnline,
         bool hasDiscordClient)
     {
-        return !string.Equals(
-                startupStage,
-                DiscordVoiceChannelConnectStartupStage,
-                StringComparison.Ordinal) &&
-            isOnline &&
-            hasDiscordClient;
+        return isOnline && hasDiscordClient;
     }
 
     public async Task<bool> NotifyLineOpenedAsync(string message)
@@ -2224,7 +2242,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     {
         ScreenStreamSession? sessionSnapshot;
         ScreenStreamOptions? requestedOptionsSnapshot;
-        IMessageChannel? notifyChannelSnapshot;
         int requestGenerationSnapshot;
         await screenStreamSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -2236,7 +2253,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
             requestedOptionsSnapshot = requestedScreenStreamOptions;
             sessionSnapshot = activeScreenStreamSession;
-            notifyChannelSnapshot = activeScreenStreamNotifyChannel ?? discordStatusTextChannel;
             requestGenerationSnapshot = screenStreamRequestGeneration;
         }
         finally
@@ -2289,17 +2305,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     $"Url: {sessionSnapshot.PublicUrl}. Detail: {healthStatus.Detail}. " +
                     "The existing quick tunnel URL will be kept while cloudflared is still running.");
             }
-            if (failureCount == ScreenStreamPublicUrlDiagnosticNotificationThreshold ||
-                failureCount % 80 == 0)
-            {
-                await SendScreenStreamHealthDiagnosticNotificationAsync(
-                        notifyChannelSnapshot,
-                        sessionSnapshot,
-                        healthStatus,
-                        failureCount)
-                    .ConfigureAwait(false);
-            }
-
             return;
         }
 
@@ -2728,6 +2733,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private static string BuildStreamPublicUrlStatusText(ScreenStreamSession session)
     {
+        if (!session.PublicUrlHasBeenHealthy)
+        {
+            return "接続確認: 確認中。URLは保持します。開けない場合は数秒後に再読み込みしてください。";
+        }
+
         if (session.PublicUrlHasBeenHealthy)
         {
             string healthyAtText = session.PublicUrlLastHealthyAtUtc.HasValue

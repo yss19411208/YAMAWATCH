@@ -32,7 +32,9 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
     public const int H264Fmp4MinimumFragmentDurationMicroseconds = 250000;
     public const int H264Fmp4InitialFragmentCount = 6;
     public const int H264Fmp4RetainedFragmentCount = 72;
-    public const int H264Fmp4MaximumAppendQueueLength = 60;
+    public const int H264Fmp4MaximumAppendQueueLength = 24;
+    public const int H264Fmp4QueueDropKeepCount = 6;
+    public const int H264Fmp4MaximumServerFragmentLag = 12;
     public const int H264Fmp4NetworkWriteTimeoutMilliseconds = 8000;
     public const double H264KeyframeIntervalSeconds = 0.5D;
     private const string MjpegBoundary = "valowatchframe";
@@ -566,6 +568,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
         string seekCooldownMillisecondsText = H264Fmp4SeekCooldownMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string reconnectStallMillisecondsText = H264Fmp4ReconnectStallMilliseconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string maximumAppendQueueLengthText = H264Fmp4MaximumAppendQueueLength.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string queueDropKeepCountText = H264Fmp4QueueDropKeepCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
         string fragmentDurationMillisecondsText = (H264Fmp4FragmentDurationMicroseconds / 1000D).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
         string mediaScript = Options.Method switch
         {
@@ -605,6 +608,7 @@ const latencyCheckMilliseconds = {{latencyCheckIntervalMillisecondsText}};
 const seekCooldownMilliseconds = {{seekCooldownMillisecondsText}};
 const reconnectStallMilliseconds = {{reconnectStallMillisecondsText}};
 const maximumAppendQueueLength = {{maximumAppendQueueLengthText}};
+const queueDropKeepCount = {{queueDropKeepCountText}};
 const fragmentDurationMilliseconds = {{fragmentDurationMillisecondsText}};
 const websocketReconnectDelayMilliseconds = 450;
 const blackFrameReconnectMilliseconds = 3200;
@@ -654,6 +658,8 @@ const streamMetrics = window.valowatchStreamMetrics = {
   fetchFallbackCount: 0,
   websocketReconnectCount: 0,
   fragmentStallRecoveryCount: 0,
+  queueDropCount: 0,
+  liveEdgeSeekCount: 0,
   stallCount: 0,
   waitingCount: 0,
   playbackStartCount: 0,
@@ -758,7 +764,7 @@ function isFmp4PageHidden() {
   return document.hidden || document.visibilityState === 'hidden';
 }
 function suspendFmp4ForHiddenPage(forceSuspend = false) {
-  if (!forceSuspend) {
+  if (!forceSuspend && !isFmp4PageHidden()) {
     return false;
   }
 
@@ -859,8 +865,8 @@ function hasFmp4SmoothStartupBuffer() {
   const requiredLatencySeconds = fmp4PlaybackHasStarted ? targetLatencySeconds : startupBufferSeconds;
   return !!latencyState && latencyState.latencySeconds >= requiredLatencySeconds;
 }
-function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds) {
-  if (nowMilliseconds - lastSeekAtMilliseconds < seekCooldownMilliseconds) {
+function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds, forceSeek = false) {
+  if (!forceSeek && nowMilliseconds - lastSeekAtMilliseconds < seekCooldownMilliseconds) {
     return false;
   }
 
@@ -875,6 +881,7 @@ function seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds) {
     lastSeekAtMilliseconds = nowMilliseconds;
     lastPlaybackMovedAtMilliseconds = nowMilliseconds;
     lastPlaybackTime = correctedTime;
+    streamMetrics.liveEdgeSeekCount += 1;
     return true;
   } catch {
     return false;
@@ -1051,12 +1058,19 @@ function keepFmp4LatencyLow() {
   }
 
   if (latencySeconds > restartLatencySeconds && !directFallbackActive) {
-    reconnectFmp4Stream(true);
+    dropQueuedFmp4ToLive(Math.max(2, Math.floor(queueDropKeepCount / 2)));
+    if (seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds, true)) {
+      updateFmp4Metrics(latencyState);
+      return;
+    }
+
+    recoverFmp4Transport(true);
     return;
   }
 
   if (latencySeconds > maximumLatencySeconds) {
-    const seeked = seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds);
+    dropQueuedFmp4ToLive(queueDropKeepCount);
+    const seeked = seekFmp4NearLiveEdge(bufferedEnd, nowMilliseconds, latencySeconds > maximumLatencySeconds + 0.75);
     if (!seeked && !directFallbackActive && latencySeconds > restartLatencySeconds) {
       reconnectFmp4Stream();
       return;
@@ -1217,12 +1231,22 @@ function queueFmp4Bytes(bytes, session = activeStreamSession) {
   appendQueue.push(bytes);
   streamMetrics.queueLength = appendQueue.length;
   if (appendQueue.length > maximumAppendQueueLength) {
-    streamMetrics.queueOverflowCount += 1;
-    reconnectFmp4Stream(true);
-    return;
+    dropQueuedFmp4ToLive(queueDropKeepCount);
   }
 
   pumpFmp4AppendQueue(session);
+}
+function dropQueuedFmp4ToLive(keepCount = queueDropKeepCount) {
+  if (appendQueue.length <= keepCount) {
+    return false;
+  }
+
+  const droppedCount = appendQueue.length - keepCount;
+  appendQueue = appendQueue.slice(-keepCount);
+  streamMetrics.queueOverflowCount += 1;
+  streamMetrics.queueDropCount += droppedCount;
+  streamMetrics.queueLength = appendQueue.length;
+  return true;
 }
 function pumpFmp4AppendQueue(session = activeStreamSession) {
   if (session !== activeStreamSession || !sourceBuffer || sourceBuffer.updating || appendQueue.length === 0) {
@@ -2100,7 +2124,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 Volatile.Write(ref lastFmp4FragmentSequence, fragment.Sequence);
                 copiedBytes += fragment.Bytes.Length;
                 copiedMessages++;
-                nextFragmentSequence = fragment.Sequence + 1L;
+                nextFragmentSequence = CalculateNextLiveEdgeFragmentSequence(
+                    source,
+                    fragment,
+                    fragment.Sequence + 1L);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -2148,6 +2175,21 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 $"AverageBytesPerSecond: {(copiedBytes / elapsedSeconds).ToString("0", System.Globalization.CultureInfo.InvariantCulture)}.",
                 null);
         }
+    }
+
+    private static long CalculateNextLiveEdgeFragmentSequence(
+        Fmp4LiveFragmentSource source,
+        Fmp4Fragment sentFragment,
+        long defaultNextSequence)
+    {
+        long latestSequence = source.LatestSequence;
+        if (latestSequence - sentFragment.Sequence <= H264Fmp4MaximumServerFragmentLag)
+        {
+            return defaultNextSequence;
+        }
+
+        long liveEdgeSequence = latestSequence - H264Fmp4InitialFragmentCount + 1L;
+        return Math.Max(defaultNextSequence, liveEdgeSequence);
     }
 
     private async Task WriteFmp4StreamResponseAsync(NetworkStream networkStream, CancellationToken cancellationToken)
@@ -2213,7 +2255,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 await WriteNetworkBytesWithTimeoutAsync(networkStream, fragment.Bytes, cancellationToken).ConfigureAwait(false);
                 copiedBytes += fragment.Bytes.Length;
                 copiedFragments++;
-                nextFragmentSequence = fragment.Sequence + 1L;
+                nextFragmentSequence = CalculateNextLiveEdgeFragmentSequence(
+                    source,
+                    fragment,
+                    fragment.Sequence + 1L);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
