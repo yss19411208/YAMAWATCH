@@ -470,8 +470,8 @@ internal sealed record ResourceLoadTestLimits(
     int MaxMemoryPercent,
     int MaxDurationMinutes)
 {
-    public const int HardMaxCpuPercent = 95;
-    public const int HardMaxMemoryPercent = 90;
+    public const int HardMaxCpuPercent = 99;
+    public const int HardMaxMemoryPercent = 99;
     public const int HardMaxDurationMinutes = 60;
     public const int DefaultMaxCpuPercent = 80;
     public const int DefaultMaxMemoryPercent = 70;
