@@ -2534,19 +2534,45 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                         option.Name, PowerShellScriptOptionName, StringComparison.OrdinalIgnoreCase))
                     ?.Value as string ?? string.Empty;
 
-                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
-                PowerShellExecutionResult result = await powerShellController
-                    .ExecuteAsync(password, script)
-                    .ConfigureAwait(false);
-                string formatted = PowerShellCommandController.FormatForDiscord(result);
-                if (formatted.Length > 1900)
-                {
-                    formatted = formatted[..1900] + "\n…(省略)";
-                }
-
+                // 「考え中...」を出さず、即座に受付だけ返す。実行は裏で走らせ、
+                // 終わったら別メッセージ（Followup）で結果を届ける。
                 await command
-                    .FollowupAsync(formatted, ephemeral: true)
+                    .RespondAsync("▶ PowerShellの実行を受け付けました。完了したら結果を送ります。", ephemeral: true)
                     .ConfigureAwait(false);
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        PowerShellExecutionResult result = await powerShellController
+                            .ExecuteAsync(password, script)
+                            .ConfigureAwait(false);
+                        string formatted = PowerShellCommandController.FormatForDiscord(result);
+                        if (formatted.Length > 1900)
+                        {
+                            formatted = formatted[..1900] + "\n…(省略)";
+                        }
+
+                        await command
+                            .FollowupAsync(formatted, ephemeral: true)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception backgroundException)
+                    {
+                        WriteLog("PowerShell background execution failed.", backgroundException);
+                        try
+                        {
+                            await command
+                                .FollowupAsync("PowerShellの実行中にエラーが発生しました。", ephemeral: true)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception followupException)
+                        {
+                            WriteLog("Failed to send PowerShell error followup.", followupException);
+                        }
+                    }
+                });
+
                 return;
             }
 
