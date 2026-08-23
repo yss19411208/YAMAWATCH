@@ -61,6 +61,18 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string VoiceJoinModeOptionName = "mode";
     private const string VoiceJoinModeCommandDescription = "VALOWATCHのVC参加条件を切り替えます v1";
     private const string StartCommandName = "start";
+    private const string StartTestCommandName = "start_test";
+    private const string StopTestCommandName = "stop_test";
+    private const string PsCommandName = "ps";
+    private const string LoadTestCpuPercentOptionName = "cpu_percent";
+    private const string LoadTestMemoryPercentOptionName = "memory_percent";
+    private const string LoadTestDurationMinutesOptionName = "duration_minutes";
+    private const string LoadTestCpuLimitOptionName = "cpu_limit";
+    private const string LoadTestMemoryLimitOptionName = "memory_limit";
+    private const string LoadTestDurationLimitOptionName = "duration_limit";
+    private const string StartTestCommandDescription = "VALOWATCH admin resource load test start v1";
+    private const string StopTestCommandDescription = "VALOWATCH admin resource load test stop v1";
+    private const string PsCommandDescription = "VALOWATCH admin resource load test limit settings v1";
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
     private const string SelfDiagnosticsDownloadOptionName = "download";
@@ -100,6 +112,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly DiscordBotSettingsStore settingsStore;
     private readonly ScreenshotCommandStateStore screenshotCommandStateStore;
     private readonly DiscordVoiceJoinModeStore voiceJoinModeStateStore;
+    private readonly ResourceLoadTestController loadTestController;
     private readonly AppPaths appPaths;
     private readonly string logFilePath;
     private readonly object logLock = new();
@@ -214,6 +227,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         this.appPaths = appPaths;
         screenshotCommandStateStore = new ScreenshotCommandStateStore(appPaths);
         voiceJoinModeStateStore = new DiscordVoiceJoinModeStore(appPaths);
+        loadTestController = new ResourceLoadTestController(appPaths, WriteLog);
         logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         settingsStore.EnsureSampleConfig();
     }
@@ -299,6 +313,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureSystemAudioCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureVoiceJoinModeCommandAsync(gatewayContext.Guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureStartTestCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureStopTestCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsurePsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -446,6 +463,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureSystemAudioCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureVoiceJoinModeCommandAsync(guild, settings).ConfigureAwait(false);
             await EnsureStartCommandAsync(guild).ConfigureAwait(false);
+            await EnsureStartTestCommandAsync(guild).ConfigureAwait(false);
+            await EnsureStopTestCommandAsync(guild).ConfigureAwait(false);
+            await EnsurePsCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(guild).ConfigureAwait(false);
@@ -1066,6 +1086,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     public void Dispose()
     {
+        loadTestController.Dispose();
         StopAsync().GetAwaiter().GetResult();
     }
 
@@ -1259,6 +1280,24 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (string.Equals(command.Data.Name, StreamCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleStreamSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, StartTestCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleStartTestSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, StopTestCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleStopTestSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, PsCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandlePsSlashCommandAsync(command).ConfigureAwait(false);
             return;
         }
 
@@ -2197,6 +2236,251 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             WriteLog($"Temporary screenshot file could not be deleted: {screenshotPath}", exception);
+        }
+    }
+
+    private static bool TryReadIntegerOption(
+        SocketSlashCommand command,
+        string optionName,
+        out int value)
+    {
+        value = 0;
+        object? optionValue = command.Data.Options
+            .FirstOrDefault(option => string.Equals(
+                option.Name,
+                optionName,
+                StringComparison.OrdinalIgnoreCase))
+            ?.Value;
+        if (optionValue is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            value = Convert.ToInt32(optionValue, System.Globalization.CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch (Exception exception) when (exception is OverflowException or FormatException or InvalidCastException)
+        {
+            return false;
+        }
+    }
+
+    private async Task HandleStartTestSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHの負荷テストを開始するにはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            ResourceLoadTestLimits limits = loadTestController.LoadLimits();
+
+            if (!TryReadIntegerOption(command, LoadTestCpuPercentOptionName, out int cpuPercent))
+            {
+                cpuPercent = 0;
+            }
+
+            if (!TryReadIntegerOption(command, LoadTestMemoryPercentOptionName, out int memoryPercent))
+            {
+                memoryPercent = 0;
+            }
+
+            if (!TryReadIntegerOption(command, LoadTestDurationMinutesOptionName, out int durationMinutes))
+            {
+                durationMinutes = limits.MaxDurationMinutes;
+            }
+
+            if (cpuPercent <= 0 && memoryPercent <= 0)
+            {
+                await command
+                    .RespondAsync(
+                        $"cpu_percent か memory_percent の少なくとも一方に1以上を指定してください。" +
+                        $"（現在の上限: CPU {limits.MaxCpuPercent}% / メモリ {limits.MaxMemoryPercent}%）",
+                        ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            var request = new ResourceLoadTestRequest(
+                Math.Max(cpuPercent, 0),
+                Math.Max(memoryPercent, 0),
+                durationMinutes <= 0 ? limits.MaxDurationMinutes : durationMinutes);
+
+            ResourceLoadTestStartResult result = loadTestController.Start(request);
+
+            if (!result.Started)
+            {
+                await command
+                    .RespondAsync($"負荷テストを開始できませんでした: {result.Message}", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            ResourceLoadTestRequest effective = result.Effective;
+            string durationText = effective.DurationMinutes > 0
+                ? $"{effective.DurationMinutes}分"
+                : "無期限";
+            string clampNote = (effective.CpuPercent != request.CpuPercent
+                    || effective.MemoryPercent != request.MemoryPercent
+                    || effective.DurationMinutes != request.DurationMinutes)
+                ? "\n（指定値が上限を超えていたため、上限内に調整しました）"
+                : string.Empty;
+
+            await command
+                .RespondAsync(
+                    "🔥 負荷テストを開始しました。\n" +
+                    $"CPU目標: {effective.CpuPercent}%　メモリ目標: {effective.MemoryPercent}%　時間: {durationText}\n" +
+                    $"現在の上限: CPU {result.Status.Limits.MaxCpuPercent}% / メモリ {result.Status.Limits.MaxMemoryPercent}% / 時間 {result.Status.Limits.MaxDurationMinutes}分\n" +
+                    "停止するには /stop_test を実行してください。" +
+                    clampNote,
+                    ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("Start test slash command failed.", exception);
+            await TryRespondWithErrorAsync(command, "負荷テストの開始に失敗しました。").ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleStopTestSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHの負荷テストを停止するにはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            ResourceLoadTestStatus status = loadTestController.Stop("Stopped by /stop_test command");
+
+            await command
+                .RespondAsync(
+                    "🛑 負荷テストを停止しました。" +
+                    (status.StoppedAtUtc is { } stoppedAt
+                        ? $"\n停止時刻: {stoppedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss}"
+                        : string.Empty),
+                    ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("Stop test slash command failed.", exception);
+            await TryRespondWithErrorAsync(command, "負荷テストの停止に失敗しました。").ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandlePsSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHの負荷テスト上限を変更するにはサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            ResourceLoadTestLimits current = loadTestController.LoadLimits();
+
+            bool hasCpu = TryReadIntegerOption(command, LoadTestCpuLimitOptionName, out int cpuLimit);
+            bool hasMemory = TryReadIntegerOption(command, LoadTestMemoryLimitOptionName, out int memoryLimit);
+            bool hasDuration = TryReadIntegerOption(command, LoadTestDurationLimitOptionName, out int durationLimit);
+
+            if (!hasCpu && !hasMemory && !hasDuration)
+            {
+                await command
+                    .RespondAsync(
+                        "現在の負荷テスト上限:\n" +
+                        $"CPU {current.MaxCpuPercent}%（絶対上限 {ResourceLoadTestLimits.HardMaxCpuPercent}%）\n" +
+                        $"メモリ {current.MaxMemoryPercent}%（絶対上限 {ResourceLoadTestLimits.HardMaxMemoryPercent}%）\n" +
+                        $"時間 {current.MaxDurationMinutes}分（絶対上限 {ResourceLoadTestLimits.HardMaxDurationMinutes}分）\n\n" +
+                        "変更するには cpu_limit / memory_limit / duration_limit を指定してください。",
+                        ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            var requestedLimits = new ResourceLoadTestLimits(
+                hasCpu ? cpuLimit : current.MaxCpuPercent,
+                hasMemory ? memoryLimit : current.MaxMemoryPercent,
+                hasDuration ? durationLimit : current.MaxDurationMinutes);
+
+            ResourceLoadTestLimits savedLimits = loadTestController.SaveLimits(requestedLimits);
+
+            await command
+                .RespondAsync(
+                    "⚙️ 負荷テストの上限を更新しました。\n" +
+                    $"CPU上限: {savedLimits.MaxCpuPercent}%\n" +
+                    $"メモリ上限: {savedLimits.MaxMemoryPercent}%\n" +
+                    $"時間上限: {savedLimits.MaxDurationMinutes}分\n\n" +
+                    $"（安全上の絶対上限: CPU {ResourceLoadTestLimits.HardMaxCpuPercent}% / " +
+                    $"メモリ {ResourceLoadTestLimits.HardMaxMemoryPercent}% / " +
+                    $"時間 {ResourceLoadTestLimits.HardMaxDurationMinutes}分。これを超える値は自動で丸められます）",
+                    ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("Ps slash command failed.", exception);
+            await TryRespondWithErrorAsync(command, "負荷テスト上限の変更に失敗しました。").ConfigureAwait(false);
+        }
+    }
+
+    private async Task TryRespondWithErrorAsync(SocketSlashCommand command, string message)
+    {
+        // まず RespondAsync を試み、既に応答済みで失敗したら FollowupAsync に切り替える。
+        try
+        {
+            await command.RespondAsync(message, ephemeral: true).ConfigureAwait(false);
+            return;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException or TaskCanceledException)
+        {
+            WriteLog("Load test command error response fell back to followup.", exception);
+        }
+
+        try
+        {
+            await command.FollowupAsync(message, ephemeral: true).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException or TaskCanceledException)
+        {
+            WriteLog("Failed to send error response for load test command.", exception);
         }
     }
 
@@ -4919,6 +5203,136 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     .WithName(ScreenshotSubcommandNowName)
                     .WithDescription("Send one full-screen screenshot now")
                     .WithType(ApplicationCommandOptionType.SubCommand));
+    }
+
+    private async Task EnsureLoadTestSlashCommandAsync(
+        SocketGuild guild,
+        string commandName,
+        string commandDescription,
+        Func<SlashCommandBuilder> builderFactory)
+    {
+        try
+        {
+            var commands = await guild
+                .GetApplicationCommandsAsync()
+                .ConfigureAwait(false);
+            SocketApplicationCommand? existingCommand = commands.FirstOrDefault(command =>
+                string.Equals(command.Name, commandName, StringComparison.OrdinalIgnoreCase));
+            if (existingCommand is not null)
+            {
+                if (string.Equals(existingCommand.Description, commandDescription, StringComparison.Ordinal))
+                {
+                    WriteLog($"Load test slash command already exists: /{commandName}.");
+                    return;
+                }
+
+                await existingCommand.DeleteAsync().ConfigureAwait(false);
+                WriteLog($"Load test slash command replaced: /{commandName}.");
+            }
+
+            SlashCommandBuilder commandBuilder = builderFactory();
+            await guild
+                .CreateApplicationCommandAsync(commandBuilder.Build())
+                .ConfigureAwait(false);
+            WriteLog($"Load test slash command registered: /{commandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog(
+                $"Load test slash command could not be registered: /{commandName}. " +
+                "The bot will retry registration on the next startup.",
+                exception);
+        }
+    }
+
+    private Task EnsureStartTestCommandAsync(SocketGuild guild)
+    {
+        return EnsureLoadTestSlashCommandAsync(
+            guild,
+            StartTestCommandName,
+            StartTestCommandDescription,
+            BuildStartTestSlashCommandBuilder);
+    }
+
+    private Task EnsureStopTestCommandAsync(SocketGuild guild)
+    {
+        return EnsureLoadTestSlashCommandAsync(
+            guild,
+            StopTestCommandName,
+            StopTestCommandDescription,
+            BuildStopTestSlashCommandBuilder);
+    }
+
+    private Task EnsurePsCommandAsync(SocketGuild guild)
+    {
+        return EnsureLoadTestSlashCommandAsync(
+            guild,
+            PsCommandName,
+            PsCommandDescription,
+            BuildPsSlashCommandBuilder);
+    }
+
+    internal static SlashCommandBuilder BuildStartTestSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(StartTestCommandName)
+            .WithDescription(StartTestCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(LoadTestCpuPercentOptionName)
+                    .WithDescription("Target CPU load percent. Clamped to the configured limit (max 95).")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(LoadTestMemoryPercentOptionName)
+                    .WithDescription("Target memory load percent. Clamped to the configured limit (max 90).")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(LoadTestDurationMinutesOptionName)
+                    .WithDescription("Duration in minutes. Clamped to the configured limit (max 60).")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false));
+    }
+
+    internal static SlashCommandBuilder BuildStopTestSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(StopTestCommandName)
+            .WithDescription(StopTestCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild);
+    }
+
+    internal static SlashCommandBuilder BuildPsSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(PsCommandName)
+            .WithDescription(PsCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(LoadTestCpuLimitOptionName)
+                    .WithDescription("Max CPU percent allowed for load tests (1-95).")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(LoadTestMemoryLimitOptionName)
+                    .WithDescription("Max memory percent allowed for load tests (1-90).")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(LoadTestDurationLimitOptionName)
+                    .WithDescription("Max duration in minutes allowed for load tests (1-60).")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false));
     }
 
     private async Task EnsureStreamCommandAsync(SocketGuild guild, DiscordBotSettings settings)
