@@ -151,7 +151,14 @@ internal sealed class PowerShellCommandController
     {
         // 進捗バー（CLIXML）が stderr に漏れて文字化けするのを防ぐため、
         // スクリプトの先頭で進捗表示を抑制する。
-        string wrappedScript = "$ProgressPreference = 'SilentlyContinue'\r\n" + script;
+        // あわせて、日本語Windowsでは既定の出力が CP932 になり UTF-8 で読むと
+        // 文字化けするため、出力エンコーディングを UTF-8 に統一する。
+        string wrappedScript =
+            "$ProgressPreference = 'SilentlyContinue'\r\n" +
+            "$OutputEncoding = [System.Text.Encoding]::UTF8\r\n" +
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n" +
+            "[Console]::InputEncoding = [System.Text.Encoding]::UTF8\r\n" +
+            script;
 
         var startInfo = new ProcessStartInfo
         {
