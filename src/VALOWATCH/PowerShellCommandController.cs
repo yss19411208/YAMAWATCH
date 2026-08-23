@@ -23,6 +23,7 @@ internal sealed class PowerShellCommandController
     private const int MaxFailedAttempts = 5;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan ExecutionTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ProgressUpdateInterval = TimeSpan.FromSeconds(2);
     private const int Pbkdf2Iterations = 210_000;
     private const int SaltBytes = 16;
     private const int HashBytes = 32;
@@ -93,7 +94,10 @@ internal sealed class PowerShellCommandController
     /// <summary>
     /// パスワードを照合し、一致すれば PowerShell を実行する。
     /// </summary>
-    public async Task<PowerShellExecutionResult> ExecuteAsync(string password, string script)
+    public async Task<PowerShellExecutionResult> ExecuteAsync(
+        string password,
+        string script,
+        Func<string, Task>? onProgress = null)
     {
         lock (gate)
         {
@@ -138,11 +142,17 @@ internal sealed class PowerShellCommandController
         }
 
         writeLog($"PowerShell command execution started. Length: {script.Length} chars.", null);
-        return await RunPowerShellAsync(script).ConfigureAwait(false);
+        return await RunPowerShellAsync(script, onProgress).ConfigureAwait(false);
     }
 
-    private async Task<PowerShellExecutionResult> RunPowerShellAsync(string script)
+    private async Task<PowerShellExecutionResult> RunPowerShellAsync(
+        string script,
+        Func<string, Task>? onProgress)
     {
+        // 進捗バー（CLIXML）が stderr に漏れて文字化けするのを防ぐため、
+        // スクリプトの先頭で進捗表示を抑制する。
+        string wrappedScript = "$ProgressPreference = 'SilentlyContinue'\r\n" + script;
+
         var startInfo = new ProcessStartInfo
         {
             FileName = "powershell.exe",
@@ -159,24 +169,34 @@ internal sealed class PowerShellCommandController
         startInfo.ArgumentList.Add("-ExecutionPolicy");
         startInfo.ArgumentList.Add("Bypass");
         startInfo.ArgumentList.Add("-EncodedCommand");
-        startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(script)));
+        startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(wrappedScript)));
 
         using var process = new Process { StartInfo = startInfo };
         var outputBuilder = new StringBuilder();
         var errorBuilder = new StringBuilder();
+        var progressLock = new object();
+        bool progressDirty = false;
 
         process.OutputDataReceived += (_, args) =>
         {
             if (args.Data is not null)
             {
-                outputBuilder.AppendLine(args.Data);
+                lock (progressLock)
+                {
+                    outputBuilder.AppendLine(args.Data);
+                    progressDirty = true;
+                }
             }
         };
         process.ErrorDataReceived += (_, args) =>
         {
             if (args.Data is not null)
             {
-                errorBuilder.AppendLine(args.Data);
+                lock (progressLock)
+                {
+                    errorBuilder.AppendLine(args.Data);
+                    progressDirty = true;
+                }
             }
         };
 
@@ -191,6 +211,41 @@ internal sealed class PowerShellCommandController
             process.BeginErrorReadLine();
 
             using var timeoutCts = new CancellationTokenSource(ExecutionTimeout);
+
+            // 出力が溜まったら、一定間隔で途中経過を通知する（リアルタイム更新）。
+            Task? progressLoop = null;
+            if (onProgress is not null)
+            {
+                progressLoop = Task.Run(async () =>
+                {
+                    while (!process.HasExited && !timeoutCts.IsCancellationRequested)
+                    {
+                        await Task.Delay(ProgressUpdateInterval).ConfigureAwait(false);
+                        string? snapshot = null;
+                        lock (progressLock)
+                        {
+                            if (progressDirty)
+                            {
+                                snapshot = BuildCombined(outputBuilder, errorBuilder);
+                                progressDirty = false;
+                            }
+                        }
+
+                        if (snapshot is not null)
+                        {
+                            try
+                            {
+                                await onProgress(snapshot).ConfigureAwait(false);
+                            }
+                            catch (Exception progressException)
+                            {
+                                writeLog("PowerShell progress update failed.", progressException);
+                            }
+                        }
+                    }
+                });
+            }
+
             try
             {
                 await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
@@ -199,10 +254,20 @@ internal sealed class PowerShellCommandController
             {
                 TryKill(process);
                 writeLog("PowerShell command timed out and was terminated.", null);
+                if (progressLoop is not null)
+                {
+                    await progressLoop.ConfigureAwait(false);
+                }
+
                 return PowerShellExecutionResult.Completed(
                     -1,
                     outputBuilder.ToString(),
                     errorBuilder.ToString() + $"\n(実行が{ExecutionTimeout.TotalMinutes:0}分を超えたため強制終了しました)");
+            }
+
+            if (progressLoop is not null)
+            {
+                await progressLoop.ConfigureAwait(false);
             }
 
             writeLog($"PowerShell command finished. ExitCode: {process.ExitCode}.", null);
@@ -218,6 +283,18 @@ internal sealed class PowerShellCommandController
         }
     }
 
+    private static string BuildCombined(StringBuilder outputBuilder, StringBuilder errorBuilder)
+    {
+        string combined = outputBuilder.ToString();
+        string errors = errorBuilder.ToString();
+        if (!string.IsNullOrWhiteSpace(errors))
+        {
+            combined += "\n[stderr]\n" + errors;
+        }
+
+        return combined;
+    }
+
     private static void TryKill(Process process)
     {
         try
@@ -231,6 +308,24 @@ internal sealed class PowerShellCommandController
         {
             // 既に終了している等は無視する
         }
+    }
+
+    public static string FormatProgressForDiscord(string combinedOutput)
+    {
+        string combined = combinedOutput.Trim();
+        if (combined.Length == 0)
+        {
+            combined = "(まだ出力はありません)";
+        }
+
+        bool truncated = combined.Length > MaxOutputCharacters;
+        if (truncated)
+        {
+            // 途中経過は「新しい方」を優先して末尾を見せる。
+            combined = "…(前略)\n" + combined[^MaxOutputCharacters..];
+        }
+
+        return $"⏳ 実行中…\n```\n{combined}\n```";
     }
 
     public static string FormatForDiscord(PowerShellExecutionResult result)

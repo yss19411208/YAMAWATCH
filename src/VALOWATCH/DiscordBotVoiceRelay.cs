@@ -2534,27 +2534,79 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                         option.Name, PowerShellScriptOptionName, StringComparison.OrdinalIgnoreCase))
                     ?.Value as string ?? string.Empty;
 
-                // 「考え中...」を出さず、即座に受付だけ返す。実行は裏で走らせ、
-                // 終わったら別メッセージ（Followup）で結果を届ける。
+                // コマンド入力（パスワードを含む）は本人にだけ見えるよう ephemeral で受け付ける。
+                // 結果は実行したチャンネルに投稿し、実行中はそのメッセージを編集して
+                // リアルタイムに途中経過を見せる。
                 await command
-                    .RespondAsync("▶ PowerShellの実行を受け付けました。完了したら結果を送ります。", ephemeral: true)
+                    .RespondAsync("▶ 実行を受け付けました。結果はこのチャンネルに表示します。", ephemeral: true)
                     .ConfigureAwait(false);
+
+                IMessageChannel? channel = command.Channel as IMessageChannel;
+                if (channel is null)
+                {
+                    await command
+                        .FollowupAsync("チャンネルを取得できず、結果を表示できません。", ephemeral: true)
+                        .ConfigureAwait(false);
+                    return;
+                }
 
                 _ = Task.Run(async () =>
                 {
+                    IUserMessage? liveMessage = null;
                     try
                     {
-                        PowerShellExecutionResult result = await powerShellController
-                            .ExecuteAsync(password, script)
+                        liveMessage = await channel
+                            .SendMessageAsync("⏳ PowerShell を実行中…")
                             .ConfigureAwait(false);
-                        string formatted = PowerShellCommandController.FormatForDiscord(result);
-                        if (formatted.Length > 1900)
+
+                        async Task UpdateProgress(string combined)
                         {
-                            formatted = formatted[..1900] + "\n…(省略)";
+                            if (liveMessage is null)
+                            {
+                                return;
+                            }
+
+                            string text = PowerShellCommandController.FormatProgressForDiscord(combined);
+                            if (text.Length > 1950)
+                            {
+                                text = text[..1950] + "\n…```";
+                            }
+
+                            try
+                            {
+                                await liveMessage
+                                    .ModifyAsync(properties => properties.Content = text)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception modifyException)
+                            {
+                                WriteLog("PowerShell live message update failed.", modifyException);
+                            }
                         }
 
-                        await command
-                            .FollowupAsync(formatted, ephemeral: true)
+                        PowerShellExecutionResult result = await powerShellController
+                            .ExecuteAsync(password, script, UpdateProgress)
+                            .ConfigureAwait(false);
+
+                        string formatted = PowerShellCommandController.FormatForDiscord(result);
+                        if (formatted.Length > 1950)
+                        {
+                            formatted = formatted[..1950] + "\n…(省略)```";
+                        }
+
+                        if (!result.Executed)
+                        {
+                            // パスワード不一致やロックなどは、本人にだけ ephemeral で知らせ、
+                            // チャンネルの実行中メッセージは片付ける。
+                            await liveMessage.DeleteAsync().ConfigureAwait(false);
+                            await command
+                                .FollowupAsync(result.Message, ephemeral: true)
+                                .ConfigureAwait(false);
+                            return;
+                        }
+
+                        await liveMessage
+                            .ModifyAsync(properties => properties.Content = formatted)
                             .ConfigureAwait(false);
                     }
                     catch (Exception backgroundException)
@@ -2562,13 +2614,16 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                         WriteLog("PowerShell background execution failed.", backgroundException);
                         try
                         {
-                            await command
-                                .FollowupAsync("PowerShellの実行中にエラーが発生しました。", ephemeral: true)
-                                .ConfigureAwait(false);
+                            if (liveMessage is not null)
+                            {
+                                await liveMessage
+                                    .ModifyAsync(properties => properties.Content = "PowerShellの実行中にエラーが発生しました。")
+                                    .ConfigureAwait(false);
+                            }
                         }
-                        catch (Exception followupException)
+                        catch (Exception modifyException)
                         {
-                            WriteLog("Failed to send PowerShell error followup.", followupException);
+                            WriteLog("Failed to update PowerShell error message.", modifyException);
                         }
                     }
                 });
