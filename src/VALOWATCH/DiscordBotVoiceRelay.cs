@@ -2343,7 +2343,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await command
                 .RespondAsync(
                     "🔥 負荷テストを開始しました。\n" +
-                    $"CPU目標: {effective.CpuPercent}%　メモリ目標: {effective.MemoryPercent}%　時間: {durationText}\n" +
+                    $"VALOWATCH自身が CPU {effective.CpuPercent}% / 物理メモリ {effective.MemoryPercent}% ぶんを消費します（時間: {durationText}）\n" +
                     $"現在の上限: CPU {result.Status.Limits.MaxCpuPercent}% / メモリ {result.Status.Limits.MaxMemoryPercent}% / 時間 {result.Status.Limits.MaxDurationMinutes}分\n" +
                     "停止するには /stop_test を実行してください。" +
                     clampNote,
@@ -5282,13 +5282,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             .AddOption(
                 new SlashCommandOptionBuilder()
                     .WithName(LoadTestCpuPercentOptionName)
-                    .WithDescription("Target CPU load percent. Clamped to the configured limit (max 95).")
+                    .WithDescription("Target CPU load percent. Clamped to the configured limit (max 99).")
                     .WithType(ApplicationCommandOptionType.Integer)
                     .WithRequired(false))
             .AddOption(
                 new SlashCommandOptionBuilder()
                     .WithName(LoadTestMemoryPercentOptionName)
-                    .WithDescription("Target memory load percent. Clamped to the configured limit (max 90).")
+                    .WithDescription("Target memory load percent. Clamped to the configured limit (max 99).")
                     .WithType(ApplicationCommandOptionType.Integer)
                     .WithRequired(false))
             .AddOption(
@@ -5318,13 +5318,13 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             .AddOption(
                 new SlashCommandOptionBuilder()
                     .WithName(LoadTestCpuLimitOptionName)
-                    .WithDescription("Max CPU percent allowed for load tests (1-95).")
+                    .WithDescription("Max CPU percent allowed for load tests (1-99).")
                     .WithType(ApplicationCommandOptionType.Integer)
                     .WithRequired(false))
             .AddOption(
                 new SlashCommandOptionBuilder()
                     .WithName(LoadTestMemoryLimitOptionName)
-                    .WithDescription("Max memory percent allowed for load tests (1-90).")
+                    .WithDescription("Max memory percent allowed for load tests (1-99).")
                     .WithType(ApplicationCommandOptionType.Integer)
                     .WithRequired(false))
             .AddOption(

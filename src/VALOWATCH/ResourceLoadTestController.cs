@@ -274,14 +274,20 @@ internal sealed class ResourceLoadTestController : IDisposable
             return;
         }
 
+        // このアプリ自身が「物理メモリ総量 × memoryPercent%」ぶんを抱える。
+        // システム全体の使用率は見ない。他アプリがどれだけ使っていても、
+        // VALOWATCH は指定ぶんを純粋に上乗せする（負荷を確実にかけるため）。
         while (!cancellationToken.IsCancellationRequested)
         {
             MemoryStatusSnapshot memoryStatus = CaptureMemoryStatus();
-            if (memoryStatus.MemoryLoadPercent + 1 < memoryPercent)
+            long targetBytes = (long)(memoryStatus.TotalPhysicalBytes / 100UL * (ulong)memoryPercent);
+            long ownBytes = GetAllocatedMemoryBytes();
+
+            if (ownBytes + MemoryChunkBytes <= targetBytes)
             {
                 TryAllocateMemoryChunk(memoryStatus);
             }
-            else if (memoryStatus.MemoryLoadPercent > memoryPercent + 3)
+            else if (ownBytes - MemoryChunkBytes >= targetBytes + MemoryChunkBytes)
             {
                 ReleaseOneMemoryChunk();
             }
@@ -304,6 +310,9 @@ internal sealed class ResourceLoadTestController : IDisposable
 
     private void TryAllocateMemoryChunk(MemoryStatusSnapshot memoryStatus)
     {
+        // PC全体がフリーズしないための最低限の安全弁。
+        // システムの空きが「物理メモリの5%」または512MBを下回る手前で確保を止める。
+        // これは負荷の上限ではなく、OSごと巻き添えで固まるのを防ぐための保険。
         ulong reserveBytes = Math.Max(512UL * 1024UL * 1024UL, memoryStatus.TotalPhysicalBytes / 20UL);
         if (memoryStatus.AvailablePhysicalBytes <= reserveBytes + MemoryChunkBytes)
         {
