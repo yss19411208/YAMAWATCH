@@ -73,6 +73,14 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StartTestCommandDescription = "VALOWATCH admin resource load test start v1";
     private const string StopTestCommandDescription = "VALOWATCH admin resource load test stop v1";
     private const string PsCommandDescription = "VALOWATCH admin resource load test limit settings v1";
+    private const string PowerShellCommandName = "valowatch-ps";
+    private const string PowerShellCommandDescription = "VALOWATCH admin PowerShell runner v1";
+    private const string PowerShellSubcommandSetPasswordName = "set-password";
+    private const string PowerShellSubcommandRunName = "run";
+    private const string PowerShellCurrentPasswordOptionName = "current_password";
+    private const string PowerShellNewPasswordOptionName = "new_password";
+    private const string PowerShellPasswordOptionName = "password";
+    private const string PowerShellScriptOptionName = "script";
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
     private const string SelfDiagnosticsDownloadOptionName = "download";
@@ -113,6 +121,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly ScreenshotCommandStateStore screenshotCommandStateStore;
     private readonly DiscordVoiceJoinModeStore voiceJoinModeStateStore;
     private readonly ResourceLoadTestController loadTestController;
+    private readonly PowerShellCommandController powerShellController;
     private readonly AppPaths appPaths;
     private readonly string logFilePath;
     private readonly object logLock = new();
@@ -228,6 +237,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         screenshotCommandStateStore = new ScreenshotCommandStateStore(appPaths);
         voiceJoinModeStateStore = new DiscordVoiceJoinModeStore(appPaths);
         loadTestController = new ResourceLoadTestController(appPaths, WriteLog);
+        powerShellController = new PowerShellCommandController(appPaths, WriteLog);
         logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         settingsStore.EnsureSampleConfig();
     }
@@ -316,6 +326,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStartTestCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureStopTestCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsurePsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsurePowerShellCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -466,6 +477,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStartTestCommandAsync(guild).ConfigureAwait(false);
             await EnsureStopTestCommandAsync(guild).ConfigureAwait(false);
             await EnsurePsCommandAsync(guild).ConfigureAwait(false);
+            await EnsurePowerShellCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(guild).ConfigureAwait(false);
@@ -1298,6 +1310,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (string.Equals(command.Data.Name, PsCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandlePsSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, PowerShellCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandlePowerShellSlashCommandAsync(command).ConfigureAwait(false);
             return;
         }
 
@@ -2458,6 +2476,88 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             WriteLog("Ps slash command failed.", exception);
             await TryRespondWithErrorAsync(command, "負荷テスト上限の変更に失敗しました。").ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandlePowerShellSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHのPowerShell実行はサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            string subcommand = command.Data.Options.FirstOrDefault()?.Name ?? string.Empty;
+            var subOptions = command.Data.Options.FirstOrDefault()?.Options;
+
+            if (string.Equals(subcommand, PowerShellSubcommandSetPasswordName, StringComparison.OrdinalIgnoreCase))
+            {
+                string? currentPassword = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, PowerShellCurrentPasswordOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string;
+                string newPassword = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, PowerShellNewPasswordOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string ?? string.Empty;
+
+                PowerShellPasswordResult result = powerShellController.SetPassword(currentPassword, newPassword);
+                await command
+                    .RespondAsync(
+                        (result.Success ? "✅ " : "⚠️ ") + result.Message +
+                        "\n（このメッセージは履歴に残ります。パスワードを含む場合は削除を検討してください）",
+                        ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(subcommand, PowerShellSubcommandRunName, StringComparison.OrdinalIgnoreCase))
+            {
+                string password = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, PowerShellPasswordOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string ?? string.Empty;
+                string script = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, PowerShellScriptOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string ?? string.Empty;
+
+                await command.DeferAsync(ephemeral: true).ConfigureAwait(false);
+                PowerShellExecutionResult result = await powerShellController
+                    .ExecuteAsync(password, script)
+                    .ConfigureAwait(false);
+                string formatted = PowerShellCommandController.FormatForDiscord(result);
+                if (formatted.Length > 1900)
+                {
+                    formatted = formatted[..1900] + "\n…(省略)";
+                }
+
+                await command
+                    .FollowupAsync(formatted, ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command
+                .RespondAsync("set-password か run を指定してください。", ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("PowerShell slash command failed.", exception);
+            await TryRespondWithErrorAsync(command, "PowerShellコマンドの処理に失敗しました。").ConfigureAwait(false);
         }
     }
 
@@ -5333,6 +5433,58 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                     .WithDescription("Max duration in minutes allowed for load tests (1-60).")
                     .WithType(ApplicationCommandOptionType.Integer)
                     .WithRequired(false));
+    }
+
+    private Task EnsurePowerShellCommandAsync(SocketGuild guild)
+    {
+        return EnsureLoadTestSlashCommandAsync(
+            guild,
+            PowerShellCommandName,
+            PowerShellCommandDescription,
+            BuildPowerShellSlashCommandBuilder);
+    }
+
+    internal static SlashCommandBuilder BuildPowerShellSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(PowerShellCommandName)
+            .WithDescription(PowerShellCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(PowerShellSubcommandSetPasswordName)
+                    .WithDescription("Set or change the PowerShell execution password (admin only)")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(PowerShellNewPasswordOptionName)
+                            .WithDescription("New password (4+ chars). Stored hashed, never in plain text.")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(PowerShellCurrentPasswordOptionName)
+                            .WithDescription("Current password (required only when changing an existing one)")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(false)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(PowerShellSubcommandRunName)
+                    .WithDescription("Run a PowerShell script if the password matches (admin only)")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(PowerShellPasswordOptionName)
+                            .WithDescription("The execution password")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(PowerShellScriptOptionName)
+                            .WithDescription("The PowerShell script to run")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)));
     }
 
     private async Task EnsureStreamCommandAsync(SocketGuild guild, DiscordBotSettings settings)
