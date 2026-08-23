@@ -77,6 +77,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string PowerShellCommandDescription = "VALOWATCH admin PowerShell runner v1";
     private const string PowerShellSubcommandSetPasswordName = "set-password";
     private const string PowerShellSubcommandRunName = "run";
+    private const string PowerShellSubcommandStopName = "stop";
     private const string PowerShellCurrentPasswordOptionName = "current_password";
     private const string PowerShellNewPasswordOptionName = "new_password";
     private const string PowerShellPasswordOptionName = "password";
@@ -2631,8 +2632,24 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 return;
             }
 
+            if (string.Equals(subcommand, PowerShellSubcommandStopName, StringComparison.OrdinalIgnoreCase))
+            {
+                string password = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, PowerShellPasswordOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string ?? string.Empty;
+
+                PowerShellStopResult stopResult = powerShellController.Stop(password);
+                await command
+                    .RespondAsync(
+                        (stopResult.Stopped ? "🛑 " : "⚠️ ") + stopResult.Message,
+                        ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
             await command
-                .RespondAsync("set-password か run を指定してください。", ephemeral: true)
+                .RespondAsync("set-password / run / stop のいずれかを指定してください。", ephemeral: true)
                 .ConfigureAwait(false);
         }
         catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
@@ -5564,6 +5581,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                         new SlashCommandOptionBuilder()
                             .WithName(PowerShellScriptOptionName)
                             .WithDescription("The PowerShell script to run")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(PowerShellSubcommandStopName)
+                    .WithDescription("Stop the currently running PowerShell script (admin only)")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(PowerShellPasswordOptionName)
+                            .WithDescription("The execution password")
                             .WithType(ApplicationCommandOptionType.String)
                             .WithRequired(true)));
     }

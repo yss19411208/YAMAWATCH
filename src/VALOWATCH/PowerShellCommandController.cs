@@ -22,7 +22,6 @@ internal sealed class PowerShellCommandController
 {
     private const int MaxFailedAttempts = 5;
     private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan ExecutionTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan ProgressUpdateInterval = TimeSpan.FromSeconds(2);
     private const int Pbkdf2Iterations = 210_000;
     private const int SaltBytes = 16;
@@ -40,6 +39,10 @@ internal sealed class PowerShellCommandController
 
     private int failedAttempts;
     private DateTimeOffset? lockedUntilUtc;
+
+    // いま実行中の PowerShell プロセス。/valowatch-ps stop で外から止められるよう保持する。
+    private readonly object runLock = new();
+    private Process? runningProcess;
 
     public PowerShellCommandController(AppPaths appPaths, Action<string, Exception?> writeLog)
     {
@@ -214,10 +217,13 @@ internal sealed class PowerShellCommandController
                 return PowerShellExecutionResult.Rejected("PowerShell プロセスを開始できませんでした。");
             }
 
+            lock (runLock)
+            {
+                runningProcess = process;
+            }
+
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
-
-            using var timeoutCts = new CancellationTokenSource(ExecutionTimeout);
 
             // 出力が溜まったら、一定間隔で途中経過を通知する（リアルタイム更新）。
             Task? progressLoop = null;
@@ -225,7 +231,7 @@ internal sealed class PowerShellCommandController
             {
                 progressLoop = Task.Run(async () =>
                 {
-                    while (!process.HasExited && !timeoutCts.IsCancellationRequested)
+                    while (!process.HasExited)
                     {
                         await Task.Delay(ProgressUpdateInterval).ConfigureAwait(false);
                         string? snapshot = null;
@@ -253,28 +259,28 @@ internal sealed class PowerShellCommandController
                 });
             }
 
-            try
-            {
-                await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                TryKill(process);
-                writeLog("PowerShell command timed out and was terminated.", null);
-                if (progressLoop is not null)
-                {
-                    await progressLoop.ConfigureAwait(false);
-                }
-
-                return PowerShellExecutionResult.Completed(
-                    -1,
-                    outputBuilder.ToString(),
-                    errorBuilder.ToString() + $"\n(実行が{ExecutionTimeout.TotalMinutes:0}分を超えたため強制終了しました)");
-            }
+            // 自動タイムアウトなし。/valowatch-ps stop で止めるまで動き続ける。
+            await process.WaitForExitAsync().ConfigureAwait(false);
 
             if (progressLoop is not null)
             {
                 await progressLoop.ConfigureAwait(false);
+            }
+
+            bool wasStopped;
+            lock (runLock)
+            {
+                wasStopped = runningProcess is null;
+                runningProcess = null;
+            }
+
+            if (wasStopped)
+            {
+                writeLog("PowerShell command was stopped by user.", null);
+                return PowerShellExecutionResult.Completed(
+                    -1,
+                    outputBuilder.ToString(),
+                    errorBuilder.ToString() + "\n(ユーザーの /valowatch-ps stop により停止しました)");
             }
 
             writeLog($"PowerShell command finished. ExitCode: {process.ExitCode}.", null);
@@ -285,9 +291,66 @@ internal sealed class PowerShellCommandController
         }
         catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
         {
+            lock (runLock)
+            {
+                runningProcess = null;
+            }
+
             writeLog("PowerShell command execution failed.", exception);
             return PowerShellExecutionResult.Rejected($"実行に失敗しました: {exception.Message}");
         }
+    }
+
+    /// <summary>
+    /// 実行中の PowerShell を止める。パスワード照合を通った管理者だけが呼べる。
+    /// </summary>
+    public PowerShellStopResult Stop(string password)
+    {
+        lock (gate)
+        {
+            PowerShellCommandState state = LoadState();
+            if (!state.HasPassword)
+            {
+                return new PowerShellStopResult(false, "パスワードが未設定です。");
+            }
+
+            if (lockedUntilUtc is { } lockedUntil && DateTimeOffset.UtcNow < lockedUntil)
+            {
+                return new PowerShellStopResult(false, "ロック中です。しばらくお待ちください。");
+            }
+
+            if (!VerifyAgainst(state, password))
+            {
+                failedAttempts++;
+                if (failedAttempts >= MaxFailedAttempts)
+                {
+                    lockedUntilUtc = DateTimeOffset.UtcNow + LockoutDuration;
+                    failedAttempts = 0;
+                    return new PowerShellStopResult(false, $"パスワードを{MaxFailedAttempts}回間違えたためロックしました。");
+                }
+
+                return new PowerShellStopResult(false, "パスワードが違います。");
+            }
+
+            failedAttempts = 0;
+        }
+
+        Process? target;
+        lock (runLock)
+        {
+            target = runningProcess;
+            // ここで null にしておくと、実行側は「stop で止められた」と判定できる。
+            runningProcess = null;
+        }
+
+        if (target is null)
+        {
+            return new PowerShellStopResult(false, "いま実行中の PowerShell はありません。");
+        }
+
+        TryKill(target);
+        writeLog("PowerShell command stop requested by user.", null);
+        return new PowerShellStopResult(true, "実行中の PowerShell を停止しました。");
     }
 
     private static string BuildCombined(StringBuilder outputBuilder, StringBuilder errorBuilder)
@@ -439,6 +502,8 @@ internal sealed record PowerShellCommandState(
 }
 
 internal sealed record PowerShellPasswordResult(bool Success, string Message);
+
+internal sealed record PowerShellStopResult(bool Stopped, string Message);
 
 internal sealed record PowerShellExecutionResult(
     bool Executed,
