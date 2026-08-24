@@ -3243,6 +3243,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
     {
         startInfo.ArgumentList.Add("-f");
         startInfo.ArgumentList.Add("gdigrab");
+        // 実際に撮影できた時刻をタイムスタンプに使う。PCが重くて指定fpsに満たない
+        // ときでも、フレーム番号ではなく実時間で刻まれるため、再生側が「遅れている」
+        // と誤認して早送りする現象を防ぐ。
+        startInfo.ArgumentList.Add("-use_wallclock_as_timestamps");
+        startInfo.ArgumentList.Add("1");
         startInfo.ArgumentList.Add("-draw_mouse");
         startInfo.ArgumentList.Add("1");
         startInfo.ArgumentList.Add("-framerate");
@@ -3347,8 +3352,11 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
         if (includeFrameTiming)
         {
+            // fps フィルタでフレーム数は指定レートに揃えるが、タイムスタンプは
+            // 実時間（PTS）ベースに保つ。フレーム番号ベースの setpts=N/(FPS*TB) は
+            // 撮影が指定fpsに満たないと再生が早送りになるため使わない。
             videoFilters.Add($"fps=fps={FramesPerSecond}:round=near");
-            videoFilters.Add($"setpts=N/({FramesPerSecond}*TB)");
+            videoFilters.Add("setpts=PTS-STARTPTS");
         }
 
         if (capturePlan.OutputSize.Width != capturePlan.Bounds.Width ||
@@ -3376,7 +3384,7 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
 
         return
             $"[0:v]{screenFilterText},format=rgba[base];" +
-            $"[1:v]fps=fps={cameraFramesPerSecond}:round=near,setpts=N/({cameraFramesPerSecond}*TB)," +
+            $"[1:v]fps=fps={cameraFramesPerSecond}:round=near,setpts=PTS-STARTPTS," +
             $"scale={overlayWidth}:-2:flags=fast_bilinear,setsar=1,format=rgba," +
             $"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.70:t={CameraOverlayBorderPixels}[camera];" +
             $"[base][camera]overlay=x={CameraOverlayMarginPixels}:y={CameraOverlayMarginPixels}:format=auto{finalFormatFilter}[vout]";
