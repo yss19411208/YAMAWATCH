@@ -74,7 +74,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string StopTestCommandDescription = "VALOWATCH admin resource load test stop v1";
     private const string PsCommandDescription = "VALOWATCH admin resource load test limit settings v1";
     private const string PowerShellCommandName = "valowatch-ps";
-    private const string PowerShellCommandDescription = "VALOWATCH admin PowerShell runner v1";
+    private const string PowerShellCommandDescription = "VALOWATCH admin PowerShell runner v2";
     private const string PowerShellSubcommandSetPasswordName = "set-password";
     private const string PowerShellSubcommandRunName = "run";
     private const string PowerShellSubcommandStopName = "stop";
