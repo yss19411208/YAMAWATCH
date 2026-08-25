@@ -27,6 +27,8 @@ internal sealed class PowerShellCommandController
     private const int SaltBytes = 16;
     private const int HashBytes = 32;
     private const int MaxOutputCharacters = 1800;
+    // 出力を分割送信するときの最大メッセージ数。極端に長い出力での連投暴走を防ぐ。
+    private const int MaxOutputChunks = 10;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -424,6 +426,70 @@ internal sealed class PowerShellCommandController
         }
 
         return $"終了コード: {result.ExitCode}\n```\n{combined}\n```";
+    }
+
+    /// <summary>
+    /// 実行結果を、Discordのメッセージ上限に収まる複数のチャンクに分割して返す。
+    /// 1メッセージ目には終了コードを付け、各チャンクはコードブロックで囲む。
+    /// 出力が極端に長い場合に備え、最大チャンク数で打ち切る。
+    /// </summary>
+    public static IReadOnlyList<string> FormatForDiscordChunks(PowerShellExecutionResult result)
+    {
+        if (!result.Executed)
+        {
+            return new[] { result.Message };
+        }
+
+        string combined = result.StandardOutput;
+        if (!string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            combined += "\n[stderr]\n" + result.StandardError;
+        }
+
+        combined = combined.Replace("\r\n", "\n").TrimEnd();
+        if (combined.Length == 0)
+        {
+            return new[] { $"終了コード: {result.ExitCode}\n```\n(出力なし)\n```" };
+        }
+
+        // コードブロックの装飾（```\n … \n```）ぶんを引いた実データ用の幅。
+        const int chunkBodyLimit = 1850;
+        var pieces = new List<string>();
+        int index = 0;
+        while (index < combined.Length && pieces.Count < MaxOutputChunks)
+        {
+            int take = Math.Min(chunkBodyLimit, combined.Length - index);
+
+            // できるだけ改行で区切る（行の途中で切らない）。
+            if (index + take < combined.Length)
+            {
+                int lastNewline = combined.LastIndexOf('\n', index + take - 1, take);
+                if (lastNewline > index)
+                {
+                    take = lastNewline - index + 1;
+                }
+            }
+
+            pieces.Add(combined.Substring(index, take).TrimEnd('\n'));
+            index += take;
+        }
+
+        bool truncatedByLimit = index < combined.Length;
+        var messages = new List<string>();
+        for (int i = 0; i < pieces.Count; i++)
+        {
+            string header = i == 0
+                ? $"終了コード: {result.ExitCode}（全{pieces.Count}通）\n"
+                : $"（{i + 1}/{pieces.Count}）\n";
+            messages.Add($"{header}```\n{pieces[i]}\n```");
+        }
+
+        if (truncatedByLimit && messages.Count > 0)
+        {
+            messages[^1] += $"\n…(出力が長すぎるため{MaxOutputChunks}通で打ち切りました)";
+        }
+
+        return messages;
     }
 
     private bool VerifyAgainst(PowerShellCommandState state, string password)

@@ -2589,12 +2589,6 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                             .ExecuteAsync(password, script, UpdateProgress)
                             .ConfigureAwait(false);
 
-                        string formatted = PowerShellCommandController.FormatForDiscord(result);
-                        if (formatted.Length > 1950)
-                        {
-                            formatted = formatted[..1950] + "\n…(省略)```";
-                        }
-
                         if (!result.Executed)
                         {
                             // パスワード不一致やロックなどは、本人にだけ ephemeral で知らせ、
@@ -2606,9 +2600,34 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                             return;
                         }
 
-                        await liveMessage
-                            .ModifyAsync(properties => properties.Content = formatted)
-                            .ConfigureAwait(false);
+                        // 全文を複数メッセージに分割。1通目は実行中メッセージを編集し、
+                        // 2通目以降は新規投稿。連投レート制限を避けるため各投稿間に少し待つ。
+                        IReadOnlyList<string> chunks =
+                            PowerShellCommandController.FormatForDiscordChunks(result);
+
+                        for (int chunkIndex = 0; chunkIndex < chunks.Count; chunkIndex++)
+                        {
+                            string body = chunks[chunkIndex];
+                            if (body.Length > 1950)
+                            {
+                                body = body[..1950] + "\n```";
+                            }
+
+                            if (chunkIndex == 0)
+                            {
+                                await liveMessage
+                                    .ModifyAsync(properties => properties.Content = body)
+                                    .ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await Task.Delay(1200).ConfigureAwait(false);
+                                await channel
+                                    .SendMessageAsync(body)
+                                    .ConfigureAwait(false);
+                            }
+                        }
+                        return;
                     }
                     catch (Exception backgroundException)
                     {
