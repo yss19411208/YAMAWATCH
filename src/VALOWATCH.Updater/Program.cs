@@ -24,7 +24,7 @@ internal static class Program
     private static DateTimeOffset nextStartAgentLaunchAttemptAtUtc = DateTimeOffset.MinValue;
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan InstalledAppLaunchRetryInterval = TimeSpan.FromHours(1);
+    private static readonly TimeSpan InstalledAppLaunchRetryInterval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan StartAgentLaunchRetryInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan[] RetryDelays =
     [
