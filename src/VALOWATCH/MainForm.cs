@@ -81,9 +81,7 @@ public sealed class MainForm : Form
         watchAgentHealthTimer.Start();
         EnsureWatchAgentRunning();
 
-        hotKeyHealthTimer.Interval = 50;
-        hotKeyHealthTimer.Tick += (_, _) => PollStratsHotKeyAndRepairRegistration();
-        hotKeyHealthTimer.Start();
+        // Alt+T 機能は無効化済み。ホットキー登録の自動修復タイマーも動かさない。
 
         stratsToggleDelayTimer.Interval = 30;
         stratsToggleDelayTimer.Tick += (_, _) => RunPendingStratsToggleAfterHotKeyRelease();
@@ -106,18 +104,9 @@ public sealed class MainForm : Form
     {
         base.OnHandleCreated(eventArgs);
         hotKeyMessageTargetHandle = Handle;
-        RegisterStratsHotKey();
-        if (EnableAntiCheatSensitiveKeyboardFallbacks)
-        {
-            RegisterRawKeyboardInput();
-            RegisterLowLevelKeyboardHook();
-        }
-        else
-        {
-            WriteAppLog("Overlay", "Raw Input and low-level keyboard hook are disabled for game stability.");
-        }
-
-        WriteAppLog("Overlay", "Dedicated Alt + T key-state fallback will start only while VALORANT is running.");
+        // Alt+T の strats.gg オーバーレイ機能は無効化済み。
+        // ホットキー登録・Raw Input・低レベルフックは一切仕掛けない（常駐を軽くする）。
+        WriteAppLog("Overlay", "Alt + T strats overlay feature is disabled.");
     }
 
     protected override void OnHandleDestroyed(EventArgs eventArgs)
@@ -208,14 +197,8 @@ public sealed class MainForm : Form
             DisposeStratsOverlay();
         }
 
-        if (valorantDetected)
-        {
-            StartAsyncKeyStateHotKeyMonitor();
-        }
-        else
-        {
-            StopAsyncKeyStateHotKeyMonitor();
-        }
+        // Alt+T 機能は無効化済みのため、VALORANT検出時のキー監視は開始しない。
+        StopAsyncKeyStateHotKeyMonitor();
 
         if (valorantDetected != lastValorantDetected)
         {
@@ -770,6 +753,10 @@ public sealed class MainForm : Form
 
     private void RequestStratsToggleFromHotKey(string triggerSource)
     {
+        // Alt+T の strats.gg オーバーレイ機能は無効化済み。
+        // どの検出方式から呼ばれても、ここで何もせず抜ける。
+        return;
+#pragma warning disable CS0162
         DateTimeOffset nowUtc = DateTimeOffset.UtcNow;
         if (nowUtc - lastHotKeyTriggerAtUtc < HotKeyTriggerCooldown)
         {
@@ -781,6 +768,7 @@ public sealed class MainForm : Form
         stratsTogglePending = true;
         stratsToggleDelayTimer.Stop();
         stratsToggleDelayTimer.Start();
+#pragma warning restore CS0162
     }
 
     private void RunPendingStratsToggleAfterHotKeyRelease()
