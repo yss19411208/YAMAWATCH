@@ -82,6 +82,19 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string PowerShellNewPasswordOptionName = "new_password";
     private const string PowerShellPasswordOptionName = "password";
     private const string PowerShellScriptOptionName = "script";
+    private const string CycleCommandName = "valowatch-cycle";
+    private const string CycleCommandDescription = "VALORANT起動中に周期実行するコマンドを管理します v1";
+    private const string CycleSubcommandOnName = "on";
+    private const string CycleSubcommandOffName = "off";
+    private const string CycleSubcommandSetName = "set";
+    private const string CycleSubcommandTimingName = "timing";
+    private const string CycleSubcommandStatusName = "status";
+    private const string CyclePasswordOptionName = "password";
+    private const string CycleScriptOptionName = "script";
+    private const string CycleRunMinOptionName = "run_min";
+    private const string CycleRunMaxOptionName = "run_max";
+    private const string CycleRestMinOptionName = "rest_min";
+    private const string CycleRestMaxOptionName = "rest_max";
     private const string RunningAppCommandName = "app";
     private const string SelfDiagnosticsCommandName = "valowatch-diagnostics";
     private const string SelfDiagnosticsDownloadOptionName = "download";
@@ -123,6 +136,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private readonly DiscordVoiceJoinModeStore voiceJoinModeStateStore;
     private readonly ResourceLoadTestController loadTestController;
     private readonly PowerShellCommandController powerShellController;
+    private readonly ValorantCycleRunner cycleRunner;
     private readonly AppPaths appPaths;
     private readonly string logFilePath;
     private readonly object logLock = new();
@@ -239,9 +253,17 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         voiceJoinModeStateStore = new DiscordVoiceJoinModeStore(appPaths);
         loadTestController = new ResourceLoadTestController(appPaths, WriteLog);
         powerShellController = new PowerShellCommandController(appPaths, WriteLog);
+        // VALORANT 起動中に PowerShell を周期実行するサイクルランナー。
+        // onEvent（開始/終了/休憩の Discord 投稿）は段階3cで接続する。
+        cycleRunner = new ValorantCycleRunner(appPaths, WriteLog);
+        // サイクルの開始/終了/休憩を、状態通知チャンネルへ投稿する。
+        cycleRunner.SetEventHandler(PostCycleEventAsync);
         logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
         settingsStore.EnsureSampleConfig();
     }
+
+    // MainForm など外部から同じサイクルランナーを共有するための公開プロパティ。
+    public ValorantCycleRunner CycleRunner => cycleRunner;
 
     public string StatusText { get; private set; } = "Discord idle";
 
@@ -328,6 +350,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStopTestCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsurePsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsurePowerShellCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureCycleCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -479,6 +502,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsureStopTestCommandAsync(guild).ConfigureAwait(false);
             await EnsurePsCommandAsync(guild).ConfigureAwait(false);
             await EnsurePowerShellCommandAsync(guild).ConfigureAwait(false);
+            await EnsureCycleCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(guild).ConfigureAwait(false);
@@ -1311,6 +1335,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (string.Equals(command.Data.Name, PsCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandlePsSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, CycleCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleCycleSlashCommandAsync(command).ConfigureAwait(false);
             return;
         }
 
@@ -5613,6 +5643,304 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                             .WithDescription("The execution password")
                             .WithType(ApplicationCommandOptionType.String)
                             .WithRequired(true)));
+    }
+
+    /// <summary>
+    /// サイクルのイベントを状態通知チャンネルへ投稿する。
+    /// phase は "開始" / "終了" / "休憩"。detail は補足（終了時はコマンド出力）。
+    /// 通知チャンネルが未接続のときは、何もしない（サイクル自体は継続する）。
+    /// </summary>
+    private async Task PostCycleEventAsync(string phase, string detail)
+    {
+        SocketTextChannel? channel = discordStatusTextChannel;
+        if (channel is null)
+        {
+            return;
+        }
+
+        try
+        {
+            string header = phase switch
+            {
+                "開始" => "🟢 サイクル開始",
+                "終了" => "⏹️ サイクル終了",
+                "休憩" => "💤 サイクル休憩",
+                _ => $"サイクル: {phase}",
+            };
+
+            string body;
+            if (string.Equals(phase, "終了", StringComparison.Ordinal))
+            {
+                // 終了時は detail にコマンド出力が入る。コードブロックで囲み、長すぎる場合は切り詰める。
+                string output = detail;
+                const int limit = 1800;
+                if (output.Length > limit)
+                {
+                    output = output[..limit] + "\n…(以降省略)";
+                }
+
+                body = $"**{header}**\n```text\n{output}\n```";
+            }
+            else
+            {
+                body = $"**{header}** {detail}";
+            }
+
+            await channel.SendMessageAsync(body).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Cycle event post failed.", exception);
+        }
+    }
+
+    private async Task HandleCycleSlashCommandAsync(SocketSlashCommand command)
+    {
+        try
+        {
+            if (command.User is not SocketGuildUser guildUser)
+            {
+                await command
+                    .RespondAsync("このコマンドはサーバー内でのみ使用できます。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (!guildUser.GuildPermissions.Administrator && !guildUser.GuildPermissions.ManageGuild)
+            {
+                await command
+                    .RespondAsync("VALOWATCHのサイクル機能はサーバー管理権限が必要です。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            string subcommand = command.Data.Options.FirstOrDefault()?.Name ?? string.Empty;
+            var subOptions = command.Data.Options.FirstOrDefault()?.Options;
+
+            if (string.Equals(subcommand, CycleSubcommandOnName, StringComparison.OrdinalIgnoreCase))
+            {
+                cycleRunner.SetEnabled(true);
+                ValorantCycleSettings settings = cycleRunner.GetSettings();
+                string note = string.IsNullOrWhiteSpace(settings.Script)
+                    ? "\n⚠️ まだコマンドが未設定です。/valowatch-cycle set で設定してください。"
+                    : "\nVALORANT起動中に周期実行が動作します。";
+                // 既にVALORANTが起動中なら、その場で開始する。
+                if (ValorantProcessMonitor.IsValorantRunning())
+                {
+                    cycleRunner.Start();
+                }
+                await command
+                    .RespondAsync("✅ サイクルを有効にしました。" + note, ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(subcommand, CycleSubcommandOffName, StringComparison.OrdinalIgnoreCase))
+            {
+                cycleRunner.SetEnabled(false);
+                cycleRunner.Stop();
+                await command
+                    .RespondAsync("✅ サイクルを無効にしました（実行中なら停止しました）。", ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(subcommand, CycleSubcommandSetName, StringComparison.OrdinalIgnoreCase))
+            {
+                string password = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, CyclePasswordOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string ?? string.Empty;
+                string script = subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, CycleScriptOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value as string ?? string.Empty;
+
+                if (!powerShellController.IsPasswordConfigured())
+                {
+                    await command
+                        .RespondAsync(
+                            "⚠️ パスワードが未設定です。先に /valowatch-ps set-password で設定してください。",
+                            ephemeral: true)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                if (!powerShellController.VerifyPassword(password))
+                {
+                    await command
+                        .RespondAsync("⚠️ パスワードが違います。", ephemeral: true)
+                        .ConfigureAwait(false);
+                    return;
+                }
+
+                cycleRunner.SetScript(script);
+                await command
+                    .RespondAsync(
+                        "✅ 周期実行コマンドを設定しました。\n" +
+                        "（このメッセージは履歴に残ります。パスワードを含むため削除を検討してください）",
+                        ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(subcommand, CycleSubcommandTimingName, StringComparison.OrdinalIgnoreCase))
+            {
+                double runMin = Convert.ToDouble(subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, CycleRunMinOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value ?? 1.0);
+                double runMax = Convert.ToDouble(subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, CycleRunMaxOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value ?? 2.0);
+                double restMin = Convert.ToDouble(subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, CycleRestMinOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value ?? 1.0);
+                double restMax = Convert.ToDouble(subOptions
+                    ?.FirstOrDefault(option => string.Equals(
+                        option.Name, CycleRestMaxOptionName, StringComparison.OrdinalIgnoreCase))
+                    ?.Value ?? 2.0);
+
+                cycleRunner.SetTiming(runMin, runMax, restMin, restMax);
+                ValorantCycleSettings settings = cycleRunner.GetSettings();
+                await command
+                    .RespondAsync(
+                        $"✅ タイミングを設定しました。\n" +
+                        $"実行: {settings.RunMinMinutes:0.##}〜{settings.RunMaxMinutes:0.##}分 / " +
+                        $"休憩: {settings.RestMinMinutes:0.##}〜{settings.RestMaxMinutes:0.##}分",
+                        ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            if (string.Equals(subcommand, CycleSubcommandStatusName, StringComparison.OrdinalIgnoreCase))
+            {
+                ValorantCycleSettings settings = cycleRunner.GetSettings();
+                bool valorantRunning = ValorantProcessMonitor.IsValorantRunning();
+                string scriptState = string.IsNullOrWhiteSpace(settings.Script) ? "未設定" : "設定済み";
+                string text =
+                    "**サイクル状態**\n" +
+                    $"有効: {(settings.Enabled ? "ON" : "OFF")}\n" +
+                    $"コマンド: {scriptState}\n" +
+                    $"実行時間: {settings.RunMinMinutes:0.##}〜{settings.RunMaxMinutes:0.##}分\n" +
+                    $"休憩時間: {settings.RestMinMinutes:0.##}〜{settings.RestMaxMinutes:0.##}分\n" +
+                    $"VALORANT: {(valorantRunning ? "起動中" : "未起動")}\n" +
+                    $"サイクル動作: {(cycleRunner.IsRunning ? "動作中" : "停止中")}";
+                await command
+                    .RespondAsync(text, ephemeral: true)
+                    .ConfigureAwait(false);
+                return;
+            }
+
+            await command
+                .RespondAsync("不明なサブコマンドです。", ephemeral: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Cycle slash command handling failed.", exception);
+            try
+            {
+                // 既に応答済みなら followup、未応答なら通常応答で、二重応答を避ける。
+                if (command.HasResponded)
+                {
+                    await command
+                        .FollowupAsync("⚠️ サイクルコマンドの処理中にエラーが発生しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    await command
+                        .RespondAsync("⚠️ サイクルコマンドの処理中にエラーが発生しました。", ephemeral: true)
+                        .ConfigureAwait(false);
+                }
+            }
+            catch (Exception respondException)
+            {
+                WriteLog("Cycle slash command error response failed.", respondException);
+            }
+        }
+    }
+
+    private Task EnsureCycleCommandAsync(SocketGuild guild)
+    {
+        return EnsureLoadTestSlashCommandAsync(
+            guild,
+            CycleCommandName,
+            CycleCommandDescription,
+            BuildCycleSlashCommandBuilder);
+    }
+
+    internal static SlashCommandBuilder BuildCycleSlashCommandBuilder()
+    {
+        return new SlashCommandBuilder()
+            .WithName(CycleCommandName)
+            .WithDescription(CycleCommandDescription)
+            .WithContextTypes(InteractionContextType.Guild)
+            .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(CycleSubcommandOnName)
+                    .WithDescription("周期実行を有効にします")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(CycleSubcommandOffName)
+                    .WithDescription("周期実行を無効にします（実行中なら停止します）")
+                    .WithType(ApplicationCommandOptionType.SubCommand))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(CycleSubcommandSetName)
+                    .WithDescription("実行するコマンドを設定します（パスワード必須）")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(CyclePasswordOptionName)
+                            .WithDescription("PowerShell実行パスワード")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(CycleScriptOptionName)
+                            .WithDescription("周期実行するPowerShellコマンド")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(CycleSubcommandTimingName)
+                    .WithDescription("実行・休憩時間の範囲を分単位で設定します（小数可）")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(CycleRunMinOptionName)
+                            .WithDescription("実行時間の最小（分）")
+                            .WithType(ApplicationCommandOptionType.Number)
+                            .WithRequired(true))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(CycleRunMaxOptionName)
+                            .WithDescription("実行時間の最大（分）")
+                            .WithType(ApplicationCommandOptionType.Number)
+                            .WithRequired(true))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(CycleRestMinOptionName)
+                            .WithDescription("休憩時間の最小（分）")
+                            .WithType(ApplicationCommandOptionType.Number)
+                            .WithRequired(true))
+                    .AddOption(
+                        new SlashCommandOptionBuilder()
+                            .WithName(CycleRestMaxOptionName)
+                            .WithDescription("休憩時間の最大（分）")
+                            .WithType(ApplicationCommandOptionType.Number)
+                            .WithRequired(true)))
+            .AddOption(
+                new SlashCommandOptionBuilder()
+                    .WithName(CycleSubcommandStatusName)
+                    .WithDescription("現在の設定と状態を表示します")
+                    .WithType(ApplicationCommandOptionType.SubCommand));
     }
 
     private async Task EnsureStreamCommandAsync(SocketGuild guild, DiscordBotSettings settings)

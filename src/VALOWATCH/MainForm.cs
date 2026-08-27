@@ -203,6 +203,16 @@ public sealed class MainForm : Form
         if (valorantDetected != lastValorantDetected)
         {
             lastValorantDetected = valorantDetected;
+            // VALORANT が起動したらサイクル開始、終了したら停止する。
+            // script 未設定や enabled=false のときは Start しても何も起きない。
+            if (valorantDetected)
+            {
+                discordBotVoiceRelay.CycleRunner.Start();
+            }
+            else
+            {
+                discordBotVoiceRelay.CycleRunner.Stop();
+            }
         }
 
         bool lineDetected = RefreshLineStatus();

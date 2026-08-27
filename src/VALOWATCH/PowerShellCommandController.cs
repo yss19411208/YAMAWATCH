@@ -59,6 +59,25 @@ internal sealed class PowerShellCommandController
     }
 
     /// <summary>
+    /// パスワードが設定済みで、かつ渡された password が一致するかを返す。
+    /// サイクル設定など、ExecuteAsync を経由しない機能から認証に使う。
+    /// ロックアウトのカウントには影響させない（純粋な照合のみ）。
+    /// </summary>
+    public bool VerifyPassword(string password)
+    {
+        lock (gate)
+        {
+            PowerShellCommandState state = LoadState();
+            if (!state.HasPassword)
+            {
+                return false;
+            }
+
+            return VerifyAgainst(state, password);
+        }
+    }
+
+    /// <summary>
     /// パスワードを設定（または変更）する。既に設定済みの場合は、正しい
     /// 現在のパスワードを渡さないと変更できない。
     /// </summary>
