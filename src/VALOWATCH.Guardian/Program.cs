@@ -33,7 +33,7 @@ internal static class Program
     private static readonly string[] RequiredRelativeFiles =
     {
         @"app\VALOWATCH.exe",
-        @"app\GITHUB.exe",
+        @"GITHUB.exe",
     };
 
     // ログの置き場所（Program Files 側）。
