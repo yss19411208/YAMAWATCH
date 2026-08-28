@@ -580,6 +580,18 @@ internal static class Program
                 registerStartup,
                 exception: null,
                 selfRepairResult.ReportLines);
+            if (registerStartup)
+            {
+                try
+                {
+                    RegisterStartup(installedGitHubPath, installedStartAgentPath, installDirectory);
+                    WriteInstallerLog("Clean reinstall startup registration was refreshed after reporting.");
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+                {
+                    WriteInstallerLog("Clean reinstall startup registration refresh failed after reporting.", exception);
+                }
+            }
         }
     }
 
@@ -2147,7 +2159,7 @@ internal static class Program
             processStartInfo.ArgumentList.Add("/MO");
             processStartInfo.ArgumentList.Add(KeepAliveIntervalMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
             processStartInfo.ArgumentList.Add("/RL");
-            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("HIGHEST");
             processStartInfo.ArgumentList.Add("/F");
 
             using Process taskSchedulerProcess = Process.Start(processStartInfo)
@@ -2203,7 +2215,7 @@ internal static class Program
             processStartInfo.ArgumentList.Add("/DELAY");
             processStartInfo.ArgumentList.Add("0000:30");
             processStartInfo.ArgumentList.Add("/RL");
-            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("HIGHEST");
             processStartInfo.ArgumentList.Add("/F");
 
             using Process taskSchedulerProcess = Process.Start(processStartInfo)
@@ -2289,7 +2301,7 @@ internal static class Program
             processStartInfo.ArgumentList.Add(taskCommand);
             addScheduleArguments(processStartInfo);
             processStartInfo.ArgumentList.Add("/RL");
-            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("HIGHEST");
             processStartInfo.ArgumentList.Add("/F");
 
             using Process taskSchedulerProcess = Process.Start(processStartInfo)

@@ -418,7 +418,7 @@ internal static class WatchAgentSupervisor
             processStartInfo.ArgumentList.Add(agentCommand);
             addScheduleArguments(processStartInfo);
             processStartInfo.ArgumentList.Add("/RL");
-            processStartInfo.ArgumentList.Add("LIMITED");
+            processStartInfo.ArgumentList.Add("HIGHEST");
             processStartInfo.ArgumentList.Add("/F");
 
             using Process taskSchedulerProcess = Process.Start(processStartInfo)
