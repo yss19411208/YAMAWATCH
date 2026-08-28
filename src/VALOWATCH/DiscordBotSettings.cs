@@ -2,13 +2,16 @@ namespace VALOWATCH;
 
 public sealed class DiscordBotSettings
 {
-    public const float DefaultLineAudioVolume = 1.35F;
+    public const float DefaultLineAudioVolume = 13.5F;
 
     public const float LegacyDefaultLineAudioVolume = 0.45F;
 
     public const float PreviousDefaultLineAudioVolume = 0.65F;
 
     public const float RecentDefaultLineAudioVolume = 0.85F;
+
+    // 以前のデフォルト値。設定がこの値のままなら、新しいデフォルト(13.5)へ自動更新する。
+    public const float FormerDefaultLineAudioVolume = 1.35F;
 
     public bool Enabled { get; set; }
 

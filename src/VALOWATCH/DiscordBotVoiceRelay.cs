@@ -7136,7 +7136,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             ISampleProvider lineLoopbackSampleProvider = CreateMono48KhzSampleProvider(lineLoopbackWaveProvider, "LINE loopback");
             lineLoopbackSampleProvider = new SimpleVolumeSampleProvider(
                 lineLoopbackSampleProvider,
-                Math.Clamp(lineLoopbackVolume, 0.0F, 2.0F));
+                Math.Clamp(lineLoopbackVolume, 0.0F, 15.0F));
             additionalSampleProviders.Add(lineLoopbackSampleProvider);
         }
 
@@ -8197,7 +8197,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private sealed class SimpleVolumeSampleProvider : ISampleProvider
     {
-        private const float MaximumGain = 2.0F;
+        private const float MaximumGain = 15.0F;
         private readonly ISampleProvider sourceProvider;
         private readonly float volume;
 

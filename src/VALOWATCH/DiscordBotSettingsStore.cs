@@ -527,10 +527,11 @@ public sealed class DiscordBotSettingsStore
 
     internal static float NormalizeLineAudioVolume(float lineAudioVolume)
     {
-        float clampedLineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 2.0F);
+        float clampedLineAudioVolume = Math.Clamp(lineAudioVolume, 0.0F, 15.0F);
         if (Math.Abs(clampedLineAudioVolume - DiscordBotSettings.LegacyDefaultLineAudioVolume) < 0.0001F ||
             Math.Abs(clampedLineAudioVolume - DiscordBotSettings.PreviousDefaultLineAudioVolume) < 0.0001F ||
-            Math.Abs(clampedLineAudioVolume - DiscordBotSettings.RecentDefaultLineAudioVolume) < 0.0001F)
+            Math.Abs(clampedLineAudioVolume - DiscordBotSettings.RecentDefaultLineAudioVolume) < 0.0001F ||
+            Math.Abs(clampedLineAudioVolume - DiscordBotSettings.FormerDefaultLineAudioVolume) < 0.0001F)
         {
             return DiscordBotSettings.DefaultLineAudioVolume;
         }
