@@ -123,6 +123,8 @@ internal sealed class SystemLoopbackWaveProvider : IWaveProvider, IDisposable
         {
             capture.Dispose();
             renderDevice.Dispose();
+            // バッファに残った最後の音がループ再生されるのを防ぐため、明示的にクリアする。
+            bufferedWaveProvider.ClearBuffer();
         }
     }
 

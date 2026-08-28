@@ -108,6 +108,13 @@ internal sealed class LineProcessLoopbackWaveProvider : IWaveProvider, IDisposab
         disposed = true;
         refreshTimer.Dispose();
         StopActiveCapture($"{sourceLabel} process loopback disposed.");
+        // activeCapture が null の場合、StopActiveCapture は早期 return して
+        // ClearBuffer を呼ばない。バッファに残った最後の音がループ再生されるのを
+        // 防ぐため、ここで無条件にクリアする。
+        lock (sync)
+        {
+            bufferedWaveProvider.ClearBuffer();
+        }
     }
 
     private void RefreshActiveCaptureSafely()
