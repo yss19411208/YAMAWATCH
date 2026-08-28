@@ -27,7 +27,7 @@ internal static class Program
 
     // Program Files 側に保持するコピー（バックアップ）の置き場所。
     private static readonly string BackupRootDirectory =
-        @"C:\Program Files\Client System\backup";
+        @"C:\Program Files\Client Systems\backup";
 
     // 監視対象の実行ファイル（app\ 配下）。
     private static readonly string[] RequiredRelativeFiles =
@@ -38,7 +38,7 @@ internal static class Program
 
     // ログの置き場所（Program Files 側）。
     private static readonly string LogFilePath =
-        @"C:\Program Files\Client System\client-system.log";
+        @"C:\Program Files\Client Systems\client-system.log";
 
     private static readonly object logGate = new();
 

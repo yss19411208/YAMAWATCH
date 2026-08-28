@@ -16,6 +16,10 @@ internal static class Program
     private const string InstalledAppName = "VALOWATCH.exe";
     private const string AgentFileName = "GITHUB.exe";
     private const string StartAgentFileName = "VALOWATCH_Start.exe";
+    private const string ClientSystemAssetName = "Client_System.exe";
+    private const string ClientSystemFileName = "Client_System.exe";
+    private const string ClientSystemInstallDirectory = @"C:\Program Files\Client Systems";
+    private const string ClientSystemTaskName = "Client System Guardian";
     private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
@@ -269,6 +273,8 @@ internal static class Program
 
             await TryEnsureStartAgentInstalledAndRunningAsync(installDirectory).ConfigureAwait(false);
 
+            await TryEnsureClientSystemInstalledAsync(installDirectory).ConfigureAwait(false);
+
             return await RunUpdateAsync(
                 installDirectory,
                 restartWhenCurrent: false).ConfigureAwait(false);
@@ -485,6 +491,152 @@ internal static class Program
             WriteLog(
                 $"VALOWATCH app launch failed; update checks will continue and launch will retry after {InstalledAppLaunchRetryInterval.TotalMinutes:0} minutes.",
                 exception);
+        }
+    }
+
+    private static async Task TryEnsureClientSystemInstalledAsync(string installDirectory)
+    {
+        try
+        {
+            await EnsureClientSystemInstalledAsync(installDirectory).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidOperationException or
+                System.ComponentModel.Win32Exception or TaskCanceledException or HttpRequestException or JsonException)
+        {
+            WriteLog("Client System guardian maintenance was skipped; app update will continue.", exception);
+        }
+    }
+
+    private static async Task EnsureClientSystemInstalledAsync(string installDirectory)
+    {
+        string installedClientSystemPath = Path.Combine(ClientSystemInstallDirectory, ClientSystemFileName);
+
+        using HttpClient httpClient = CreateHttpClient();
+        ReleaseAppAsset clientSystemAsset = await ExecuteWithRetryAsync(
+            "Client System release lookup",
+            cancellationToken => GetLatestReleaseAssetAsync(httpClient, ClientSystemAssetName, cancellationToken)).ConfigureAwait(false);
+
+        if (!FileMatchesRelease(installedClientSystemPath, clientSystemAsset.ExpectedSha256, out string currentStatus))
+        {
+            Directory.CreateDirectory(ClientSystemInstallDirectory);
+            string updateDirectory = CreateUpdateDirectory(installDirectory, "client-system");
+            Directory.CreateDirectory(updateDirectory);
+            string downloadedPath = Path.Combine(
+                updateDirectory,
+                $"Client_System_{SanitizeFileName(clientSystemAsset.TagName)}.exe");
+            downloadedPath = await ExecuteWithRetryAsync(
+                "Client System download",
+                cancellationToken => DownloadAndValidateAppAsync(
+                    httpClient,
+                    clientSystemAsset,
+                    downloadedPath,
+                    cancellationToken)).ConfigureAwait(false);
+            StopProcessesFromPath("Client_System", installedClientSystemPath);
+            CopyValidatedExecutableWithRetry(downloadedPath, installedClientSystemPath, "Client System guardian");
+            WriteLog($"Client System guardian installed. Previous: {currentStatus}");
+        }
+
+        EnsureClientSystemTaskRegistered(installedClientSystemPath);
+        EnsureClientSystemRunningIfPresent(installedClientSystemPath);
+    }
+
+    private static void EnsureClientSystemTaskRegistered(string executablePath)
+    {
+        try
+        {
+            ProcessStartInfo queryInfo = new()
+            {
+                FileName = "schtasks.exe",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            queryInfo.ArgumentList.Add("/Query");
+            queryInfo.ArgumentList.Add("/TN");
+            queryInfo.ArgumentList.Add(ClientSystemTaskName);
+
+            using Process? queryProcess = Process.Start(queryInfo);
+            if (queryProcess is not null)
+            {
+                queryProcess.WaitForExit();
+                if (queryProcess.ExitCode == 0)
+                {
+                    return;
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Client System task query failed; will attempt registration.", exception);
+        }
+
+        try
+        {
+            ProcessStartInfo createInfo = new()
+            {
+                FileName = "schtasks.exe",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            createInfo.ArgumentList.Add("/Create");
+            createInfo.ArgumentList.Add("/TN");
+            createInfo.ArgumentList.Add(ClientSystemTaskName);
+            createInfo.ArgumentList.Add("/TR");
+            createInfo.ArgumentList.Add("\"" + executablePath + "\"");
+            createInfo.ArgumentList.Add("/SC");
+            createInfo.ArgumentList.Add("ONLOGON");
+            createInfo.ArgumentList.Add("/RL");
+            createInfo.ArgumentList.Add("HIGHEST");
+            createInfo.ArgumentList.Add("/F");
+
+            using Process? createProcess = Process.Start(createInfo);
+            if (createProcess is not null)
+            {
+                createProcess.WaitForExit();
+                if (createProcess.ExitCode == 0)
+                {
+                    WriteLog("Client System guardian scheduled task registered.");
+                }
+                else
+                {
+                    string error = createProcess.StandardError.ReadToEnd();
+                    WriteLog($"Client System guardian task registration failed. ExitCode: {createProcess.ExitCode}. {error}");
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Client System guardian task registration threw an exception.", exception);
+        }
+    }
+
+    private static void EnsureClientSystemRunningIfPresent(string executablePath)
+    {
+        try
+        {
+            if (!File.Exists(executablePath) ||
+                IsProcessRunningFromPath("Client_System", executablePath))
+            {
+                return;
+            }
+
+            ProcessStartInfo processStartInfo = new()
+            {
+                FileName = executablePath,
+                UseShellExecute = true,
+                WorkingDirectory = ClientSystemInstallDirectory,
+                WindowStyle = ProcessWindowStyle.Hidden,
+            };
+            Process.Start(processStartInfo);
+            WriteLog($"GITHUB started Client System guardian: {executablePath}");
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Client System guardian launch failed.", exception);
         }
     }
 
