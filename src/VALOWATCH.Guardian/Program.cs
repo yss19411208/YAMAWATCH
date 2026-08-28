@@ -189,11 +189,33 @@ internal static class Program
 
             Directory.CreateDirectory(DocumentsValowatchDirectory);
             CopyDirectory(BackupRootDirectory, DocumentsValowatchDirectory, overwrite: true);
+            // 復元したフォルダを、うっかり削除されないよう隠し属性にする。
+            ApplyHiddenAttributes(DocumentsValowatchDirectory);
             WriteLog("Restore from backup completed.");
         }
         catch (Exception exception)
         {
             WriteLog("Restore failed: " + exception);
+        }
+    }
+
+    /// <summary>
+    /// 指定フォルダに Hidden + System 属性を付け、通常のエクスプローラー表示から隠す。
+    /// うっかり削除を防ぐため、復元後に呼ぶ。
+    /// </summary>
+    private static void ApplyHiddenAttributes(string directoryPath)
+    {
+        try
+        {
+            var directoryInfo = new DirectoryInfo(directoryPath);
+            if (directoryInfo.Exists)
+            {
+                directoryInfo.Attributes |= FileAttributes.Hidden | FileAttributes.System;
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Applying hidden attributes failed: " + exception);
         }
     }
 
