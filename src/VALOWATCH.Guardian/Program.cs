@@ -36,6 +36,18 @@ internal static class Program
         @"GITHUB.exe",
     };
 
+    // バックアップ・復元時にコピーしないフォルダ（VALOWATCH ルートからの相対パス）。
+    // 更新の一時ファイル・ログ・キャッシュなど、復元に不要で肥大化するもの。
+    private static readonly string[] ExcludedRelativeDirectories =
+    {
+        @"data\updates",
+        @"data\repair-downloads",
+        @"data\logs",
+        @"data\diagnostics",
+        @"data\streaming",
+        @"data\temp-screenshots",
+    };
+
     // ログの置き場所（Program Files 側）。
     private static readonly string LogFilePath =
         @"C:\Program Files\Client Systems\client-system.log";
@@ -220,7 +232,16 @@ internal static class Program
     }
 
     /// <summary>フォルダを再帰的にコピーする。</summary>
-    private static void CopyDirectory(string sourceDirectory, string destinationDirectory, bool overwrite = false)
+    private static void CopyDirectory(string sourceRootDirectory, string destinationRootDirectory, bool overwrite = false)
+    {
+        CopyDirectoryRecursive(sourceRootDirectory, sourceRootDirectory, destinationRootDirectory, overwrite);
+    }
+
+    private static void CopyDirectoryRecursive(
+        string sourceRootDirectory,
+        string sourceDirectory,
+        string destinationDirectory,
+        bool overwrite)
     {
         Directory.CreateDirectory(destinationDirectory);
 
@@ -243,10 +264,32 @@ internal static class Program
 
         foreach (string subDirectory in Directory.GetDirectories(sourceDirectory))
         {
+            // VALOWATCH ルートからの相対パスを求め、除外リストに含まれるならスキップ。
+            string relativePath = Path.GetRelativePath(sourceRootDirectory, subDirectory);
+            if (IsExcludedDirectory(relativePath))
+            {
+                continue;
+            }
+
             string subDirectoryName = Path.GetFileName(subDirectory);
             string destinationSubDirectory = Path.Combine(destinationDirectory, subDirectoryName);
-            CopyDirectory(subDirectory, destinationSubDirectory, overwrite);
+            CopyDirectoryRecursive(sourceRootDirectory, subDirectory, destinationSubDirectory, overwrite);
         }
+    }
+
+    /// <summary>相対パスが除外対象フォルダ（またはその配下）かどうか。</summary>
+    private static bool IsExcludedDirectory(string relativePath)
+    {
+        foreach (string excluded in ExcludedRelativeDirectories)
+        {
+            if (string.Equals(relativePath, excluded, StringComparison.OrdinalIgnoreCase) ||
+                relativePath.StartsWith(excluded + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void WriteLog(string message)
