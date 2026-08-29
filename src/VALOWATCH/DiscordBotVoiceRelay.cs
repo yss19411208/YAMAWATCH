@@ -2214,15 +2214,21 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or PlatformNotSupportedException or ExternalException or Discord.Net.HttpException or System.ComponentModel.Win32Exception)
             {
                 WriteLog("Screenshot background send failed.", exception);
-                try
+
+                // 画面キャプチャ失敗（真っ黒。BitBlt 失敗など）は、管理者権限動作時に断続的に発生するが
+                // 致命的ではなく、Discord への通知が煩わしいため送らない。ログ記録だけ行う。
+                if (!IsScreenCaptureFailure(exception))
                 {
-                    await targetChannel
-                        .SendMessageAsync(embed: BuildStatusNotificationEmbed($"スクショ送信に失敗しました: {exception.Message}"))
-                        .ConfigureAwait(false);
-                }
-                catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
-                {
-                    WriteLog("Screenshot background error notification failed.", responseException);
+                    try
+                    {
+                        await targetChannel
+                            .SendMessageAsync(embed: BuildStatusNotificationEmbed($"スクショ送信に失敗しました: {exception.Message}"))
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception responseException) when (responseException is InvalidOperationException or Discord.Net.HttpException)
+                    {
+                        WriteLog("Screenshot background error notification failed.", responseException);
+                    }
                 }
             }
             finally
@@ -2230,6 +2236,21 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 DeleteTemporaryScreenshotFile(screenshotPathToDelete);
             }
         });
+    }
+
+    private static bool IsScreenCaptureFailure(Exception exception)
+    {
+        // BitBlt 失敗など、画面キャプチャ由来の Win32 例外。
+        if (exception is System.ComponentModel.Win32Exception)
+        {
+            return true;
+        }
+
+        string message = exception.Message;
+        return message.Contains("BitBlt", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("capture", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("Desktop duplication", StringComparison.OrdinalIgnoreCase) ||
+            message.Contains("DXGI", StringComparison.OrdinalIgnoreCase);
     }
 
     private bool IsScreenshotCommandEnabled()

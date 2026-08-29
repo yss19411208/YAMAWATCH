@@ -3229,6 +3229,23 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
             exception);
     }
 
+    /// <summary>
+    /// 画面キャプチャ失敗（真っ黒）に関する ffmpeg のエラー行かどうか。
+    /// これらは管理者権限動作時に断続的に出るが致命的でないため、Discord 通知から除外する。
+    /// </summary>
+    private static bool IsScreenCaptureNoiseLine(string line)
+    {
+        return line.Contains("ddagrab", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("gdigrab", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Desktop duplication", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Failed to enumerate DXGI", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Failed to configure output pad", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Failed to capture image", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Could not find codec parameters", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("Error opening output files", StringComparison.OrdinalIgnoreCase) ||
+            line.Contains("unspecified size", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsDesktopDuplicationFailureLine(string line)
     {
         return line.Contains("ddagrab", StringComparison.OrdinalIgnoreCase) &&
@@ -3495,7 +3512,10 @@ html,body{margin:0;width:100%;height:100%;background:#050505;color:#eee;font-fam
                 }
 
                 loggedLineCount++;
-                if (loggedLineCount <= 12 || loggedLineCount % 30 == 0)
+                // 画面キャプチャの失敗（真っ黒）に関する行は、Discord に送らない。
+                // 管理者権限で動作しているときに断続的に発生するが、致命的ではなく通知が煩わしいため。
+                if ((loggedLineCount <= 12 || loggedLineCount % 30 == 0) &&
+                    !IsScreenCaptureNoiseLine(line))
                 {
                     log($"FFmpeg stream stderr: {line.Trim()}", null);
                 }
