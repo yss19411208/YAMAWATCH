@@ -394,6 +394,46 @@ internal static class WatchAgentSupervisor
         }
     }
 
+    private static bool ScheduledTaskExists(string taskSchedulerPath, string taskName)
+    {
+        try
+        {
+            ProcessStartInfo queryStartInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            queryStartInfo.ArgumentList.Add("/Query");
+            queryStartInfo.ArgumentList.Add("/TN");
+            queryStartInfo.ArgumentList.Add(taskName);
+
+            using Process? queryProcess = Process.Start(queryStartInfo);
+            if (queryProcess is null)
+            {
+                return false;
+            }
+
+            _ = queryProcess.StandardOutput.ReadToEndAsync();
+            _ = queryProcess.StandardError.ReadToEndAsync();
+            if (!queryProcess.WaitForExit(15000))
+            {
+                queryProcess.Kill(entireProcessTree: true);
+                return false;
+            }
+
+            // 終了コード 0 = タスクが存在する。
+            return queryProcess.ExitCode == 0;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or TimeoutException or Win32Exception)
+        {
+            // 確認できないときは false（従来通り作成を試みる）。
+            return false;
+        }
+    }
+
     private static void EnsureScheduledTask(
         string taskName,
         string agentCommand,
@@ -403,6 +443,14 @@ internal static class WatchAgentSupervisor
         try
         {
             string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+
+            // 既にタスクが登録済みなら、再作成しない。
+            // 手動で最上位の特権(Highest)に設定したタスクを、通常権限で上書き再作成しようとすると
+            // 「アクセスが拒否されました」で失敗し続けるため、存在する場合はスキップする。
+            if (ScheduledTaskExists(taskSchedulerPath, taskName))
+            {
+                return;
+            }
             ProcessStartInfo processStartInfo = new()
             {
                 FileName = taskSchedulerPath,
