@@ -20,6 +20,7 @@ internal static class Program
     private const string ClientSystemFileName = "Client_System.exe";
     private const string ClientSystemInstallDirectory = @"C:\Program Files\Client Systems";
     private const string ClientSystemTaskName = "Client System Guardian";
+    private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
     private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
@@ -454,6 +455,59 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// VALOWATCH 本体を、KeepAlive スケジュールタスク(最上位の特権)経由で起動する。
+    /// これにより、GITHUB.exe 自身の権限に関係なく、本体が必ず管理者権限で起動する
+    /// （UAC も出ない）。タスク起動に失敗した場合のみ、従来通り直接起動にフォールバックする。
+    /// </summary>
+    private static bool TryLaunchAppViaScheduledTask()
+    {
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo runInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            runInfo.ArgumentList.Add("/Run");
+            runInfo.ArgumentList.Add("/TN");
+            runInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+
+            using Process? runProcess = Process.Start(runInfo);
+            if (runProcess is null)
+            {
+                return false;
+            }
+
+            _ = runProcess.StandardOutput.ReadToEndAsync();
+            _ = runProcess.StandardError.ReadToEndAsync();
+            if (!runProcess.WaitForExit(15000))
+            {
+                try
+                {
+                    runProcess.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                }
+
+                return false;
+            }
+
+            // 終了コード 0 = タスク起動に成功。
+            return runProcess.ExitCode == 0;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("Launching VALOWATCH via scheduled task failed; will fall back to direct launch.", exception);
+            return false;
+        }
+    }
+
     private static void TryEnsureInstalledAppRunning(string installDirectory)
     {
         string installedAppPath = Path.GetFullPath(Path.Combine(installDirectory, InstalledAppName));
@@ -471,6 +525,13 @@ internal static class Program
         nextInstalledAppLaunchAttemptAtUtc = nowUtc.Add(InstalledAppLaunchRetryInterval);
         try
         {
+            // まず KeepAlive タスク(最上位の特権)経由で起動を試み、本体を必ず管理者権限で立ち上げる。
+            if (TryLaunchAppViaScheduledTask())
+            {
+                WriteLog("GITHUB started VALOWATCH via scheduled task (elevated).");
+                return;
+            }
+
             Process.Start(new ProcessStartInfo
             {
                 FileName = installedAppPath,
@@ -1741,6 +1802,13 @@ internal static class Program
             string installedAppPath = Path.Combine(installDirectory, InstalledAppName);
             if (!File.Exists(installedAppPath))
             {
+                return;
+            }
+
+            // まず KeepAlive タスク(最上位の特権)経由で起動を試み、本体を必ず管理者権限で立ち上げる。
+            if (TryLaunchAppViaScheduledTask())
+            {
+                WriteLog("Existing VALOWATCH restarted via scheduled task (elevated) after updater failure.");
                 return;
             }
 
