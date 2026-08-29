@@ -648,13 +648,19 @@ internal static class Program
     private static async Task EnsureStartAgentInstalledAndRunningAsync(string installDirectory)
     {
         string installedStartAgentPath = ResolveInstalledStartAgentPath(installDirectory);
-        using HttpClient httpClient = CreateHttpClient();
-        ReleaseAppAsset startAgentAsset = await ExecuteWithRetryAsync(
-            "VALOWATCH Start agent release lookup",
-            cancellationToken => GetLatestReleaseAssetAsync(httpClient, StartAgentAssetName, cancellationToken)).ConfigureAwait(false);
 
-        if (!FileMatchesRelease(installedStartAgentPath, startAgentAsset.ExpectedSha256, out string currentStatus))
+        // StartAgent が既に配置済みなら、更新しない。
+        // 管理者権限(HIGHEST)のタスクから常駐起動されているため、Updater からはプロセスを停止できず、
+        // 置き換えようとすると「アクセスが拒否されました / 使用中」で失敗し続ける。
+        // 存在する場合は配置をスキップし、起動確認だけ行う。
+        // 新版を反映したいときは、配置済みファイルを手動で削除すれば次回このメソッドが再配置する。
+        if (!File.Exists(installedStartAgentPath))
         {
+            using HttpClient httpClient = CreateHttpClient();
+            ReleaseAppAsset startAgentAsset = await ExecuteWithRetryAsync(
+                "VALOWATCH Start agent release lookup",
+                cancellationToken => GetLatestReleaseAssetAsync(httpClient, StartAgentAssetName, cancellationToken)).ConfigureAwait(false);
+
             string updateDirectory = CreateUpdateDirectory(installDirectory, "start-agent");
             Directory.CreateDirectory(updateDirectory);
             string downloadedStartAgentPath = Path.Combine(
@@ -667,9 +673,8 @@ internal static class Program
                     startAgentAsset,
                     downloadedStartAgentPath,
                     cancellationToken)).ConfigureAwait(false);
-            StopProcessesFromPath("VALOWATCH_Start", installedStartAgentPath);
             CopyValidatedExecutableWithRetry(downloadedStartAgentPath, installedStartAgentPath, "VALOWATCH Start agent");
-            WriteLog($"VALOWATCH Start agent installed. Previous: {currentStatus}");
+            WriteLog("VALOWATCH Start agent installed.");
         }
 
         EnsureStartAgentRunningIfPresent(installDirectory);
