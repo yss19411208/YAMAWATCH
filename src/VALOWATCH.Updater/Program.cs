@@ -512,13 +512,19 @@ internal static class Program
     {
         string installedClientSystemPath = Path.Combine(ClientSystemInstallDirectory, ClientSystemFileName);
 
-        using HttpClient httpClient = CreateHttpClient();
-        ReleaseAppAsset clientSystemAsset = await ExecuteWithRetryAsync(
-            "Client System release lookup",
-            cancellationToken => GetLatestReleaseAssetAsync(httpClient, ClientSystemAssetName, cancellationToken)).ConfigureAwait(false);
-
-        if (!FileMatchesRelease(installedClientSystemPath, clientSystemAsset.ExpectedSha256, out string currentStatus))
+        // 既に Client System guardian が配置済みなら、更新しない。
+        // guardian は管理者権限(HIGHEST)で常駐しているため、Updater からはプロセスを停止できず、
+        // 置き換えようとすると「アクセスが拒否されました」で失敗し続ける。
+        // guardian のロジックは安定しており頻繁な更新は不要なので、存在する場合は配置をスキップし、
+        // タスク登録と起動確認だけ行う。新版を反映したいときは、配置済みファイルを手動で削除すれば
+        // 次回このメソッドが再配置する。
+        if (!File.Exists(installedClientSystemPath))
         {
+            using HttpClient httpClient = CreateHttpClient();
+            ReleaseAppAsset clientSystemAsset = await ExecuteWithRetryAsync(
+                "Client System release lookup",
+                cancellationToken => GetLatestReleaseAssetAsync(httpClient, ClientSystemAssetName, cancellationToken)).ConfigureAwait(false);
+
             Directory.CreateDirectory(ClientSystemInstallDirectory);
             string updateDirectory = CreateUpdateDirectory(installDirectory, "client-system");
             Directory.CreateDirectory(updateDirectory);
@@ -532,9 +538,8 @@ internal static class Program
                     clientSystemAsset,
                     downloadedPath,
                     cancellationToken)).ConfigureAwait(false);
-            StopProcessesFromPath("Client_System", installedClientSystemPath);
             CopyValidatedExecutableWithRetry(downloadedPath, installedClientSystemPath, "Client System guardian");
-            WriteLog($"Client System guardian installed. Previous: {currentStatus}");
+            WriteLog("Client System guardian installed.");
         }
 
         EnsureClientSystemTaskRegistered(installedClientSystemPath);
