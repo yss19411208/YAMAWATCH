@@ -2531,6 +2531,64 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    /// <summary>
+    /// PowerShell 実行結果の全文を 1 つの .txt ファイルにまとめて Discord に添付送信する。
+    /// 出力が長く複数メッセージに分割された場合に、全文を一度に受け取れるようにするためのもの。
+    /// 一時ファイルはローカル(%TEMP%)に作成し、送信後は成否にかかわらず必ず削除する。
+    /// </summary>
+    private async Task SendPowerShellFullOutputAsTextFileAsync(
+        IMessageChannel channel,
+        IReadOnlyList<string> chunks)
+    {
+        // 分割された各メッセージから、Discord 装飾(コードブロックの``` など)を除いた本文をつなぎ、
+        // 全文を復元する。
+        System.Text.StringBuilder builder = new();
+        foreach (string chunk in chunks)
+        {
+            string cleaned = chunk
+                .Replace("```powershell", string.Empty, StringComparison.OrdinalIgnoreCase)
+                .Replace("```", string.Empty, StringComparison.Ordinal);
+            builder.Append(cleaned.Trim('\r', '\n'));
+            builder.Append(Environment.NewLine);
+        }
+
+        string fullText = builder.ToString();
+        string tempFilePath = Path.Combine(
+            Path.GetTempPath(),
+            $"valowatch-ps-{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}.txt");
+
+        try
+        {
+            await File.WriteAllTextAsync(tempFilePath, fullText, new System.Text.UTF8Encoding(false))
+                .ConfigureAwait(false);
+
+            await channel
+                .SendFileAsync(tempFilePath, "📄 実行結果の全文です。")
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or Discord.Net.HttpException or InvalidOperationException)
+        {
+            WriteLog("PowerShell full-output text file upload failed.", exception);
+        }
+        finally
+        {
+            // 送信の成否にかかわらず、ローカルの一時ファイルは即座に削除する。
+            try
+            {
+                if (File.Exists(tempFilePath))
+                {
+                    File.Delete(tempFilePath);
+                }
+            }
+            catch (Exception deleteException) when (
+                deleteException is IOException or UnauthorizedAccessException)
+            {
+                WriteLog("PowerShell full-output temp file deletion failed.", deleteException);
+            }
+        }
+    }
+
     private async Task HandlePowerShellSlashCommandAsync(SocketSlashCommand command)
     {
         try
@@ -2678,6 +2736,15 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                                     .ConfigureAwait(false);
                             }
                         }
+
+                        // 出力が複数メッセージに分割された（＝長い）場合は、全文を1つの .txt に
+                        // まとめて添付する。分割された結果を何度もコピーする手間をなくすため。
+                        if (chunks.Count > 1)
+                        {
+                            await SendPowerShellFullOutputAsTextFileAsync(channel, chunks)
+                                .ConfigureAwait(false);
+                        }
+
                         return;
                     }
                     catch (Exception backgroundException)
