@@ -509,6 +509,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsurePsCommandAsync(guild).ConfigureAwait(false);
             await EnsurePowerShellCommandAsync(guild).ConfigureAwait(false);
             await EnsureCycleCommandAsync(guild).ConfigureAwait(false);
+            await EnsureWgcCommandAsync(guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(guild).ConfigureAwait(false);
