@@ -72,35 +72,123 @@ internal static class Program
         bool runOnce = arguments.Any(argument =>
             string.Equals(argument, "--once", StringComparison.OrdinalIgnoreCase));
 
-        WriteLog(runOnce ? "Client System guardian started (once mode)." : "Client System guardian started.");
+        if (runOnce)
+        {
+            WriteLog("Client System guardian started (once mode).");
+            try
+            {
+                RunCheckCycle();
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Check cycle failed: " + exception);
+            }
 
+            WriteLog("Client System guardian stopping (once mode).");
+            singleInstanceMutex.ReleaseMutex();
+            return;
+        }
+
+        WriteLog("Client System guardian started.");
+
+        // 監視・バックアップ・復元ループを、バックグラウンドスレッドで回す。
+        var monitoringThread = new Thread(MonitoringLoop)
+        {
+            IsBackground = true,
+            Name = "GuardianMonitoringLoop",
+        };
+        monitoringThread.Start();
+
+        // 緊急復旧用の Discord ボットを起動し、常駐させる。
+        // トークン未設定なら起動しないが、監視ループは動き続ける。
         try
         {
-            do
-            {
-                try
-                {
-                    RunCheckCycle();
-                }
-                catch (Exception exception)
-                {
-                    WriteLog("Check cycle failed: " + exception);
-                }
-
-                if (runOnce)
-                {
-                    break;
-                }
-
-                Thread.Sleep(CheckInterval);
-            }
-            while (true);
+            var emergencyBot = new EmergencyBot(WriteLog);
+            emergencyBot.StartAsync().GetAwaiter().GetResult();
         }
-        finally
+        catch (Exception exception)
         {
-            WriteLog("Client System guardian stopping.");
-            singleInstanceMutex.ReleaseMutex();
+            WriteLog("Emergency bot bootstrap failed; monitoring continues. " + exception);
         }
+
+        // メインスレッドを生かし続ける（監視スレッドとボットが動き続ける）。
+        Thread.Sleep(Timeout.Infinite);
+    }
+
+    /// <summary>監視・バックアップ・復元を CheckInterval ごとに繰り返す。</summary>
+    private static void MonitoringLoop()
+    {
+        do
+        {
+            try
+            {
+                RunCheckCycle();
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Check cycle failed: " + exception);
+            }
+
+            Thread.Sleep(CheckInterval);
+        }
+        while (true);
+    }
+
+    /// <summary>緊急ボットから呼ぶ、バックアップからの強制復元。成功なら true。</summary>
+    public static bool ForceRestoreFromBackup()
+    {
+        try
+        {
+            if (!Directory.Exists(BackupRootDirectory) || !AreRequiredFilesPresent(BackupRootDirectory))
+            {
+                WriteLog("Emergency restore requested but backup is missing or incomplete.");
+                return false;
+            }
+
+            RestoreFromBackup();
+            return AreRequiredFilesPresent(DocumentsValowatchDirectory);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Emergency restore failed: " + exception);
+            return false;
+        }
+    }
+
+    /// <summary>緊急ボットの status 用に、現在の状態を文字列で返す。</summary>
+    public static string BuildStatusReport()
+    {
+        var lines = new List<string>();
+        try
+        {
+            lines.Add("=== Client System Guardian Status ===");
+            lines.Add("VALOWATCH present: " + AreRequiredFilesPresent(DocumentsValowatchDirectory));
+            lines.Add("Backup present: " + (Directory.Exists(BackupRootDirectory) && AreRequiredFilesPresent(BackupRootDirectory)));
+            foreach (string rel in RequiredRelativeFiles)
+            {
+                string full = Path.Combine(DocumentsValowatchDirectory, rel);
+                lines.Add("  " + rel + ": " + (File.Exists(full) ? "OK" : "MISSING"));
+            }
+
+            bool elevated = false;
+            try
+            {
+                using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+                var principal = new System.Security.Principal.WindowsPrincipal(identity);
+                elevated = principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+            }
+            catch
+            {
+            }
+
+            lines.Add("Guardian elevated (admin): " + elevated);
+        }
+        catch (Exception exception)
+        {
+            lines.Add("status error: " + exception.Message);
+        }
+
+        return string.Join("\n", lines);
     }
 
     /// <summary>1 回分のチェック・復元・更新を実行する。</summary>
