@@ -16,7 +16,7 @@ public sealed class GitAutoUpdater
     {
         this.settingsStore = settingsStore;
         updatesDirectory = Path.Combine(appPaths.DataDirectory, "updates");
-        logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
     }
 
     public async Task<GitAutoUpdateResult> DownloadAndStartInstallerAsync(

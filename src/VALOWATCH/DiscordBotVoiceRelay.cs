@@ -258,7 +258,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         cycleRunner = new ValorantCycleRunner(appPaths, WriteLog);
         // サイクルの開始/終了/休憩を、状態通知チャンネルへ投稿する。
         cycleRunner.SetEventHandler(PostCycleEventAsync);
-        logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         settingsStore.EnsureSampleConfig();
     }
 

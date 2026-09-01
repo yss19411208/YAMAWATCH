@@ -17,10 +17,10 @@ internal static class WatchAgentSupervisor
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RegistryValueName = "Systems";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
-    private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const string KeepAliveScheduledTaskName = "Systems KeepAlive";
     private const string LogonScheduledTaskName = "VALOWATCH Logon";
-    private const string StartAgentKeepAliveScheduledTaskName = "VALOWATCH StartAgent KeepAlive";
-    private const string StartAgentLogonScheduledTaskName = "VALOWATCH StartAgent Logon";
+    private const string StartAgentKeepAliveScheduledTaskName = "Systems StartAgent KeepAlive";
+    private const string StartAgentLogonScheduledTaskName = "Systems StartAgent Logon";
     private const string AgentFileName = "HP.Security.Update.exe";
     private const string AgentProcessName = "HP.Security.Update";
     private const string StartAgentFileName = "Client.Start.exe";

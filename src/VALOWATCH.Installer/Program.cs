@@ -17,10 +17,10 @@ internal static class Program
     private const string StartAgentFileName = "Client.Start.exe";
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
-    private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const string KeepAliveScheduledTaskName = "Systems KeepAlive";
     private const string LogonScheduledTaskName = "VALOWATCH Logon";
-    private const string StartAgentKeepAliveScheduledTaskName = "VALOWATCH StartAgent KeepAlive";
-    private const string StartAgentLogonScheduledTaskName = "VALOWATCH StartAgent Logon";
+    private const string StartAgentKeepAliveScheduledTaskName = "Systems StartAgent KeepAlive";
+    private const string StartAgentLogonScheduledTaskName = "Systems StartAgent Logon";
     private const string PendingInstallerReportFileName = "installer-result.pending.log";
     private const int DiscordMessageMaximumLength = 1900;
     private static readonly TimeSpan ProcessRepairWaitTimeout = TimeSpan.FromSeconds(15);

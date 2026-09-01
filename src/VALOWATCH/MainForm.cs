@@ -916,7 +916,7 @@ public sealed class MainForm : Form
     {
         try
         {
-            string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+            string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? appPaths.DataDirectory);
             string exceptionText = exception is null ? string.Empty : $" Exception: {exception}";
             File.AppendAllText(

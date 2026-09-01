@@ -304,7 +304,7 @@ internal static class ValowatchSelfDiagnostics
             CreateFileStatus("Client.Start.exe", startAgentPath),
             CreateFileStatus("installer/.env", Path.Combine(workspaceRoot, "installer", ".env"), showSize: false),
             CreateFileStatus("settings.protected", appPaths.DurableEnvPath, showSize: false),
-            CreateFileStatus("valowatch.log", Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log")),
+            CreateFileStatus("systems.log", Path.Combine(appPaths.DataDirectory, "logs", "systems.log")),
             CreateFileStatus("self-update.log", Path.Combine(tempValowatch, "self-update.log")),
             CreateFileStatus("dedicated-updater.log", Path.Combine(tempValowatch, "dedicated-updater.log"))
         ];

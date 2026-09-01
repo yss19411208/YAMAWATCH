@@ -330,7 +330,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         string diagnosticRoot = Path.Combine(
             Path.GetTempPath(),
             $"VALOWATCH-runtime-log-test-{Guid.NewGuid():N}");
@@ -558,7 +558,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -592,7 +592,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -619,7 +619,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -644,7 +644,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -669,7 +669,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -731,7 +731,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         string screenshotPath = string.Empty;
 
         try
@@ -773,7 +773,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -798,7 +798,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -825,7 +825,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         ScreenStreamingServer? server = null;
 
         try
@@ -882,7 +882,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         ScreenStreamingServer? server = null;
 
         try
@@ -1007,7 +1007,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         ScreenStreamingServer? server = null;
         List<string> serverMessages = [];
 
@@ -1253,7 +1253,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         ScreenStreamingServer? server = null;
         Process? motionSourceProcess = null;
         List<string> serverMessages = [];
@@ -1331,7 +1331,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         ScreenStreamingServer? server = null;
 
         try
@@ -1408,7 +1408,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -1814,7 +1814,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -1891,7 +1891,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         ApplicationConfiguration.Initialize();
         using Form rawInputTarget = new()
@@ -2012,7 +2012,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2066,7 +2066,7 @@ static class Program
         bool durableConfigIsReady = File.Exists(appPaths.DurableEnvPath) && settings is not null;
         Environment.ExitCode = durableConfigIsReady ? 0 : 1;
 
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? AppContext.BaseDirectory);
@@ -2099,7 +2099,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2167,7 +2167,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2199,7 +2199,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2251,7 +2251,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         string diagnosticRoot = Path.Combine(
             Path.GetTempPath(),
             $"VALOWATCH-self-update-rollback-{Guid.NewGuid():N}");
@@ -2292,7 +2292,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2315,7 +2315,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         string diagnosticRoot = Path.Combine(
             Path.GetTempPath(),
             $"VALOWATCH-embedded-agent-repair-{Guid.NewGuid():N}");
@@ -2356,7 +2356,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
         string diagnosticRoot = Path.Combine(
             Path.GetTempPath(),
             $"VALOWATCH-embedded-agent-skip-{Guid.NewGuid():N}");
@@ -2397,7 +2397,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2510,7 +2510,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2568,7 +2568,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2607,7 +2607,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2659,7 +2659,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2697,7 +2697,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2946,7 +2946,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -2984,7 +2984,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -3011,7 +3011,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -3063,7 +3063,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -3095,7 +3095,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {
@@ -3139,7 +3139,7 @@ static class Program
     {
         AppPaths appPaths = AppPaths.CreateDefault();
         appPaths.EnsureDirectories();
-        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log");
+        string logFilePath = Path.Combine(appPaths.DataDirectory, "logs", "systems.log");
 
         try
         {

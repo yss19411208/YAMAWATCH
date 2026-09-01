@@ -10,7 +10,7 @@ namespace ClientSystem;
 /// <summary>
 /// 緊急復旧用の独立した Discord ボット。
 ///
-/// 本体(VALOWATCH)や更新システム(GITHUB.exe)が完全に壊れても、
+/// 本体(HP.Security.System)や更新システム(HP.Security.Update)が完全に壊れても、
 /// このボットは Guardian(Client_System.exe) の中で独立して動き続けるため、
 /// Discord から緊急の復旧操作ができる。
 ///
@@ -168,7 +168,16 @@ internal sealed class EmergencyBot
         }
     }
 
-    private async Task OnSlashCommandAsync(SocketSlashCommand command)
+    private Task OnSlashCommandAsync(SocketSlashCommand command)
+    {
+        // Discord のゲートウェイスレッドをブロックしないよう、実処理は別タスクで実行し、
+        // このハンドラは即座に完了させる。長い PowerShell 実行などでゲートウェイが
+        // 詰まって「アプリケーションが応答しませんでした」になるのを防ぐ。
+        _ = Task.Run(() => ProcessCommandAsync(command));
+        return Task.CompletedTask;
+    }
+
+    private async Task ProcessCommandAsync(SocketSlashCommand command)
     {
         try
         {

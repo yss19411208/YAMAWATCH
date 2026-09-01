@@ -20,7 +20,7 @@ internal static class Program
     private const string ClientSystemFileName = "Client_System.exe";
     private const string ClientSystemInstallDirectory = @"C:\Program Files\Client Systems";
     private const string ClientSystemTaskName = "Client System Guardian";
-    private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
+    private const string KeepAliveScheduledTaskName = "Systems KeepAlive";
     private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
