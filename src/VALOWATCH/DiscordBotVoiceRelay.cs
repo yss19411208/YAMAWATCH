@@ -112,6 +112,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string ScreenshotSubcommandOffName = "off";
     private const string ScreenshotSubcommandNowName = "now";
     private const string StreamCommandName = "stream";
+    private const string WgcCommandName = "wgc";
+    private WgcStreamingServer? wgcServer;
+    private readonly object wgcGate = new();
     private const string StreamSubcommandOnName = "on";
     private const string StreamSubcommandOffName = "off";
     private const string StreamSubcommandStatusName = "status";
@@ -351,6 +354,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsurePsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsurePowerShellCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureCycleCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            await EnsureWgcCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -1311,6 +1315,12 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         if (string.Equals(command.Data.Name, ScreenshotCommandName, StringComparison.OrdinalIgnoreCase))
         {
             await HandleScreenshotSlashCommandAsync(command).ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(command.Data.Name, WgcCommandName, StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleWgcSlashCommandAsync(command).ConfigureAwait(false);
             return;
         }
 
@@ -2816,6 +2826,136 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         catch (Exception exception) when (exception is InvalidOperationException or Discord.Net.HttpException or TaskCanceledException)
         {
             WriteLog("Failed to send error response for load test command.", exception);
+        }
+    }
+
+    private async Task EnsureWgcCommandAsync(SocketGuild guild)
+    {
+        try
+        {
+            var commands = await guild.GetApplicationCommandsAsync().ConfigureAwait(false);
+            if (commands.Any(c => string.Equals(c.Name, WgcCommandName, StringComparison.OrdinalIgnoreCase)))
+            {
+                WriteLog($"WGC slash command already exists: /{WgcCommandName}.");
+                return;
+            }
+
+            var commandBuilder = new SlashCommandBuilder()
+                .WithName(WgcCommandName)
+                .WithDescription("WGC(高画質・低遅延)画面配信 v1")
+                .WithContextTypes(InteractionContextType.Guild)
+                .WithDefaultMemberPermissions(GuildPermission.ManageGuild)
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("action")
+                    .WithDescription("on/off/link")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(true)
+                    .AddChoice("on", "on")
+                    .AddChoice("off", "off")
+                    .AddChoice("link", "link"))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("preset")
+                    .WithDescription("画質プリセット（省略時 high）")
+                    .WithType(ApplicationCommandOptionType.String)
+                    .WithRequired(false)
+                    .AddChoice("high", "high")
+                    .AddChoice("medium", "medium")
+                    .AddChoice("low", "low"))
+                .AddOption(new SlashCommandOptionBuilder()
+                    .WithName("fps")
+                    .WithDescription("フレームレート（省略時 60）")
+                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithRequired(false)
+                    .AddChoice("60", 60)
+                    .AddChoice("30", 30));
+
+            await guild.CreateApplicationCommandAsync(commandBuilder.Build()).ConfigureAwait(false);
+            WriteLog($"WGC slash command registered: /{WgcCommandName}.");
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        {
+            WriteLog("WGC slash command could not be registered.", exception);
+        }
+    }
+
+    private async Task HandleWgcSlashCommandAsync(SocketSlashCommand command)
+    {
+        await command.DeferAsync(ephemeral: false).ConfigureAwait(false);
+
+        string action = "on";
+        string preset = "high";
+        int fps = 60;
+        foreach (var opt in command.Data.Options)
+        {
+            if (string.Equals(opt.Name, "action", StringComparison.OrdinalIgnoreCase)) action = opt.Value?.ToString() ?? "on";
+            else if (string.Equals(opt.Name, "preset", StringComparison.OrdinalIgnoreCase)) preset = opt.Value?.ToString() ?? "high";
+            else if (string.Equals(opt.Name, "fps", StringComparison.OrdinalIgnoreCase)) fps = Convert.ToInt32(opt.Value);
+        }
+
+        if (string.Equals(action, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            lock (wgcGate)
+            {
+                wgcServer?.Dispose();
+                wgcServer = null;
+            }
+
+            await command.FollowupAsync("WGC配信を停止しました。").ConfigureAwait(false);
+            return;
+        }
+
+        if (string.Equals(action, "link", StringComparison.OrdinalIgnoreCase))
+        {
+            string? url;
+            lock (wgcGate)
+            {
+                url = wgcServer?.PublicUrl ?? wgcServer?.LocalUrl;
+            }
+
+            await command.FollowupAsync(url is not null ? ("視聴リンク: " + url) : "配信していません。/wgc on で開始してください。").ConfigureAwait(false);
+            return;
+        }
+
+        // action == on
+        int bitrate = preset switch
+        {
+            "low" => 4_000_000,
+            "medium" => 8_000_000,
+            _ => 14_000_000,
+        };
+
+        try
+        {
+            lock (wgcGate)
+            {
+                wgcServer?.Dispose();
+                wgcServer = null;
+            }
+
+            string ffmpegPath = Path.Combine(appPaths.DataDirectory, "tools", "ffmpeg", "ffmpeg.exe");
+            if (!File.Exists(ffmpegPath))
+            {
+                string? found = Directory.EnumerateFiles(appPaths.DataDirectory, "ffmpeg.exe", SearchOption.AllDirectories).FirstOrDefault();
+                if (found is not null) ffmpegPath = found;
+            }
+
+            var server = new WgcStreamingServer(ffmpegPath, WriteLog, bitrate, fps);
+            server.Start();
+            string? publicUrl = await server.StartPublicTunnelAsync(appPaths.CloudflaredPath, CancellationToken.None).ConfigureAwait(false);
+
+            lock (wgcGate)
+            {
+                wgcServer = server;
+            }
+
+            string link = publicUrl ?? server.LocalUrl;
+            await command.FollowupAsync(
+                $"WGC配信を開始しました（{preset}/{fps}fps）。\n視聴リンク: {link}\nアカウント不要で誰でも見られます。").ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("WGC stream start failed.", exception);
+            await command.FollowupAsync("WGC配信の開始に失敗しました: " + exception.Message).ConfigureAwait(false);
         }
     }
 

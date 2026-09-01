@@ -27,6 +27,74 @@ static class Program
             return;
         }
 
+        if (args.Any(argument => string.Equals(argument, "--wgc-serve", StringComparison.OrdinalIgnoreCase)))
+        {
+            string serveResult = Path.Combine(Path.GetTempPath(), "wgc-serve.txt");
+            try
+            {
+                AppPaths wgcPaths = AppPaths.CreateDefault();
+                string wgcLog = Path.Combine(wgcPaths.DataDirectory, "logs", "systems.log");
+                string ffmpegPath = ResolveFfmpegForDiagnostic(wgcPaths, wgcLog);
+                var server = new WgcStreamingServer(ffmpegPath, (m, ex) =>
+                {
+                    try { File.AppendAllText(serveResult, DateTimeOffset.Now.ToString("HH:mm:ss") + " " + m + (ex != null ? " EX:" + ex.Message : "") + "\n"); } catch { }
+                });
+                string url = server.Start();
+                File.WriteAllText(serveResult, "WGC serve started (local): " + url + "\nffmpeg: " + ffmpegPath + "\n");
+                string? publicUrl = server.StartPublicTunnelAsync(wgcPaths.CloudflaredPath, CancellationToken.None).GetAwaiter().GetResult();
+                if (publicUrl != null) { File.AppendAllText(serveResult, "PUBLIC URL (share this): " + publicUrl + "\n"); }
+                else { File.AppendAllText(serveResult, "Public tunnel unavailable; use local URL.\n"); }
+                Thread.Sleep(TimeSpan.FromMinutes(10));
+                server.Dispose();
+            }
+            catch (Exception ex)
+            {
+                try { File.AppendAllText(serveResult, "EXCEPTION: " + ex + "\n"); } catch { }
+            }
+
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--wgc-stream-test", StringComparison.OrdinalIgnoreCase)))
+        {
+            string streamResult = Path.Combine(Path.GetTempPath(), "wgc-stream-result.txt");
+            string report;
+            try
+            {
+                bool ok = WgcStreamTest.TryStreamTest(5, out string streamStatus);
+                report = "WGC stream test: " + (ok ? "SUCCESS" : "FAILED") + "\n" + "status: " + streamStatus;
+            }
+            catch (Exception ex)
+            {
+                report = "WGC stream test EXCEPTION: " + ex;
+            }
+
+            try { File.WriteAllText(streamResult, report); } catch { }
+            return;
+        }
+
+        if (args.Any(argument => string.Equals(argument, "--wgc-test", StringComparison.OrdinalIgnoreCase)))
+        {
+            string wgcOut = Path.Combine(Path.GetTempPath(), "wgc-test.mp4");
+            string wgcResult = Path.Combine(Path.GetTempPath(), "wgc-result.txt");
+            try { File.Delete(wgcOut); } catch { }
+            string report;
+            try
+            {
+                bool ok = WgcCaptureTest.TryRecord(wgcOut, 4, out string wgcStatus);
+                report = "WGC test result: " + (ok ? "SUCCESS" : "FAILED") + "\n" +
+                    "status: " + wgcStatus + "\n" +
+                    "output: " + wgcOut;
+            }
+            catch (Exception ex)
+            {
+                report = "WGC test EXCEPTION: " + ex;
+            }
+
+            try { File.WriteAllText(wgcResult, report); } catch { }
+            return;
+        }
+
         if (args.Any(argument => string.Equals(argument, "--keepalive-probe", StringComparison.OrdinalIgnoreCase)))
         {
             RunKeepAliveProbe();

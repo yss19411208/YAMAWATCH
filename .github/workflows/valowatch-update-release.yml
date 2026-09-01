@@ -175,6 +175,7 @@ jobs:
             --self-contained true `
             -p:PublishSingleFile=true `
             -p:EnableCompressionInSingleFile=true `
+            -p:Platform=x64 `
             "-p:InformationalVersion=0.1.2+${{ github.sha }}" `
             -p:IncludeSourceRevisionInInformationalVersion=false `
             -o .\exe
