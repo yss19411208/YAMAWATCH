@@ -261,9 +261,14 @@ internal sealed class WgcStreamingServer : IDisposable
             },
         };
 
+        log("WGC: creating recorder...", null);
         recorder = Recorder.CreateRecorder(options);
+        log("WGC: recorder created = " + (recorder != null), null);
+        if (recorder == null) { throw new InvalidOperationException("Recorder.CreateRecorder returned null (ScreenRecorderLib init failed)."); }
         recorder.OnRecordingFailed += (_, args) => log("WGC recorder failed: " + args.Error, null);
+        log("WGC: rawStream = " + (rawStream != null) + ", starting record...", null);
         recorder.Record(rawStream!);
+        log("WGC: recorder.Record called.", null);
     }
 
     private async Task AcceptLoopAsync(CancellationToken token)
