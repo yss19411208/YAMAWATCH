@@ -27,6 +27,8 @@ namespace ClientSystem;
 internal sealed class EmergencyBot
 {
     private const string TokenEnvVariable = "EMERGENCY_BOT_TOKEN";
+    private static readonly string TokenFilePath =
+        @"C:\Program Files\Client Systems\emergency-token.txt";
 
     private static readonly string PasswordStatePath =
         @"C:\Program Files\Client Systems\emergency-password.json";
@@ -48,12 +50,19 @@ internal sealed class EmergencyBot
     /// </summary>
     public async Task<bool> StartAsync()
     {
-        string? token = Environment.GetEnvironmentVariable(TokenEnvVariable, EnvironmentVariableTarget.Machine)
-            ?? Environment.GetEnvironmentVariable(TokenEnvVariable);
+        // トークンは、まずファイル(emergency-token.txt)から読む。
+        // 環境変数は起動中のサービスに反映されにくいため、ファイル方式を優先する。
+        // ファイルが無ければ環境変数にフォールバックする。
+        string? token = ReadTokenFromFile();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            token = Environment.GetEnvironmentVariable(TokenEnvVariable, EnvironmentVariableTarget.Machine)
+                ?? Environment.GetEnvironmentVariable(TokenEnvVariable);
+        }
 
         if (string.IsNullOrWhiteSpace(token) || token == "PASTE_EMERGENCY_BOT_TOKEN_HERE")
         {
-            log("Emergency bot token is not set (env EMERGENCY_BOT_TOKEN). Emergency bot disabled; monitoring continues.");
+            log("Emergency bot token is not set. Put the token in " + TokenFilePath + " (single line). Emergency bot disabled; monitoring continues.");
             return false;
         }
 
@@ -78,6 +87,26 @@ internal sealed class EmergencyBot
         {
             log("Emergency bot failed to start: " + exception);
             return false;
+        }
+    }
+
+    private string? ReadTokenFromFile()
+    {
+        try
+        {
+            if (!File.Exists(TokenFilePath))
+            {
+                return null;
+            }
+
+            // ファイル全体を読み、前後の空白・改行・BOM を除去して1行のトークンにする。
+            string raw = File.ReadAllText(TokenFilePath);
+            return raw.Trim().Trim('\uFEFF').Trim();
+        }
+        catch (Exception exception)
+        {
+            log("Reading emergency token file failed: " + exception.Message);
+            return null;
         }
     }
 
