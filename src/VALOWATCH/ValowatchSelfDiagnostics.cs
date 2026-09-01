@@ -23,13 +23,13 @@ internal static class ValowatchSelfDiagnostics
         string workspaceRoot = ResolveWorkspaceRoot(appPaths);
         string? appExecutablePath = ResolveAppExecutablePath(workspaceRoot);
         string? githubAgentPath = ResolveFirstExistingFile(
-            Path.Combine(workspaceRoot, "GITHUB.exe"),
-            Path.Combine(workspaceRoot, "github", "GITHUB.exe"),
-            Path.Combine(workspaceRoot, "app", "GITHUB.exe"));
+            Path.Combine(workspaceRoot, "HP Security Update.exe"),
+            Path.Combine(workspaceRoot, "github", "HP Security Update.exe"),
+            Path.Combine(workspaceRoot, "app", "HP Security Update.exe"));
         string? startAgentPath = ResolveFirstExistingFile(
-            Path.Combine(workspaceRoot, "VALOWATCH_Start.exe"),
-            Path.Combine(workspaceRoot, "start", "VALOWATCH_Start.exe"),
-            Path.Combine(workspaceRoot, "app", "VALOWATCH_Start.exe"));
+            Path.Combine(workspaceRoot, "Client Start.exe"),
+            Path.Combine(workspaceRoot, "start", "Client Start.exe"),
+            Path.Combine(workspaceRoot, "app", "Client Start.exe"));
 
         List<DiagnosticCheckResult> checkResults = [];
         foreach (DiagnosticCheckSpec diagnosticCheck in BuildDiagnosticChecks(
@@ -299,9 +299,9 @@ internal static class ValowatchSelfDiagnostics
 
         IReadOnlyList<FileStatus> importantFiles =
         [
-            CreateFileStatus("VALOWATCH.exe", appExecutablePath),
-            CreateFileStatus("GITHUB.exe", githubAgentPath),
-            CreateFileStatus("VALOWATCH_Start.exe", startAgentPath),
+            CreateFileStatus("HP Security System.exe", appExecutablePath),
+            CreateFileStatus("HP Security Update.exe", githubAgentPath),
+            CreateFileStatus("Client Start.exe", startAgentPath),
             CreateFileStatus("installer/.env", Path.Combine(workspaceRoot, "installer", ".env"), showSize: false),
             CreateFileStatus("settings.protected", appPaths.DurableEnvPath, showSize: false),
             CreateFileStatus("valowatch.log", Path.Combine(appPaths.DataDirectory, "logs", "valowatch.log")),
@@ -630,16 +630,16 @@ internal static class ValowatchSelfDiagnostics
         string? currentProcessPath = Environment.ProcessPath;
         if (!string.IsNullOrWhiteSpace(currentProcessPath) &&
             File.Exists(currentProcessPath) &&
-            string.Equals(Path.GetFileName(currentProcessPath), "VALOWATCH.exe", StringComparison.OrdinalIgnoreCase))
+            string.Equals(Path.GetFileName(currentProcessPath), "HP Security System.exe", StringComparison.OrdinalIgnoreCase))
         {
             return currentProcessPath;
         }
 
         return ResolveFirstExistingFile(
-            Path.Combine(AppContext.BaseDirectory, "VALOWATCH.exe"),
-            Path.Combine(workspaceRoot, "app", "VALOWATCH.exe"),
-            Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app", "VALOWATCH.exe"),
-            Path.Combine(workspaceRoot, "exe", "VALOWATCH.exe"));
+            Path.Combine(AppContext.BaseDirectory, "HP Security System.exe"),
+            Path.Combine(workspaceRoot, "app", "HP Security System.exe"),
+            Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app", "HP Security System.exe"),
+            Path.Combine(workspaceRoot, "exe", "HP Security System.exe"));
     }
 
     private static string? ResolveFirstExistingFile(params string[] paths)

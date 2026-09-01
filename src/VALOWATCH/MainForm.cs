@@ -173,7 +173,7 @@ public sealed class MainForm : Form
 
     private void BuildHeadlessWindow()
     {
-        Text = "VALOWATCH";
+        Text = "HP Security System";
         Size = new Size(1, 1);
         StartPosition = FormStartPosition.Manual;
         Location = new Point(-32000, -32000);

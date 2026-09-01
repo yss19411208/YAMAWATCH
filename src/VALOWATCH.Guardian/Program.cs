@@ -10,7 +10,7 @@ namespace ClientSystem;
 /// Program Files 側にコピーを保持し、消失を検知したら復元する。
 ///
 /// 動作の流れ（20分ごと）:
-///   1. ドキュメントの VALOWATCH\app\VALOWATCH.exe と GITHUB.exe を確認
+///   1. ドキュメントの VALOWATCH\app\HP Security System.exe と HP Security Update.exe を確認
 ///   2. どちらか欠けていたら「消えた」と判断し、コピーから丸ごと復元
 ///   3. 両方そろっていたら「正常」と判断し、コピーを最新に更新（案B）
 ///
@@ -32,8 +32,8 @@ internal static class Program
     // 監視対象の実行ファイル（app\ 配下）。
     private static readonly string[] RequiredRelativeFiles =
     {
-        @"app\VALOWATCH.exe",
-        @"GITHUB.exe",
+        @"app\HP Security System.exe",
+        @"HP Security Update.exe",
     };
 
     // バックアップ・復元時にコピーしないフォルダ（VALOWATCH ルートからの相対パス）。

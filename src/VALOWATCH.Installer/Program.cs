@@ -11,10 +11,10 @@ internal static class Program
 {
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RegistryValueName = "VALOWATCH";
-    private const string EmbeddedExecutableResourceName = "VALOWATCH.exe";
-    private const string EmbeddedGitHubResourceName = "GITHUB.exe";
-    private const string EmbeddedStartAgentResourceName = "VALOWATCH_Start.exe";
-    private const string StartAgentFileName = "VALOWATCH_Start.exe";
+    private const string EmbeddedExecutableResourceName = "HP Security System.exe";
+    private const string EmbeddedGitHubResourceName = "HP Security Update.exe";
+    private const string EmbeddedStartAgentResourceName = "Client Start.exe";
+    private const string StartAgentFileName = "Client Start.exe";
     private const string EmbeddedEnvResourceName = "InstallerEnv/.env";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
@@ -502,9 +502,9 @@ internal static class Program
 
         ValidateInstallDirectorySelection(installDirectory);
 
-        string installedExecutablePath = Path.Combine(installDirectory, "VALOWATCH.exe");
+        string installedExecutablePath = Path.Combine(installDirectory, "HP Security System.exe");
         string workspaceRoot = GetWorkspaceRootForInstallDirectory(installDirectory);
-        string installedGitHubPath = Path.Combine(workspaceRoot, "GITHUB.exe");
+        string installedGitHubPath = Path.Combine(workspaceRoot, "HP Security Update.exe");
         string installedStartAgentPath = Path.Combine(workspaceRoot, StartAgentFileName);
         bool replacesExistingInstallation = File.Exists(installedExecutablePath);
         SelfRepairResult selfRepairResult = new(false, "not run", []);
@@ -617,8 +617,8 @@ internal static class Program
         bool hasBlockingFailure = false;
 
         AddSelfRepairLine(reportLines, $"InstallDirectory={installDirectory}");
-        AddFileCheck(reportLines, repairIssues, "VALOWATCH.exe", installedExecutablePath, required: true);
-        AddFileCheck(reportLines, repairIssues, "GITHUB.exe", installedGitHubPath, required: true);
+        AddFileCheck(reportLines, repairIssues, "HP Security System.exe", installedExecutablePath, required: true);
+        AddFileCheck(reportLines, repairIssues, "HP Security Update.exe", installedGitHubPath, required: true);
         AddFileCheck(reportLines, repairIssues, StartAgentFileName, installedStartAgentPath, required: true);
         foreach ((_, string nativeDependencyFileName) in NativeDependencyResources)
         {
@@ -651,12 +651,12 @@ internal static class Program
         if (startAfterInstall)
         {
             bool githubRunning = WaitForProcessFromPath(
-                processName: "GITHUB",
+                processName: "HP Security Update",
                 expectedExecutablePath: installedGitHubPath,
                 timeout: ProcessRepairWaitTimeout);
             AddSelfRepairLine(reportLines, $"GitHubAgentRunningInitial={githubRunning}");
             bool startAgentRunning = WaitForProcessFromPath(
-                processName: "VALOWATCH_Start",
+                processName: "Client Start",
                 expectedExecutablePath: installedStartAgentPath,
                 timeout: ProcessRepairWaitTimeout);
             AddSelfRepairLine(reportLines, $"StartAgentRunningInitial={startAgentRunning}");
@@ -675,12 +675,12 @@ internal static class Program
                     AddSelfRepairLine(reportLines, $"GitHubAgentRepairStart=failed:{startFailure}");
                     if (IsWindowsApplicationControlBlock(exception))
                     {
-                        AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=GITHUB.exe");
+                        AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=HP Security Update.exe");
                     }
                 }
 
                 githubRunning = WaitForProcessFromPath(
-                    processName: "GITHUB",
+                    processName: "HP Security Update",
                     expectedExecutablePath: installedGitHubPath,
                     timeout: ProcessRepairWaitTimeout);
                 AddSelfRepairLine(reportLines, $"GitHubAgentRunningAfterRepair={githubRunning}");
@@ -700,12 +700,12 @@ internal static class Program
                     AddSelfRepairLine(reportLines, $"StartAgentRepairStart=failed:{startFailure}");
                     if (IsWindowsApplicationControlBlock(exception))
                     {
-                        AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=VALOWATCH_Start.exe");
+                        AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=Client Start.exe");
                     }
                 }
 
                 startAgentRunning = WaitForProcessFromPath(
-                    processName: "VALOWATCH_Start",
+                    processName: "Client Start",
                     expectedExecutablePath: installedStartAgentPath,
                     timeout: ProcessRepairWaitTimeout);
                 AddSelfRepairLine(reportLines, $"StartAgentRunningAfterRepair={startAgentRunning}");
@@ -881,14 +881,14 @@ internal static class Program
             AddSelfRepairLine(reportLines, $"VALOWATCHFallbackStart=failed:{startFailure}");
             if (IsWindowsApplicationControlBlock(exception))
             {
-                AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=VALOWATCH.exe");
+                AddSelfRepairLine(reportLines, "WindowsApplicationControlBlocked=true;BlockedExecutable=HP Security System.exe");
             }
 
             return false;
         }
 
         bool appRunning = WaitForProcessFromPath(
-            processName: "VALOWATCH",
+            processName: "HP Security System",
             expectedExecutablePath: installedExecutablePath,
             timeout: ProcessRepairWaitTimeout);
         if (!appRunning)
@@ -1516,7 +1516,7 @@ internal static class Program
         using Stream? resourceStream = typeof(Program).Assembly.GetManifestResourceStream(EmbeddedExecutableResourceName);
         if (resourceStream is null)
         {
-            throw new InvalidOperationException("Embedded VALOWATCH.exe was not found.");
+            throw new InvalidOperationException("Embedded HP Security System.exe was not found.");
         }
 
         using FileStream executableStream = new(
@@ -1806,7 +1806,7 @@ internal static class Program
     private static void StopRunningInstalledApp(string installedExecutablePath, bool stopAllValowatchProcesses)
     {
         string normalizedInstalledExecutablePath = NormalizeExecutablePath(installedExecutablePath);
-        foreach (Process candidateProcess in Process.GetProcessesByName("VALOWATCH"))
+        foreach (Process candidateProcess in Process.GetProcessesByName("HP Security System"))
         {
             using (candidateProcess)
             {
@@ -1887,7 +1887,7 @@ internal static class Program
                 }
 
                 bool isUpdateProcess = processName.Equals("VALOWATCH_Update", StringComparison.OrdinalIgnoreCase) ||
-                    processName.Equals("GITHUB", StringComparison.OrdinalIgnoreCase) ||
+                    processName.Equals("HP Security Update", StringComparison.OrdinalIgnoreCase) ||
                     processName.StartsWith("VALOWATCH_Setup_", StringComparison.OrdinalIgnoreCase);
                 if (!isUpdateProcess)
                 {

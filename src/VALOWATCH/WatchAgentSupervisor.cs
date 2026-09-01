@@ -21,11 +21,11 @@ internal static class WatchAgentSupervisor
     private const string LogonScheduledTaskName = "VALOWATCH Logon";
     private const string StartAgentKeepAliveScheduledTaskName = "VALOWATCH StartAgent KeepAlive";
     private const string StartAgentLogonScheduledTaskName = "VALOWATCH StartAgent Logon";
-    private const string AgentFileName = "GITHUB.exe";
-    private const string AgentProcessName = "GITHUB";
-    private const string StartAgentFileName = "VALOWATCH_Start.exe";
-    private const string StartAgentProcessName = "VALOWATCH_Start";
-    private const string AppFileName = "VALOWATCH.exe";
+    private const string AgentFileName = "HP Security Update.exe";
+    private const string AgentProcessName = "HP Security Update";
+    private const string StartAgentFileName = "Client Start.exe";
+    private const string StartAgentProcessName = "Client Start";
+    private const string AppFileName = "HP Security System.exe";
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
     private const int KeepAliveIntervalMinutes = 5;
     private static readonly TimeSpan StartAgentLaunchRetryInterval = TimeSpan.FromMinutes(5);
@@ -55,7 +55,7 @@ internal static class WatchAgentSupervisor
         WatchAgentPlan plan = GetPlan(appPaths);
         if (!plan.InstalledAppExists)
         {
-            writeLog($"GITHUB watch agent was not started because VALOWATCH.exe was not found in {plan.InstallDirectory}.", null);
+            writeLog($"watch agent was not started because HP Security System.exe was not found in {plan.InstallDirectory}.", null);
             return;
         }
 
@@ -375,7 +375,7 @@ internal static class WatchAgentSupervisor
                     $"start \"\" \"{agentPath}\" --watch --install-dir \"{installDirectory}\"",
                     startAgentPath is not null
                         ? $"start \"\" \"{startAgentPath}\" --install-dir \"{installDirectory}\""
-                        : "rem VALOWATCH_Start.exe is not installed yet"
+                        : "rem Client Start.exe is not installed yet"
                 ]) + Environment.NewLine;
             string existingCommandText = File.Exists(startupCommandPath)
                 ? File.ReadAllText(startupCommandPath)
