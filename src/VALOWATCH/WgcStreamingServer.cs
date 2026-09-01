@@ -227,14 +227,24 @@ internal sealed class WgcStreamingServer : IDisposable
 
     private void StartRecorder()
     {
+        log("WGC: StartRecorder begin.", null);
+        var displays = Recorder.GetDisplays();
+        log("WGC: displays count = " + (displays?.Count ?? -1), null);
+        var sources = new List<RecordingSourceBase>();
+        if (displays != null && displays.Count > 0)
+        {
+            sources.Add(displays[0]);
+        }
+        else
+        {
+            sources.Add(new DisplayRecordingSource(DisplayRecordingSource.MainMonitor));
+        }
+
         var options = new RecorderOptions
         {
             SourceOptions = new SourceOptions
             {
-                RecordingSources = new List<RecordingSourceBase>
-                {
-                    new DisplayRecordingSource(DisplayRecordingSource.MainMonitor),
-                },
+                RecordingSources = sources,
             },
             OutputOptions = new OutputOptions
             {
