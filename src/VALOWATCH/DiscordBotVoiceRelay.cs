@@ -354,7 +354,9 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             await EnsurePsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsurePowerShellCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureCycleCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            WriteLog("WGC: about to call EnsureWgcCommandAsync.");
             await EnsureWgcCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
+            WriteLog("WGC: returned from EnsureWgcCommandAsync.");
             await EnsureRunningAppCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureSelfDiagnosticsCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
             await EnsureDebugCommandAsync(gatewayContext.Guild).ConfigureAwait(false);
@@ -2831,9 +2833,11 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
     private async Task EnsureWgcCommandAsync(SocketGuild guild)
     {
+        WriteLog("WGC: EnsureWgcCommandAsync ENTERED.");
         try
         {
             var commands = await guild.GetApplicationCommandsAsync().ConfigureAwait(false);
+            WriteLog("WGC: got existing commands, count=" + commands.Count);
             if (commands.Any(c => string.Equals(c.Name, WgcCommandName, StringComparison.OrdinalIgnoreCase)))
             {
                 WriteLog($"WGC slash command already exists: /{WgcCommandName}.");
