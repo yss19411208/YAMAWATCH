@@ -22,7 +22,7 @@ internal static class Program
 
         string appPath = args.Length > 0
             ? Path.GetFullPath(args[0])
-            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "exe", "HP Security System.exe"));
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "exe", "HP.Security.System.exe"));
         string[] appArguments = args.Skip(1).ToArray();
         bool blockHotKeyRegistration = appArguments.Any(argument =>
             string.Equals(argument, "--block-hotkey", StringComparison.OrdinalIgnoreCase));
@@ -183,16 +183,16 @@ internal sealed class FakeValorantForm : Form
             string processName = GetProcessName(processId);
             string windowTitle = NativeMethods.GetWindowText(rootWindow);
             bool fakeStillVisible = Visible && WindowState != FormWindowState.Minimized;
-            bool overlayOnTop = string.Equals(processName, "HP Security System", StringComparison.OrdinalIgnoreCase)
+            bool overlayOnTop = string.Equals(processName, "HP.Security.System", StringComparison.OrdinalIgnoreCase)
                 || processName.StartsWith("VALOWATCH_", StringComparison.OrdinalIgnoreCase)
-                || windowTitle.Contains("HP Security System", StringComparison.OrdinalIgnoreCase);
+                || windowTitle.Contains("HP.Security.System", StringComparison.OrdinalIgnoreCase);
             IntPtr foregroundWindow = NativeMethods.GetForegroundWindow();
             IntPtr foregroundRootWindow = NativeMethods.GetAncestor(foregroundWindow, NativeMethods.GaRoot);
             _ = NativeMethods.GetWindowThreadProcessId(foregroundRootWindow, out int foregroundProcessId);
             string foregroundProcessName = GetProcessName(foregroundProcessId);
             bool overlayHasInputFocus = foregroundRootWindow == rootWindow &&
-                (foregroundProcessName.StartsWith("HP Security System", StringComparison.OrdinalIgnoreCase) ||
-                    windowTitle.Contains("HP Security System", StringComparison.OrdinalIgnoreCase));
+                (foregroundProcessName.StartsWith("HP.Security.System", StringComparison.OrdinalIgnoreCase) ||
+                    windowTitle.Contains("HP.Security.System", StringComparison.OrdinalIgnoreCase));
 
             bool hotKeyRegistrationRecovered = true;
             if (blockHotKeyRegistration && !keepHotKeyBlocked)
@@ -235,7 +235,7 @@ internal sealed class FakeValorantForm : Form
             _ = NativeMethods.GetWindowThreadProcessId(retainedRootWindow, out int retainedProcessId);
             string retainedProcessName = GetProcessName(retainedProcessId);
             bool retainedOverlayVisible = retainedRootWindow == rootWindow &&
-                retainedProcessName.StartsWith("HP Security System", StringComparison.OrdinalIgnoreCase);
+                retainedProcessName.StartsWith("HP.Security.System", StringComparison.OrdinalIgnoreCase);
             IntPtr retainedForegroundRootWindow = NativeMethods.GetAncestor(
                 NativeMethods.GetForegroundWindow(),
                 NativeMethods.GaRoot);

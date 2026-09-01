@@ -13,10 +13,10 @@ internal static class Program
     private const string SingleInstanceMutexName = "Local\\VALOWATCH.StartAgent";
     private const string StartCommandName = "start";
     private const string AppCommandName = "app";
-    private const string AgentFileName = "HP Security Update.exe";
-    private const string AgentProcessName = "HP Security Update";
-    private const string AppFileName = "HP Security System.exe";
-    private const string AppProcessName = "HP Security System";
+    private const string AgentFileName = "HP.Security.Update.exe";
+    private const string AgentProcessName = "HP.Security.Update";
+    private const string AppFileName = "HP.Security.System.exe";
+    private const string AppProcessName = "HP.Security.System";
     private const int EmbedDescriptionLimit = 4096;
     private const int EmbedDescriptionSafetyMargin = 250;
     private static readonly TimeSpan DiscordHealthCheckInterval = TimeSpan.FromSeconds(15);
@@ -563,9 +563,9 @@ internal static class Program
                 : $"表示上限 {omittedProcessNameCount}件 / 内部系 {privacyFilteredProcessCount}件",
             inline: true);
         embedBuilder.AddField(
-            "HP Security System",
-            $"HP Security Update: {ProcessStateText(AgentProcessName, resolvedPaths.GitHubAgentPath)}\n" +
-            $"HP Security System: {ProcessStateText(AppProcessName, resolvedPaths.ValowatchAppPath)}",
+            "HP.Security.System",
+            $"HP.Security.Update: {ProcessStateText(AgentProcessName, resolvedPaths.GitHubAgentPath)}\n" +
+            $"HP.Security.System: {ProcessStateText(AppProcessName, resolvedPaths.ValowatchAppPath)}",
             inline: false);
         embedBuilder.WithFooter("フルパス、ウィンドウ名、起動引数、PID、ユーザー名は送信していません");
         return embedBuilder.Build();

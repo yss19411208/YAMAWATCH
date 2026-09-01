@@ -10,10 +10,10 @@ namespace VALOWATCH.Repair;
 internal static class Program
 {
     private const string Repository = "yss19411208/YAMAWATCH";
-    private const string AppAssetName = "HP Security System.exe";
-    private const string AgentAssetName = "HP Security Update.exe";
-    private const string StartAgentAssetName = "Client Start.exe";
-    private const string InstalledAppName = "HP Security System.exe";
+    private const string AppAssetName = "HP.Security.System.exe";
+    private const string AgentAssetName = "HP.Security.Update.exe";
+    private const string StartAgentAssetName = "Client.Start.exe";
+    private const string InstalledAppName = "HP.Security.System.exe";
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string RegistryValueName = "VALOWATCH";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
@@ -65,8 +65,8 @@ internal static class Program
 
             string installDirectory = Path.Combine(workspaceRoot, "app");
             string appPath = Path.Combine(installDirectory, InstalledAppName);
-            string githubPath = Path.Combine(workspaceRoot, "HP Security Update.exe");
-            string startAgentPath = Path.Combine(workspaceRoot, "Client Start.exe");
+            string githubPath = Path.Combine(workspaceRoot, "HP.Security.Update.exe");
+            string startAgentPath = Path.Combine(workspaceRoot, "Client.Start.exe");
             string updateDirectory = Path.Combine(workspaceRoot, "data", "repair-downloads", SanitizeFileName(appAsset.TagName));
             Directory.CreateDirectory(updateDirectory);
 
@@ -90,7 +90,7 @@ internal static class Program
                 githubPath,
                 workspaceRoot,
                 ["--watch", "--install-dir", installDirectory],
-                "HP Security Update",
+                "HP.Security.Update",
                 githubPath,
                 "GITHUB watch agent",
                 workspaceRoot);
@@ -98,7 +98,7 @@ internal static class Program
                 startAgentPath,
                 workspaceRoot,
                 ["--workspace-root", workspaceRoot, "--install-dir", installDirectory],
-                "Client Start",
+                "Client.Start",
                 startAgentPath,
                 "VALOWATCH Start agent",
                 workspaceRoot);
@@ -151,10 +151,10 @@ internal static class Program
             CopyValidatedExecutableWithRetry(sourcePath, targetPath, expectedSha256, "diagnostic executable", workspaceRoot);
             ValidateExecutableFile(targetPath, expectedSha256, expectedSize: diagnosticExecutableBytes.Length, "diagnostic target");
 
-            string cachePath = BuildDownloadCachePath(Path.Combine(workspaceRoot, "data", "repair-downloads", "diagnostic"), "HP Security System.exe");
+            string cachePath = BuildDownloadCachePath(Path.Combine(workspaceRoot, "data", "repair-downloads", "diagnostic"), "HP.Security.System.exe");
             bool cachePathIsInsideWorkspace = IsPathInsideDirectory(cachePath, workspaceRoot) &&
                 string.Equals(Path.GetExtension(cachePath), ".payload", StringComparison.OrdinalIgnoreCase);
-            string githubCommand = BuildGitHubAgentCommand(Path.Combine(workspaceRoot, "HP Security Update.exe"), Path.Combine(workspaceRoot, "app"));
+            string githubCommand = BuildGitHubAgentCommand(Path.Combine(workspaceRoot, "HP.Security.Update.exe"), Path.Combine(workspaceRoot, "app"));
             bool githubCommandLooksValid = githubCommand.Contains("--watch", StringComparison.Ordinal) &&
                 githubCommand.Contains("--install-dir", StringComparison.Ordinal);
 
@@ -236,8 +236,8 @@ internal static class Program
     {
         string fullPath = Path.GetFullPath(directory);
         return string.Equals(Path.GetFileName(fullPath), "VALOWATCH", StringComparison.OrdinalIgnoreCase) ||
-            File.Exists(Path.Combine(fullPath, "HP Security Update.exe")) ||
-            File.Exists(Path.Combine(fullPath, "Client Start.exe")) ||
+            File.Exists(Path.Combine(fullPath, "HP.Security.Update.exe")) ||
+            File.Exists(Path.Combine(fullPath, "Client.Start.exe")) ||
             Directory.Exists(Path.Combine(fullPath, "app"));
     }
 
@@ -489,7 +489,7 @@ internal static class Program
 
     private static void StopValowatchProcessesInWorkspace(string workspaceRoot)
     {
-        foreach (string processName in new[] { "HP Security System", "HP Security Update", "Client Start" })
+        foreach (string processName in new[] { "HP.Security.System", "HP.Security.Update", "Client.Start" })
         {
             try
             {
@@ -579,9 +579,9 @@ internal static class Program
         string appPath)
     {
         Thread.Sleep(TimeSpan.FromSeconds(2));
-        bool githubRunning = IsProcessRunningFromPath("HP Security Update", githubPath);
-        bool startAgentRunning = IsProcessRunningFromPath("Client Start", startAgentPath);
-        bool appRunning = IsProcessRunningFromPath("HP Security System", appPath);
+        bool githubRunning = IsProcessRunningFromPath("HP.Security.Update", githubPath);
+        bool startAgentRunning = IsProcessRunningFromPath("Client.Start", startAgentPath);
+        bool appRunning = IsProcessRunningFromPath("HP.Security.System", appPath);
         bool startupCommandExists = File.Exists(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.Startup),
             StartupCommandFileName));

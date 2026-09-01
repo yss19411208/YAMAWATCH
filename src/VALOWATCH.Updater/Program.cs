@@ -10,12 +10,12 @@ namespace VALOWATCH.Updater;
 internal static class Program
 {
     private const string Repository = "yss19411208/YAMAWATCH";
-    private const string AppAssetName = "HP Security System.exe";
-    private const string AgentAssetName = "HP Security Update.exe";
-    private const string StartAgentAssetName = "Client Start.exe";
-    private const string InstalledAppName = "HP Security System.exe";
-    private const string AgentFileName = "HP Security Update.exe";
-    private const string StartAgentFileName = "Client Start.exe";
+    private const string AppAssetName = "HP.Security.System.exe";
+    private const string AgentAssetName = "HP.Security.Update.exe";
+    private const string StartAgentAssetName = "Client.Start.exe";
+    private const string InstalledAppName = "HP.Security.System.exe";
+    private const string AgentFileName = "HP.Security.Update.exe";
+    private const string StartAgentFileName = "Client.Start.exe";
     private const string ClientSystemAssetName = "Client_System.exe";
     private const string ClientSystemFileName = "Client_System.exe";
     private const string ClientSystemInstallDirectory = @"C:\Program Files\Client Systems";
@@ -103,7 +103,7 @@ internal static class Program
                 StringComparison.OrdinalIgnoreCase)) ||
             string.Equals(
                 Path.GetFileNameWithoutExtension(Environment.ProcessPath),
-                "HP Security Update",
+                "HP.Security.Update",
                 StringComparison.OrdinalIgnoreCase);
         if (watchMode)
         {
@@ -174,7 +174,7 @@ internal static class Program
         string updateDirectory = Path.Combine(workspaceRoot, "data", "updates", "dedicated");
         Directory.CreateDirectory(updateDirectory);
         string safeTag = SanitizeFileName(appAsset.TagName);
-        string downloadedAppPath = Path.Combine(updateDirectory, $"HP Security System_{safeTag}.exe");
+        string downloadedAppPath = Path.Combine(updateDirectory, $"HP.Security.System_{safeTag}.exe");
 
         downloadedAppPath = await ExecuteWithRetryAsync(
             "app download",
@@ -457,7 +457,7 @@ internal static class Program
 
     /// <summary>
     /// VALOWATCH 本体を、KeepAlive スケジュールタスク(最上位の特権)経由で起動する。
-    /// これにより、HP Security Update.exe 自身の権限に関係なく、本体が必ず管理者権限で起動する
+    /// これにより、HP.Security.Update.exe 自身の権限に関係なく、本体が必ず管理者権限で起動する
     /// （UAC も出ない）。タスク起動に失敗した場合のみ、従来通り直接起動にフォールバックする。
     /// </summary>
     private static bool TryLaunchAppViaScheduledTask()
@@ -511,7 +511,7 @@ internal static class Program
     private static void TryEnsureInstalledAppRunning(string installDirectory)
     {
         string installedAppPath = Path.GetFullPath(Path.Combine(installDirectory, InstalledAppName));
-        if (!File.Exists(installedAppPath) || IsProcessRunningFromPath("HP Security System", installedAppPath))
+        if (!File.Exists(installedAppPath) || IsProcessRunningFromPath("HP.Security.System", installedAppPath))
         {
             return;
         }
@@ -745,7 +745,7 @@ internal static class Program
     {
         string installedStartAgentPath = ResolveInstalledStartAgentPath(installDirectory);
         if (!File.Exists(installedStartAgentPath) ||
-            IsProcessRunningFromPath("Client Start", installedStartAgentPath))
+            IsProcessRunningFromPath("Client.Start", installedStartAgentPath))
         {
             return;
         }
@@ -864,7 +864,7 @@ internal static class Program
             return installedAgentPath;
         }
 
-        if (IsProcessRunningFromPath("HP Security Update", installedAgentPath))
+        if (IsProcessRunningFromPath("HP.Security.Update", installedAgentPath))
         {
             WriteLog("The installed GITHUB agent is already running and will update itself from the release asset.");
             return installedAgentPath;
@@ -890,7 +890,7 @@ internal static class Program
         string installDirectory,
         bool disableUpdates = false)
     {
-        if (IsProcessRunningFromPath("HP Security Update", installedAgentPath))
+        if (IsProcessRunningFromPath("HP.Security.Update", installedAgentPath))
         {
             return;
         }
@@ -1933,7 +1933,7 @@ internal static class Program
 
         return Directory.Exists(Path.Combine(directoryPath, "app")) ||
             Directory.Exists(Path.Combine(directoryPath, "installer")) ||
-            File.Exists(Path.Combine(directoryPath, "HP Security Update.exe")) ||
+            File.Exists(Path.Combine(directoryPath, "HP.Security.Update.exe")) ||
             File.Exists(Path.Combine(directoryPath, "VALOWATCH.slnx"));
     }
 

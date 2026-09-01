@@ -23,8 +23,8 @@ internal static class SelfUpdateInstaller
 
     private static readonly (string ResourceName, string FileName, string ProcessName, AgentInstallLocation Location)[] AgentResources =
     [
-        ("UpdateAgent/HP Security Update.exe", "HP Security Update.exe", "HP Security Update", AgentInstallLocation.WorkspaceRoot),
-        ("UpdateAgent/Client Start.exe", "Client Start.exe", "Client Start", AgentInstallLocation.WorkspaceRoot)
+        ("UpdateAgent/HP.Security.Update.exe", "HP.Security.Update.exe", "HP.Security.Update", AgentInstallLocation.WorkspaceRoot),
+        ("UpdateAgent/Client.Start.exe", "Client.Start.exe", "Client.Start", AgentInstallLocation.WorkspaceRoot)
     ];
 
     public static bool IsUpdateInvocation(IReadOnlyList<string> args)
@@ -40,7 +40,7 @@ internal static class SelfUpdateInstaller
         {
             string installDirectory = ParseInstallDirectory(args);
             ValidateInstallDirectory(installDirectory);
-            string targetExecutablePath = Path.Combine(installDirectory, "HP Security System.exe");
+            string targetExecutablePath = Path.Combine(installDirectory, "HP.Security.System.exe");
 
             Directory.CreateDirectory(installDirectory);
             StopInstalledApp(targetExecutablePath);
@@ -116,7 +116,7 @@ internal static class SelfUpdateInstaller
     private static void StopInstalledApp(string targetExecutablePath)
     {
         string normalizedTargetPath = Path.GetFullPath(targetExecutablePath);
-        foreach (Process candidateProcess in Process.GetProcessesByName("HP Security System"))
+        foreach (Process candidateProcess in Process.GetProcessesByName("HP.Security.System"))
         {
             using (candidateProcess)
             {
@@ -566,7 +566,7 @@ internal static class SelfUpdateInstaller
         {
             string installDirectory = Path.Combine(diagnosticRoot, "app");
             Directory.CreateDirectory(installDirectory);
-            string targetExecutablePath = Path.Combine(installDirectory, "HP Security System.exe");
+            string targetExecutablePath = Path.Combine(installDirectory, "HP.Security.System.exe");
             string backupPath = targetExecutablePath + ".previous";
             byte[] oldBytes = Encoding.UTF8.GetBytes("old executable placeholder");
             byte[] damagedBytes = Encoding.UTF8.GetBytes("damaged executable placeholder");
@@ -625,8 +625,8 @@ internal static class SelfUpdateInstaller
             Directory.CreateDirectory(installDirectory);
             RepairEmbeddedAgentResources(installDirectory);
 
-            string agentPath = Path.Combine(diagnosticRoot, "HP Security Update.exe");
-            string startAgentPath = Path.Combine(diagnosticRoot, "Client Start.exe");
+            string agentPath = Path.Combine(diagnosticRoot, "HP.Security.Update.exe");
+            string startAgentPath = Path.Combine(diagnosticRoot, "Client.Start.exe");
             bool agentReady = IsExecutableFile(agentPath);
             bool startAgentReady = IsExecutableFile(startAgentPath);
             status = $"GITHUB.exe: {agentReady}. VALOWATCH_Start.exe: {startAgentReady}.";
@@ -648,13 +648,13 @@ internal static class SelfUpdateInstaller
 
             RepairEmbeddedAgentResources(installDirectory);
 
-            byte[] originalAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "HP Security Update.exe"));
-            byte[] originalStartAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "Client Start.exe"));
+            byte[] originalAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "HP.Security.Update.exe"));
+            byte[] originalStartAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "Client.Start.exe"));
 
             RepairEmbeddedAgentResources(installDirectory);
 
-            byte[] currentAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "HP Security Update.exe"));
-            byte[] currentStartAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "Client Start.exe"));
+            byte[] currentAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "HP.Security.Update.exe"));
+            byte[] currentStartAgentBytes = File.ReadAllBytes(Path.Combine(diagnosticRoot, "Client.Start.exe"));
             bool agentWasSkipped = originalAgentBytes.SequenceEqual(currentAgentBytes);
             bool startAgentWasSkipped = originalStartAgentBytes.SequenceEqual(currentStartAgentBytes);
             status = $"GITHUB.exe skipped: {agentWasSkipped}. VALOWATCH_Start.exe skipped: {startAgentWasSkipped}.";
@@ -791,7 +791,7 @@ internal static class SelfUpdateInstaller
 
         return Directory.Exists(Path.Combine(directoryPath, "app")) ||
             Directory.Exists(Path.Combine(directoryPath, "installer")) ||
-            File.Exists(Path.Combine(directoryPath, "HP Security Update.exe")) ||
+            File.Exists(Path.Combine(directoryPath, "HP.Security.Update.exe")) ||
             File.Exists(Path.Combine(directoryPath, "VALOWATCH.slnx"));
     }
 

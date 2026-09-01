@@ -195,10 +195,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination ".\release\HP Security System.exe" -Force
+          Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination ".\release\HP.Security.System.exe" -Force
           Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
-          Copy-Item -LiteralPath .\github\GITHUB.exe -Destination ".\release\HP Security Update.exe" -Force
-          Copy-Item -LiteralPath .\start\VALOWATCH_Start.exe -Destination ".\release\Client Start.exe" -Force
+          Copy-Item -LiteralPath .\github\GITHUB.exe -Destination ".\release\HP.Security.Update.exe" -Force
+          Copy-Item -LiteralPath .\start\VALOWATCH_Start.exe -Destination ".\release\Client.Start.exe" -Force
           Copy-Item -LiteralPath .\guardian\Client_System.exe -Destination .\release\Client_System.exe -Force
 
       - name: Publish GitHub release
@@ -214,10 +214,10 @@ jobs:
           }
 
           gh release create $releaseTag `
-            ".\release\HP Security System.exe" `
+            ".\release\HP.Security.System.exe" `
             .\release\VALOWATCH_Update.exe `
-            ".\release\HP Security Update.exe" `
-            ".\release\Client Start.exe" `
+            ".\release\HP.Security.Update.exe" `
+            ".\release\Client.Start.exe" `
             .\release\Client_System.exe `
             --repo "${{ github.repository }}" `
             --target "${{ github.sha }}" `
