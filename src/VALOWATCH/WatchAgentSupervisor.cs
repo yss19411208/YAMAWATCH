@@ -15,7 +15,7 @@ internal sealed record WatchAgentPlan(
 internal static class WatchAgentSupervisor
 {
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string RegistryValueName = "VALOWATCH";
+    private const string RegistryValueName = "Systems";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string KeepAliveScheduledTaskName = "VALOWATCH KeepAlive";
     private const string LogonScheduledTaskName = "VALOWATCH Logon";
@@ -187,7 +187,7 @@ internal static class WatchAgentSupervisor
     {
         if (IsSourceRepositoryRoot(workspaceRoot))
         {
-            string isolatedInstallDirectory = Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app");
+            string isolatedInstallDirectory = Path.Combine(workspaceRoot, "data", "installed", "Systems", "app");
             if (File.Exists(Path.Combine(isolatedInstallDirectory, AppFileName)))
             {
                 return NormalizeDirectory(isolatedInstallDirectory);

@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyTitle>HP.Security.Systems</AssemblyTitle>
+    <AssemblyTitle>HP.Security.System</AssemblyTitle>
     <Version>0.1.2</Version>
     <FileVersion>0.1.2.0</FileVersion>
     <InformationalVersion>0.1.2</InformationalVersion>

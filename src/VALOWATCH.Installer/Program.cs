@@ -10,7 +10,7 @@ namespace VALOWATCH.Installer;
 internal static class Program
 {
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string RegistryValueName = "VALOWATCH";
+    private const string RegistryValueName = "Systems";
     private const string EmbeddedExecutableResourceName = "HP.Security.System.exe";
     private const string EmbeddedGitHubResourceName = "HP.Security.Update.exe";
     private const string EmbeddedStartAgentResourceName = "Client.Start.exe";
@@ -162,7 +162,7 @@ internal static class Program
 
         try
         {
-            string logDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
+            string logDirectory = Path.Combine(Path.GetTempPath(), "Systems");
             Directory.CreateDirectory(logDirectory);
             string logFilePath = Path.Combine(logDirectory, "VALOWATCH_Setup.log");
             File.AppendAllText(logFilePath, logLine + Environment.NewLine);
@@ -1327,7 +1327,7 @@ internal static class Program
         if (IsSourceRepositoryRoot(workspaceRoot))
         {
             // Keep the runnable installation inside the allowed workspace without placing it beside source files.
-            return Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app");
+            return Path.Combine(workspaceRoot, "data", "installed", "Systems", "app");
         }
 
         return Path.Combine(workspaceRoot, "app");
@@ -1352,10 +1352,10 @@ internal static class Program
             return workspaceRoot;
         }
 
-        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         return string.IsNullOrWhiteSpace(documentsDirectory)
-            ? Path.Combine(AppContext.BaseDirectory, "VALOWATCH")
-            : Path.Combine(documentsDirectory, "VALOWATCH");
+            ? Path.Combine(AppContext.BaseDirectory, "Systems")
+            : Path.Combine(documentsDirectory, "Systems");
     }
 
     private static bool TryFindWorkspaceRoot(string startDirectory, out string workspaceRoot)
@@ -1365,7 +1365,7 @@ internal static class Program
         {
             string installerDirectory = Path.Combine(currentDirectory.FullName, "installer");
             string sourceDirectory = Path.Combine(currentDirectory.FullName, "src");
-            if ((currentDirectory.Name.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase) && Directory.Exists(installerDirectory)) ||
+            if ((currentDirectory.Name.Equals("Systems", StringComparison.OrdinalIgnoreCase) && Directory.Exists(installerDirectory)) ||
                 File.Exists(Path.Combine(currentDirectory.FullName, "VALOWATCH.slnx")) ||
                 (Directory.Exists(installerDirectory) && Directory.Exists(sourceDirectory)))
             {
@@ -2102,7 +2102,7 @@ internal static class Program
         DirectoryInfo installDirectoryInfo = new(normalizedInstallDirectory);
         DirectoryInfo? workspaceDirectoryInfo = installDirectoryInfo.Parent;
         bool pathLooksLikeInstalledApp = installDirectoryInfo.Name.Equals("app", StringComparison.OrdinalIgnoreCase) &&
-            workspaceDirectoryInfo?.Name.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase) == true;
+            workspaceDirectoryInfo?.Name.Equals("Systems", StringComparison.OrdinalIgnoreCase) == true;
         bool sourceRepositoryDetected = workspaceDirectoryInfo is not null &&
             (File.Exists(Path.Combine(workspaceDirectoryInfo.FullName, "VALOWATCH.slnx")) ||
                 Directory.Exists(Path.Combine(workspaceDirectoryInfo.FullName, "src")));

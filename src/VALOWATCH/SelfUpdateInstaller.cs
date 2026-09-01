@@ -705,7 +705,7 @@ internal static class SelfUpdateInstaller
         {
             string directoryName = Path.GetFileName(
                 currentDirectory.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-            if (directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase))
+            if (directoryName.Equals("Systems", StringComparison.OrdinalIgnoreCase))
             {
                 return currentDirectory.FullName;
             }
@@ -751,10 +751,10 @@ internal static class SelfUpdateInstaller
             return Path.Combine(workspaceRoot, "data", "logs");
         }
 
-        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         if (!string.IsNullOrWhiteSpace(documentsDirectory))
         {
-            return Path.Combine(documentsDirectory, "VALOWATCH", "data", "logs");
+            return Path.Combine(documentsDirectory, "Systems", "data", "logs");
         }
 
         return Path.Combine(AppContext.BaseDirectory, "data", "logs");
@@ -784,7 +784,7 @@ internal static class SelfUpdateInstaller
     {
         string directoryName = Path.GetFileName(
             directoryPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (!directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase))
+        if (!directoryName.Equals("Systems", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

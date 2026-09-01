@@ -68,10 +68,10 @@ public sealed class AppPaths
             return CreateForWorkspaceRoot(workspaceRoot);
         }
 
-        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         if (!string.IsNullOrWhiteSpace(documentsDirectory))
         {
-            string documentsWorkspaceRoot = Path.Combine(documentsDirectory, "VALOWATCH");
+            string documentsWorkspaceRoot = Path.Combine(documentsDirectory, "Systems");
             if (IsWorkspaceRoot(documentsWorkspaceRoot))
             {
                 return CreateForWorkspaceRoot(documentsWorkspaceRoot);
@@ -80,7 +80,7 @@ public sealed class AppPaths
 
         string dataDirectory = string.IsNullOrWhiteSpace(documentsDirectory)
             ? Path.Combine(AppContext.BaseDirectory, "data")
-            : Path.Combine(documentsDirectory, "VALOWATCH", "data");
+            : Path.Combine(documentsDirectory, "Systems", "data");
 
         return new AppPaths(dataDirectory);
     }
@@ -143,6 +143,6 @@ public sealed class AppPaths
         return File.Exists(solutionPath) ||
             (Directory.Exists(installerDirectory) && Directory.Exists(sourceDirectory)) ||
             (Directory.Exists(installerDirectory) && Directory.Exists(appDirectory)) ||
-            (directoryName.Equals("VALOWATCH", StringComparison.OrdinalIgnoreCase) && Directory.Exists(installerDirectory));
+            (directoryName.Equals("Systems", StringComparison.OrdinalIgnoreCase) && Directory.Exists(installerDirectory));
     }
 }

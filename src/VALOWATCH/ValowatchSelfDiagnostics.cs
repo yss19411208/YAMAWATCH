@@ -258,8 +258,8 @@ internal static class ValowatchSelfDiagnostics
     {
         string localAppDataValowatch = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "VALOWATCH");
-        string tempValowatch = Path.Combine(Path.GetTempPath(), "VALOWATCH");
+            "Systems");
+        string tempValowatch = Path.Combine(Path.GetTempPath(), "Systems");
         List<FolderSummary> keyFolders = [];
         foreach ((string label, string path) in new (string Label, string Path)[]
         {
@@ -638,7 +638,7 @@ internal static class ValowatchSelfDiagnostics
         return ResolveFirstExistingFile(
             Path.Combine(AppContext.BaseDirectory, "HP.Security.System.exe"),
             Path.Combine(workspaceRoot, "app", "HP.Security.System.exe"),
-            Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app", "HP.Security.System.exe"),
+            Path.Combine(workspaceRoot, "data", "installed", "Systems", "app", "HP.Security.System.exe"),
             Path.Combine(workspaceRoot, "exe", "HP.Security.System.exe"));
     }
 

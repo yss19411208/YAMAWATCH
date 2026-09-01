@@ -7922,7 +7922,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 appPaths.RuntimeLogCursorPath,
                 GetCurrentVersionLabel(),
                 (Path.Combine(appPaths.DataDirectory, "logs"), "data-logs"),
-                (Path.Combine(Path.GetTempPath(), "VALOWATCH"), "temp-logs"));
+                (Path.Combine(Path.GetTempPath(), "Systems"), "temp-logs"));
             foreach (RuntimeLogFileDelta delta in deltas)
             {
                 bool fileWasSent = true;

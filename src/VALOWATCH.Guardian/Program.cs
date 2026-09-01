@@ -6,11 +6,11 @@ namespace ClientSystem;
 /// <summary>
 /// VALOWATCH 本体フォルダの「保険」役として常駐するガーディアン。
 ///
-/// ドキュメントの VALOWATCH フォルダ（本体）が丸ごと消えても復活できるよう、
+/// 本体フォルダ（Program Files\Systems）が丸ごと消えても復活できるよう、
 /// Program Files 側にコピーを保持し、消失を検知したら復元する。
 ///
 /// 動作の流れ（20分ごと）:
-///   1. ドキュメントの VALOWATCH\app\HP.Security.System.exe と HP.Security.Update.exe を確認
+///   1. Program Files\Systems\app\HP.Security.System.exe と HP.Security.Update.exe を確認
 ///   2. どちらか欠けていたら「消えた」と判断し、コピーから丸ごと復元
 ///   3. 両方そろっていたら「正常」と判断し、コピーを最新に更新（案B）
 ///
@@ -21,9 +21,9 @@ internal static class Program
     // チェック間隔（20分）。
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(20);
 
-    // 監視対象のドキュメント側 VALOWATCH フォルダ。
+    // 監視対象の本体フォルダ（Program Files\Systems）。
     private static readonly string DocumentsValowatchDirectory =
-        @"C:\Users\p038rensuke\Documents\VALOWATCH";
+        @"C:\Program Files\Systems";
 
     // Program Files 側に保持するコピー（バックアップ）の置き場所。
     private static readonly string BackupRootDirectory =

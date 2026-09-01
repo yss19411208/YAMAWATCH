@@ -15,7 +15,7 @@ internal static class Program
     private const string StartAgentAssetName = "Client.Start.exe";
     private const string InstalledAppName = "HP.Security.System.exe";
     private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string RegistryValueName = "VALOWATCH";
+    private const string RegistryValueName = "Systems";
     private const string StartupCommandFileName = "VALOWATCH.cmd";
     private const string LaunchBeaconFileName = "repair-launch.txt";
     private const int MaximumAttempts = 5;
@@ -106,7 +106,7 @@ internal static class Program
                 appPath,
                 installDirectory,
                 [],
-                "VALOWATCH",
+                "Systems",
                 appPath,
                 "VALOWATCH app",
                 workspaceRoot);
@@ -131,7 +131,7 @@ internal static class Program
     private static int RunRepairDiagnostic()
     {
         string diagnosticRoot = Path.Combine(Path.GetTempPath(), "VALOWATCH-repair-check-" + Guid.NewGuid().ToString("N"));
-        string workspaceRoot = Path.Combine(diagnosticRoot, "VALOWATCH");
+        string workspaceRoot = Path.Combine(diagnosticRoot, "Systems");
         try
         {
             Directory.CreateDirectory(Path.Combine(workspaceRoot, "app"));
@@ -223,19 +223,19 @@ internal static class Program
             return executableParent.FullName;
         }
 
-        string documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        string documents = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         if (string.IsNullOrWhiteSpace(documents))
         {
             throw new InvalidOperationException("Documents folder could not be resolved.");
         }
 
-        return Path.Combine(documents, "VALOWATCH");
+        return Path.Combine(documents, "Systems");
     }
 
     private static bool LooksLikeWorkspaceRoot(string directory)
     {
         string fullPath = Path.GetFullPath(directory);
-        return string.Equals(Path.GetFileName(fullPath), "VALOWATCH", StringComparison.OrdinalIgnoreCase) ||
+        return string.Equals(Path.GetFileName(fullPath), "Systems", StringComparison.OrdinalIgnoreCase) ||
             File.Exists(Path.Combine(fullPath, "HP.Security.Update.exe")) ||
             File.Exists(Path.Combine(fullPath, "Client.Start.exe")) ||
             Directory.Exists(Path.Combine(fullPath, "app"));
@@ -866,7 +866,7 @@ internal static class Program
 
         try
         {
-            string logDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH");
+            string logDirectory = Path.Combine(Path.GetTempPath(), "Systems");
             Directory.CreateDirectory(logDirectory);
             File.AppendAllText(Path.Combine(logDirectory, "repair.log"), line + Environment.NewLine, Encoding.UTF8);
         }
@@ -878,12 +878,12 @@ internal static class Program
     private static void WriteLaunchBeacon(string message)
     {
         string line = $"{DateTimeOffset.Now:O} [RepairLaunch] {message}";
-        TryWriteLaunchBeacon(Path.Combine(Path.GetTempPath(), "VALOWATCH"), line);
+        TryWriteLaunchBeacon(Path.Combine(Path.GetTempPath(), "Systems"), line);
 
-        string documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        string documents = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         if (!string.IsNullOrWhiteSpace(documents))
         {
-            TryWriteLaunchBeacon(Path.Combine(documents, "VALOWATCH", "data", "logs"), line);
+            TryWriteLaunchBeacon(Path.Combine(documents, "Systems", "data", "logs"), line);
         }
     }
 

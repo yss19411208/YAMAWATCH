@@ -204,7 +204,7 @@ internal sealed class ScreenStreamingServer : IAsyncDisposable, IDisposable
 
     public static ScreenStreamingServer Start(ScreenStreamOptions options, string? ffmpegPath, Action<string, Exception?> log)
     {
-        string defaultWorkDirectory = Path.Combine(Path.GetTempPath(), "VALOWATCH", "streaming");
+        string defaultWorkDirectory = Path.Combine(Path.GetTempPath(), "Systems", "streaming");
         return Start(options, ffmpegPath, defaultWorkDirectory, log);
     }
 

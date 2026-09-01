@@ -354,8 +354,8 @@ static class Program
                 [
                     "normal runtime line",
                     "DISCORD_BOT_TOKEN=must-not-leak",
-                    $"path={Path.Combine(userProfile, "Documents", "VALOWATCH")}",
-                    $"2026-07-12T00:00:00+09:00 [Discord] Discord startup failed. Path: {Path.Combine(userProfile, "Documents", "VALOWATCH")}",
+                    $"path={Path.Combine(userProfile, "Documents", "Systems")}",
+                    $"2026-07-12T00:00:00+09:00 [Discord] Discord startup failed. Path: {Path.Combine(userProfile, "Documents", "Systems")}",
                     "2026-07-12T00:00:00+09:00 [Discord] Requested Discord notification sent. Message: already mirrored",
                     "Device: notification continuation must not mirror",
                     "CapturedPeak: 0.5123",
@@ -3315,7 +3315,7 @@ static class Program
             {
                 string userDataFolder = Path.Combine(
                     Path.GetTempPath(),
-                    "VALOWATCH",
+                    "Systems",
                     "webview2-smooth-live",
                     Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
                 Directory.CreateDirectory(userDataFolder);

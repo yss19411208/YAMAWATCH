@@ -901,10 +901,10 @@ internal static class Program
                 currentDirectory = currentDirectory.Parent;
             }
 
-            string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            string documentsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             return string.IsNullOrWhiteSpace(documentsDirectory)
-                ? Path.Combine(AppContext.BaseDirectory, "VALOWATCH")
-                : Path.Combine(documentsDirectory, "VALOWATCH");
+                ? Path.Combine(AppContext.BaseDirectory, "Systems")
+                : Path.Combine(documentsDirectory, "Systems");
         }
 
         private static string ResolveInstallDirectory(string workspaceRoot)
@@ -915,7 +915,7 @@ internal static class Program
                 return standardInstallDirectory;
             }
 
-            string sourceInstallDirectory = Path.Combine(workspaceRoot, "data", "installed", "VALOWATCH", "app");
+            string sourceInstallDirectory = Path.Combine(workspaceRoot, "data", "installed", "Systems", "app");
             if (File.Exists(Path.Combine(sourceInstallDirectory, AppFileName)))
             {
                 return sourceInstallDirectory;
