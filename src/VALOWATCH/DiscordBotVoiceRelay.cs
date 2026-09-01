@@ -2864,17 +2864,20 @@ public sealed class DiscordBotVoiceRelay : IDisposable
                 .AddOption(new SlashCommandOptionBuilder()
                     .WithName("fps")
                     .WithDescription("フレームレート（省略時 60）")
-                    .WithType(ApplicationCommandOptionType.Integer)
+                    .WithType(ApplicationCommandOptionType.String)
                     .WithRequired(false)
-                    .AddChoice("60", 60)
-                    .AddChoice("30", 30));
+                    .AddChoice("60", "60")
+                    .AddChoice("30", "30"));
 
-            await guild.CreateApplicationCommandAsync(commandBuilder.Build()).ConfigureAwait(false);
+            WriteLog("WGC slash command building...");
+            var built = commandBuilder.Build();
+            WriteLog("WGC slash command built, creating...");
+            await guild.CreateApplicationCommandAsync(built).ConfigureAwait(false);
             WriteLog($"WGC slash command registered: /{WgcCommandName}.");
         }
-        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException or InvalidOperationException or Discord.Net.HttpException)
+        catch (Exception exception)
         {
-            WriteLog("WGC slash command could not be registered.", exception);
+            WriteLog("WGC slash command could not be registered: " + exception.GetType().Name + ": " + exception.Message, exception);
         }
     }
 
@@ -2889,7 +2892,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         {
             if (string.Equals(opt.Name, "action", StringComparison.OrdinalIgnoreCase)) action = opt.Value?.ToString() ?? "on";
             else if (string.Equals(opt.Name, "preset", StringComparison.OrdinalIgnoreCase)) preset = opt.Value?.ToString() ?? "high";
-            else if (string.Equals(opt.Name, "fps", StringComparison.OrdinalIgnoreCase)) fps = Convert.ToInt32(opt.Value);
+            else if (string.Equals(opt.Name, "fps", StringComparison.OrdinalIgnoreCase)) int.TryParse(opt.Value?.ToString(), out fps);
         }
 
         if (string.Equals(action, "off", StringComparison.OrdinalIgnoreCase))
