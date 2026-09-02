@@ -305,7 +305,7 @@ internal sealed class WgcStreamingServer : IDisposable
                 Encoder = new H264VideoEncoder
                 {
                     BitrateMode = H264BitrateControlMode.CBR,
-                    EncoderProfile = H264Profile.Main,
+                    EncoderProfile = H264Profile.High,
                 },
             },
             AudioOptions = new AudioOptions
