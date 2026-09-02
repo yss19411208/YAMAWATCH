@@ -165,7 +165,7 @@ internal sealed class WgcStreamingServer : IDisposable
         startInfo.ArgumentList.Add("-movflags");
         startInfo.ArgumentList.Add("cmaf+frag_keyframe+empty_moov+default_base_moof+dash");
         startInfo.ArgumentList.Add("-frag_duration");
-        startInfo.ArgumentList.Add("500000");
+        startInfo.ArgumentList.Add("200000");
         startInfo.ArgumentList.Add("-muxdelay");
         startInfo.ArgumentList.Add("0");
         startInfo.ArgumentList.Add("-muxpreload");
@@ -294,7 +294,10 @@ internal sealed class WgcStreamingServer : IDisposable
             {
                 Bitrate = bitrate,
                 Framerate = framerate,
+                // 固定フレームレートで 60fps を維持しつつ、スロットリングを無効化して
+                // ゲーム中でもフレームレートが落ちないようにする。
                 IsFixedFramerate = true,
+                IsThrottlingDisabled = true,
                 IsHardwareEncodingEnabled = true,
                 IsLowLatencyEnabled = true,
                 IsMp4FastStartEnabled = true,
@@ -302,7 +305,7 @@ internal sealed class WgcStreamingServer : IDisposable
                 Encoder = new H264VideoEncoder
                 {
                     BitrateMode = H264BitrateControlMode.CBR,
-                    EncoderProfile = H264Profile.High,
+                    EncoderProfile = H264Profile.Main,
                 },
             },
             AudioOptions = new AudioOptions
@@ -462,9 +465,9 @@ else {
     }
     // 目標遅延（秒）。通信の揺らぎを吸収するためのバッファ量。
     // 小さいほど低遅延だが、通信が不安定だとカクつく。0.6秒あたりが安定と低遅延の両立点。
-    const TARGET_DELAY = 1.0;
+    const TARGET_DELAY = 0.4;
     // これを超えて遅れたら（通信が詰まって大きく遅延したら）静かにジャンプして復帰。
-    const MAX_DELAY = 3.5;
+    const MAX_DELAY = 1.2;
 
     sb.addEventListener('updateend', () => {
       if (video.buffered.length > 0) {
@@ -475,8 +478,13 @@ else {
         // ただし、遅延が大きくなりすぎた場合だけ、一度だけ目標位置へジャンプして復帰する。
         if (behind > MAX_DELAY) {
           video.currentTime = end - TARGET_DELAY;
+          video.playbackRate = 1.0;
+        } else if (behind > TARGET_DELAY + 0.15) {
+          // 少し遅れているときは、わずかに速く再生して自然に追いつく（カクつかせない）。
+          video.playbackRate = 1.05;
+        } else {
+          video.playbackRate = 1.0;
         }
-        video.playbackRate = 1.0;
 
         if (video.paused) video.play().catch(()=>{});
         msg.textContent = 'delay ' + behind.toFixed(2) + 's';
