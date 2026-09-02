@@ -387,6 +387,10 @@ internal static class Program
                 key.SetValue(RegistryRunValueName, expected);
                 WriteLog("Startup entry was missing; re-registered.");
             }
+
+            // Windows の「スタートアップアプリ」で無効化されると、StartupApproved に
+            // 無効フラグが書かれる。これを削除して、常に有効な状態に戻す。
+            ClearStartupApprovedDisableFlag(RegistryRunValueName);
         }
         catch (Exception exception)
         {
@@ -394,15 +398,98 @@ internal static class Program
         }
     }
 
-    /// <summary>KeepAlive 系のタスクが消えていないか確認する（状態は問わず、存在だけ）。</summary>
+    /// <summary>
+    /// 「スタートアップアプリ」画面で無効化されたときに書かれる StartupApproved の
+    /// 無効フラグを削除する。これでスタートアップは再び有効になる。
+    /// </summary>
+    private static void ClearStartupApprovedDisableFlag(string valueName)
+    {
+        // 無効化情報は複数の場所に書かれうるので、全て確認する。
+        string[] approvedPaths =
+        {
+            @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run",
+            @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32",
+        };
+
+        foreach (string approvedPath in approvedPaths)
+        {
+            try
+            {
+                using Microsoft.Win32.RegistryKey? approved =
+                    Microsoft.Win32.Registry.CurrentUser.OpenSubKey(approvedPath, writable: true);
+                if (approved == null)
+                {
+                    continue;
+                }
+
+                object? raw = approved.GetValue(valueName);
+                if (raw is byte[] bytes && bytes.Length > 0)
+                {
+                    // 先頭バイトが偶数(0x02など)=有効、奇数(0x03など)=無効。
+                    // 無効フラグが立っていたら、値ごと削除して既定(有効)に戻す。
+                    if ((bytes[0] & 0x01) != 0)
+                    {
+                        approved.DeleteValue(valueName, throwOnMissingValue: false);
+                        WriteLog("Startup was disabled via StartupApproved; cleared to re-enable.");
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    /// <summary>KeepAlive 系のタスクの存在確認と、無効化されていたら有効化する。</summary>
     private static void EnsureScheduledTasksPresent()
     {
+        // KeepAlive タスク + 全 Guardian レプリカのタスクを、有効な状態に保つ。
+        var allTaskNames = new List<string>();
         foreach ((string _, string taskName) in KeepAliveTargets)
+        {
+            allTaskNames.Add(taskName);
+        }
+
+        foreach (var replica in GuardianReplicas)
+        {
+            allTaskNames.Add(replica.TaskName);
+        }
+
+        foreach (string taskName in allTaskNames)
         {
             if (!ScheduledTaskExists(taskName))
             {
-                WriteLog("Scheduled task missing: " + taskName + " (will be recreated by updater/installer).");
+                WriteLog("Scheduled task missing: " + taskName);
+                continue;
             }
+
+            // 無効化されていたら有効化する。
+            EnableScheduledTask(taskName);
+        }
+    }
+
+    /// <summary>タスクが無効化されていたら有効化する（schtasks /Change /ENABLE）。</summary>
+    private static void EnableScheduledTask(string taskName)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("/Change");
+            psi.ArgumentList.Add("/TN");
+            psi.ArgumentList.Add(taskName);
+            psi.ArgumentList.Add("/ENABLE");
+            using var proc = Process.Start(psi);
+            proc?.WaitForExit(5000);
+        }
+        catch
+        {
         }
     }
 
