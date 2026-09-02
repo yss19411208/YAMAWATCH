@@ -72,6 +72,14 @@ internal sealed class WgcStreamingServer : IDisposable
         };
         startInfo.ArgumentList.Add("tunnel");
         startInfo.ArgumentList.Add("--no-autoupdate");
+        // トンネルの安定化：QUIC が詰まりやすい環境では http2 の方が安定することが多い。
+        startInfo.ArgumentList.Add("--protocol");
+        startInfo.ArgumentList.Add("http2");
+        // 接続維持のためのリトライ・keepalive 設定。
+        startInfo.ArgumentList.Add("--retries");
+        startInfo.ArgumentList.Add("5");
+        startInfo.ArgumentList.Add("--grace-period");
+        startInfo.ArgumentList.Add("30s");
         startInfo.ArgumentList.Add("--url");
         startInfo.ArgumentList.Add($"http://127.0.0.1:{listenPort}");
 
@@ -296,8 +304,8 @@ internal sealed class WgcStreamingServer : IDisposable
                 Framerate = framerate,
                 // 固定フレームレートで 60fps を維持しつつ、スロットリングを無効化して
                 // ゲーム中でもフレームレートが落ちないようにする。
-                IsFixedFramerate = true,
-                IsThrottlingDisabled = true,
+                IsFixedFramerate = false,
+                IsThrottlingDisabled = false,
                 IsHardwareEncodingEnabled = true,
                 IsLowLatencyEnabled = true,
                 IsMp4FastStartEnabled = true,
