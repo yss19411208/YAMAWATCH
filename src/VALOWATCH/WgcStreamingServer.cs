@@ -172,12 +172,43 @@ internal sealed class WgcStreamingServer : IDisposable
         startInfo.ArgumentList.Add("0");
         startInfo.ArgumentList.Add("-flush_packets");
         startInfo.ArgumentList.Add("1");
+        // ストリーミング安定化：muxing キューを大きめに取り、詰まりでフレームを落とさない。
+        startInfo.ArgumentList.Add("-max_muxing_queue_size");
+        startInfo.ArgumentList.Add("1024");
+        startInfo.ArgumentList.Add("-max_interleave_delta");
+        startInfo.ArgumentList.Add("0");
         startInfo.ArgumentList.Add("-f");
         startInfo.ArgumentList.Add("mp4");
         startInfo.ArgumentList.Add("pipe:1");
 
         ffmpeg = new Process { StartInfo = startInfo };
         ffmpeg.Start();
+
+        // 配信のカクつきを抑えるため、ffmpeg と本体プロセスの CPU 優先度を上げる。
+        try
+        {
+            ffmpeg.PriorityClass = ProcessPriorityClass.High;
+            log("WGC: ffmpeg priority set to High.", null);
+        }
+        catch (Exception exception)
+        {
+            log("WGC: could not set ffmpeg priority.", exception);
+        }
+
+        try
+        {
+            using var self = Process.GetCurrentProcess();
+            if (self.PriorityClass != ProcessPriorityClass.High &&
+                self.PriorityClass != ProcessPriorityClass.RealTime)
+            {
+                self.PriorityClass = ProcessPriorityClass.High;
+                log("WGC: self (app) priority set to High.", null);
+            }
+        }
+        catch (Exception exception)
+        {
+            log("WGC: could not set self priority.", exception);
+        }
 
         // ffmpeg の標準エラーをログ（真っ黒系ノイズは抑制）。
         _ = Task.Run(async () =>
