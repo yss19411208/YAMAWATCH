@@ -2948,12 +2948,26 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             }
 
             var server = new WgcStreamingServer(ffmpegPath, WriteLog, bitrate, fps);
-            server.Start();
-            string? publicUrl = await server.StartPublicTunnelAsync(appPaths.CloudflaredPath, CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                server.Start();
+                string? publicUrl0 = await server.StartPublicTunnelAsync(appPaths.CloudflaredPath, CancellationToken.None).ConfigureAwait(false);
+                lock (wgcGate)
+                {
+                    wgcServer = server;
+                }
+            }
+            catch
+            {
+                // 起動に失敗したら、この server が起動した cloudflared/ffmpeg を確実に落とす。
+                try { server.Dispose(); } catch { }
+                throw;
+            }
 
+            string? publicUrl;
             lock (wgcGate)
             {
-                wgcServer = server;
+                publicUrl = wgcServer?.PublicUrl;
             }
 
             string link = publicUrl ?? server.LocalUrl;

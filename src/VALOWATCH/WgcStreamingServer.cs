@@ -131,6 +131,10 @@ internal sealed class WgcStreamingServer : IDisposable
 
     public string Start()
     {
+        // 過去の /wgc 実行で残った野良 cloudflared / (このサーバーの) ffmpeg を掃除。
+        // これをしないと、再実行のたびに cloudflared が溜まってトンネルが競合する。
+        CleanupStrayProcesses();
+
         cancellation = new CancellationTokenSource();
         publicPath = Guid.NewGuid().ToString("N");
         rawStream = new RawStream();
@@ -524,6 +528,21 @@ else {
         int port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
         listener.Stop();
         return port;
+    }
+
+    private void CleanupStrayProcesses()
+    {
+        // trycloudflare の quick tunnel を張っている cloudflared を全て落とす。
+        // WGC配信は同時に1本のみの想定なので、既存は不要。
+        try
+        {
+            foreach (var proc in Process.GetProcessesByName("cloudflared"))
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { }
+                proc.Dispose();
+            }
+        }
+        catch { }
     }
 
     public void Dispose()
