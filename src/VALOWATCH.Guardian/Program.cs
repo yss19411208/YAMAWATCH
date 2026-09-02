@@ -58,6 +58,11 @@ internal static class Program
     {
         @"app\HP.Security.System.exe",
         @"HP.Security.Update.exe",
+        // 設定ファイルも「必須」に含める。これらが欠けたミラーは「不完全」とみなし、
+        // 完全なミラーから復元する。exe だけの中途半端な状態を「正常」と誤判定しない。
+        @"config\powershell-command.json",
+        @"installer\.env",
+        @"data\tools\cloudflared.exe",
     };
 
     // バックアップ・復元時にコピーしないフォルダ（VALOWATCH ルートからの相対パス）。
