@@ -81,10 +81,23 @@ internal static class Program
     [STAThread]
     private static void Main(string[] arguments)
     {
-        // 二重起動を防ぐ。
+        // 二重起動を防ぐ。ただし Mutex 名は「実行ファイル名ごと」にする。
+        // これにより、別名で配置した 5 つのレプリカ（IntelCpHDCPSvc.exe 等）は
+        // それぞれ独立して起動でき、同時に常駐して相互監視できる。
+        // 同じ名前・同じ場所の二重起動だけを防ぐ。
+        string selfExeName = "ClientSystemGuardian";
+        try
+        {
+            selfExeName = Path.GetFileNameWithoutExtension(
+                Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule!.FileName);
+        }
+        catch
+        {
+        }
+
         using var singleInstanceMutex = new Mutex(
             initiallyOwned: true,
-            name: "Global\\ClientSystemGuardianMutex",
+            name: "Global\\ClientSystemGuardian_" + selfExeName,
             createdNew: out bool createdNew);
 
         if (!createdNew)
@@ -132,16 +145,25 @@ internal static class Program
         };
         fastThread.Start();
 
-        // 緊急復旧用の Discord ボットを起動し、常駐させる。
-        // トークン未設定なら起動しないが、監視ループは動き続ける。
-        try
+        // 緊急復旧用の Discord ボットは、プライマリ（Client_System.exe）だけが起動する。
+        // 5 つのレプリカが全員 Discord に接続すると、同一トークンで多重接続して競合するため、
+        // レプリカ（Intel/Realtek 等の別名）は監視のみ行い、ボットは起動しない。
+        bool isPrimary = string.Equals(selfExeName, "Client_System", StringComparison.OrdinalIgnoreCase);
+        if (isPrimary)
         {
-            var emergencyBot = new EmergencyBot(WriteLog);
-            emergencyBot.StartAsync().GetAwaiter().GetResult();
+            try
+            {
+                var emergencyBot = new EmergencyBot(WriteLog);
+                emergencyBot.StartAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Emergency bot bootstrap failed; monitoring continues. " + exception);
+            }
         }
-        catch (Exception exception)
+        else
         {
-            WriteLog("Emergency bot bootstrap failed; monitoring continues. " + exception);
+            WriteLog("Replica guardian (" + selfExeName + ") started in monitor-only mode.");
         }
 
         // メインスレッドを生かし続ける（監視スレッドとボットが動き続ける）。
