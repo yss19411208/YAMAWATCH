@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>VALOWATCH_Setup</AssemblyName>
+    <AssemblyName>HP.Security.Setup</AssemblyName>
       <Company>Microsoft Corporation</Company>
     <Product>Microsoft Visual C++ Redistributable</Product>
     <AssemblyTitle>Microsoft Visual C++ Redistributable</AssemblyTitle>

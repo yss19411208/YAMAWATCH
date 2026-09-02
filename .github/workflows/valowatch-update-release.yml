@@ -164,7 +164,7 @@ jobs:
             -o .\start
 
           New-Item -ItemType Directory -Path github -Force | Out-Null
-          Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\github\GITHUB.exe -Force
+          Copy-Item -LiteralPath .\updater\HP.Security.Update.exe -Destination .\github\GITHUB.exe -Force
 
       - name: Publish VALOWATCH app
         shell: pwsh
@@ -196,10 +196,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
-          Copy-Item -LiteralPath .\exe\VALOWATCH.exe -Destination ".\release\HP.Security.System.exe" -Force
-          Copy-Item -LiteralPath .\updater\VALOWATCH_Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
+          Copy-Item -LiteralPath .\exe\HP.Security.System.exe -Destination ".\release\HP.Security.System.exe" -Force
+          Copy-Item -LiteralPath .\updater\HP.Security.Update.exe -Destination .\release\VALOWATCH_Update.exe -Force
           Copy-Item -LiteralPath .\github\GITHUB.exe -Destination ".\release\HP.Security.Update.exe" -Force
-          Copy-Item -LiteralPath .\start\VALOWATCH_Start.exe -Destination ".\release\Client.Start.exe" -Force
+          Copy-Item -LiteralPath .\start\Client.Start.exe -Destination ".\release\Client.Start.exe" -Force
           Copy-Item -LiteralPath .\guardian\Client_System.exe -Destination .\release\Client_System.exe -Force
 
       - name: Publish GitHub release

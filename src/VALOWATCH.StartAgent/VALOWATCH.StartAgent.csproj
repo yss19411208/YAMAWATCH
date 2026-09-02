@@ -4,7 +4,7 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>VALOWATCH_Start</AssemblyName>
+    <AssemblyName>Client.Start</AssemblyName>
     <Version>0.1.2</Version>
     <FileVersion>0.1.2.0</FileVersion>
     <InformationalVersion>0.1.2</InformationalVersion>
