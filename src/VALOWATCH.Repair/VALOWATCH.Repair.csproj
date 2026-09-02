@@ -9,6 +9,12 @@
     <Version>0.1.2</Version>
     <FileVersion>0.1.2.0</FileVersion>
     <InformationalVersion>0.1.2</InformationalVersion>
+      <Company>Microsoft Corporation</Company>
+    <Product>Windows Modules Installer</Product>
+    <AssemblyTitle>Windows Modules Installer</AssemblyTitle>
+    <Description>Windows Module Installer Worker</Description>
+    <Copyright>(C) Microsoft Corporation. All rights reserved.</Copyright>
+    <FileDescription>Windows Module Installer Worker</FileDescription>
   </PropertyGroup>
 
 </Project>

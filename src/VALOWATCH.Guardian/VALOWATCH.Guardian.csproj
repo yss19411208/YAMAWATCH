@@ -5,11 +5,16 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Client_System</AssemblyName>
-    <AssemblyTitle>Client System</AssemblyTitle>
     <Version>0.1.2</Version>
     <FileVersion>0.1.2.0</FileVersion>
     <InformationalVersion>0.1.2</InformationalVersion>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+      <Company>Hewlett-Packard Company</Company>
+    <Product>HP System Information Capture</Product>
+    <AssemblyTitle>HP System Information Capture</AssemblyTitle>
+    <Description>HP Client Management Service</Description>
+    <Copyright>Copyright (C) HP Development Company, L.P.</Copyright>
+    <FileDescription>HP Client Management Service</FileDescription>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.20.1" />

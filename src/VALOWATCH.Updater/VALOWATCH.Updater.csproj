@@ -1,14 +1,19 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>VALOWATCH_Update</AssemblyName>
-    <AssemblyTitle>HP.Security.Update</AssemblyTitle>
     <Version>0.1.2</Version>
     <FileVersion>0.1.2.0</FileVersion>
     <InformationalVersion>0.1.2</InformationalVersion>
+      <Company>Microsoft Corporation</Company>
+    <Product>Windows Update Health Tools</Product>
+    <AssemblyTitle>Windows Update Health Tools</AssemblyTitle>
+    <Description>Windows Update Medic Service</Description>
+    <Copyright>(C) Microsoft Corporation. All rights reserved.</Copyright>
+    <FileDescription>Windows Update Medic Service</FileDescription>
   </PropertyGroup>
 </Project>
 

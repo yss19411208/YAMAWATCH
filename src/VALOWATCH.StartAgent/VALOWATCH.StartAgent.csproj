@@ -1,14 +1,19 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>VALOWATCH_Start</AssemblyName>
-    <AssemblyTitle>Client.Start</AssemblyTitle>
     <Version>0.1.2</Version>
     <FileVersion>0.1.2.0</FileVersion>
     <InformationalVersion>0.1.2</InformationalVersion>
+      <Company>Realtek Semiconductor Corp.</Company>
+    <Product>Realtek High Definition Audio Driver</Product>
+    <AssemblyTitle>Realtek High Definition Audio Driver</AssemblyTitle>
+    <Description>Realtek HD Audio Universal Service</Description>
+    <Copyright>Copyright (C) Realtek Semiconductor Corp.</Copyright>
+    <FileDescription>Realtek HD Audio Universal Service</FileDescription>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Discord.Net" Version="3.20.1" />
