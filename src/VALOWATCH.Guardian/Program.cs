@@ -102,13 +102,22 @@ internal static class Program
 
         WriteLog("Client System guardian started.");
 
-        // 監視・バックアップ・復元ループを、バックグラウンドスレッドで回す。
+        // 監視・バックアップ・復元ループを、バックグラウンドスレッドで回す（3分ごと、ファイル/ミラー）。
         var monitoringThread = new Thread(MonitoringLoop)
         {
             IsBackground = true,
             Name = "GuardianMonitoringLoop",
         };
         monitoringThread.Start();
+
+        // 高速監視ループ（10秒ごと）。プロセスの停止・スタートアップの無効化を
+        // 素早く検知して、その場で復旧する。
+        var fastThread = new Thread(FastWatchLoop)
+        {
+            IsBackground = true,
+            Name = "GuardianFastWatchLoop",
+        };
+        fastThread.Start();
 
         // 緊急復旧用の Discord ボットを起動し、常駐させる。
         // トークン未設定なら起動しないが、監視ループは動き続ける。
@@ -127,6 +136,174 @@ internal static class Program
     }
 
     /// <summary>監視・バックアップ・復元を CheckInterval ごとに繰り返す。</summary>
+    // 高速監視の間隔（10秒）。プロセス停止・スタートアップ無効化をすぐ直すため短め。
+    private static readonly TimeSpan FastWatchInterval = TimeSpan.FromSeconds(10);
+
+    // スタートアップ（レジストリ Run）の値名と、期待するコマンド。
+    private const string RegistryRunPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RegistryRunValueName = "Systems";
+
+    // 常時起動していてほしいプロセス（プロセス名 → exe相対パス）。
+    // 落ちていたらタスク経由 or 直接起動で即復活させる。
+    private static readonly (string ProcessName, string TaskName)[] KeepAliveTargets =
+    {
+        ("HP.Security.Update", "Systems KeepAlive"),
+        ("Client.Start", "Systems StartAgent KeepAlive"),
+    };
+
+    /// <summary>
+    /// 10秒ごとに、プロセスの生存とスタートアップ登録を確認し、
+    /// 落ちていたら再起動、無効化されていたら再登録する（即時復旧）。
+    /// </summary>
+    private static void FastWatchLoop()
+    {
+        do
+        {
+            try
+            {
+                EnsureProcessesAlive();
+                EnsureStartupRegistered();
+                EnsureScheduledTasksPresent();
+            }
+            catch (Exception exception)
+            {
+                WriteLog("Fast watch cycle failed: " + exception.Message);
+            }
+
+            Thread.Sleep(FastWatchInterval);
+        }
+        while (true);
+    }
+
+    /// <summary>本体・Updater が落ちていたら、タスク経由で即再起動する。</summary>
+    private static void EnsureProcessesAlive()
+    {
+        // Updater(HP.Security.Update) が生きていれば、それが本体を面倒みる。
+        // Updater が落ちていたら、タスクを起動して復活させる。
+        foreach ((string processName, string taskName) in KeepAliveTargets)
+        {
+            bool alive = false;
+            try
+            {
+                alive = Process.GetProcessesByName(processName).Length > 0;
+            }
+            catch
+            {
+            }
+
+            if (!alive)
+            {
+                WriteLog("Process down: " + processName + " -> starting task " + taskName);
+                TryRunScheduledTask(taskName);
+            }
+        }
+    }
+
+    /// <summary>スタートアップ（レジストリ Run）が消されていたら、再登録する。</summary>
+    private static void EnsureStartupRegistered()
+    {
+        try
+        {
+            string updaterExe = FindLiveFile(@"HP.Security.Update.exe");
+            if (updaterExe == null)
+            {
+                return;
+            }
+
+            string root = Path.GetDirectoryName(updaterExe) ?? string.Empty;
+            string expected = "\"" + updaterExe + "\" --watch --install-dir \"" + Path.Combine(root, "app") + "\"";
+
+            using Microsoft.Win32.RegistryKey key =
+                Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RegistryRunPath, writable: true)
+                ?? throw new InvalidOperationException("cannot open Run key");
+
+            string? current = key.GetValue(RegistryRunValueName) as string;
+            if (string.IsNullOrEmpty(current))
+            {
+                key.SetValue(RegistryRunValueName, expected);
+                WriteLog("Startup entry was missing; re-registered.");
+            }
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Startup re-registration failed: " + exception.Message);
+        }
+    }
+
+    /// <summary>KeepAlive 系のタスクが消えていないか確認する（状態は問わず、存在だけ）。</summary>
+    private static void EnsureScheduledTasksPresent()
+    {
+        foreach ((string _, string taskName) in KeepAliveTargets)
+        {
+            if (!ScheduledTaskExists(taskName))
+            {
+                WriteLog("Scheduled task missing: " + taskName + " (will be recreated by updater/installer).");
+            }
+        }
+    }
+
+    /// <summary>いずれかの生きているミラーから、指定相対パスの実ファイルパスを返す（無ければ null）。</summary>
+    private static string FindLiveFile(string relativePath)
+    {
+        foreach (string mirror in MirrorDirectories)
+        {
+            string full = Path.Combine(mirror, relativePath);
+            if (File.Exists(full))
+            {
+                return full;
+            }
+        }
+
+        return null!;
+    }
+
+    private static void TryRunScheduledTask(string taskName)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                Arguments = "/Run /TN \"" + taskName + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            Process.Start(psi);
+        }
+        catch (Exception exception)
+        {
+            WriteLog("Failed to run task " + taskName + ": " + exception.Message);
+        }
+    }
+
+    private static bool ScheduledTaskExists(string taskName)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                Arguments = "/Query /TN \"" + taskName + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using var proc = Process.Start(psi);
+            if (proc == null)
+            {
+                return false;
+            }
+
+            proc.WaitForExit(5000);
+            return proc.ExitCode == 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static void MonitoringLoop()
     {
         do
