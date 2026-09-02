@@ -869,6 +869,32 @@ internal static class Program
     }
 
     /// <summary>フォルダを再帰的にコピーする。</summary>
+    /// <summary>
+    /// 使用中のファイル（本体が開いている .env / settings.protected /
+    /// powershell-command.json など）も確実にコピーする。
+    /// File.Copy は使用中だと失敗するため、FileShare.ReadWrite で開いてストリームコピーする。
+    /// </summary>
+    private static void CopyFileShared(string sourceFile, string destinationFile)
+    {
+        try
+        {
+            using var src = new FileStream(
+                sourceFile, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var dst = new FileStream(
+                destinationFile, FileMode.Create, FileAccess.Write, FileShare.None);
+            src.CopyTo(dst);
+        }
+        catch (IOException)
+        {
+            // それでもコピーできない場合は、通常の File.Copy を最後に試す。
+            try { File.Copy(sourceFile, destinationFile, overwrite: true); } catch { }
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
     private static void CopyDirectory(string sourceRootDirectory, string destinationRootDirectory, bool overwrite = false)
     {
         CopyDirectoryRecursive(sourceRootDirectory, sourceRootDirectory, destinationRootDirectory, overwrite);
@@ -886,17 +912,7 @@ internal static class Program
         {
             string fileName = Path.GetFileName(filePath);
             string destinationFile = Path.Combine(destinationDirectory, fileName);
-            try
-            {
-                File.Copy(filePath, destinationFile, overwrite);
-            }
-            catch (IOException)
-            {
-                // 使用中などでコピーできないファイルはスキップして続行する。
-            }
-            catch (UnauthorizedAccessException)
-            {
-            }
+            CopyFileShared(filePath, destinationFile);
         }
 
         foreach (string subDirectory in Directory.GetDirectories(sourceDirectory))
