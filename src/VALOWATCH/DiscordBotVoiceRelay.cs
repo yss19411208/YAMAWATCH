@@ -113,7 +113,8 @@ public sealed class DiscordBotVoiceRelay : IDisposable
     private const string ScreenshotSubcommandNowName = "now";
     private const string StreamCommandName = "stream";
     private const string WgcCommandName = "wgc";
-    private WgcStreamingServer? wgcServer;
+    private System.Diagnostics.Process? wgcProcess;
+    private string? wgcPublicUrl;
     private readonly object wgcGate = new();
     private const string StreamSubcommandOnName = "on";
     private const string StreamSubcommandOffName = "off";
@@ -2886,6 +2887,47 @@ public sealed class DiscordBotVoiceRelay : IDisposable
         }
     }
 
+    /// <summary>WGC の子プロセスと、それが起動した cloudflared/ffmpeg を確実に止める。</summary>
+    private void StopWgcChild()
+    {
+        System.Diagnostics.Process? child;
+        lock (wgcGate)
+        {
+            child = wgcProcess;
+            wgcProcess = null;
+            wgcPublicUrl = null;
+        }
+
+        try
+        {
+            if (child is { HasExited: false })
+            {
+                child.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+        }
+
+        try { child?.Dispose(); } catch { }
+
+        // 念のため、野良の cloudflared / ffmpeg も掃除する（トンネル残留を防ぐ）。
+        foreach (string name in new[] { "cloudflared" })
+        {
+            try
+            {
+                foreach (var proc in Process.GetProcessesByName(name))
+                {
+                    try { proc.Kill(entireProcessTree: true); } catch { }
+                    proc.Dispose();
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
     private async Task HandleWgcSlashCommandAsync(SocketSlashCommand command)
     {
         await command.DeferAsync(ephemeral: false).ConfigureAwait(false);
@@ -2902,12 +2944,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         if (string.Equals(action, "off", StringComparison.OrdinalIgnoreCase))
         {
-            lock (wgcGate)
-            {
-                wgcServer?.Dispose();
-                wgcServer = null;
-            }
-
+            StopWgcChild();
             await command.FollowupAsync("WGC配信を停止しました。").ConfigureAwait(false);
             return;
         }
@@ -2917,7 +2954,7 @@ public sealed class DiscordBotVoiceRelay : IDisposable
             string? url;
             lock (wgcGate)
             {
-                url = wgcServer?.PublicUrl ?? wgcServer?.LocalUrl;
+                url = wgcPublicUrl;
             }
 
             await command.FollowupAsync(url is not null ? ("視聴リンク: " + url) : "配信していません。/wgc on で開始してください。").ConfigureAwait(false);
@@ -2934,45 +2971,85 @@ public sealed class DiscordBotVoiceRelay : IDisposable
 
         try
         {
+            // 既存の子プロセスを止めてから、新しい WGC 子プロセスを起動する。
+            // WGC のエンコードは CPU 負荷が高いため、本体とは別プロセスに分離する（CPU分担）。
+            StopWgcChild();
+
+            string selfExe = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule!.FileName;
+            string urlFile = Path.Combine(Path.GetTempPath(), "wgc-url-" + Guid.NewGuid().ToString("N") + ".txt");
+            try { File.Delete(urlFile); } catch { }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = selfExe,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            psi.ArgumentList.Add("--wgc-serve");
+            psi.ArgumentList.Add("--bitrate");
+            psi.ArgumentList.Add(bitrate.ToString());
+            psi.ArgumentList.Add("--fps");
+            psi.ArgumentList.Add(fps.ToString());
+            psi.ArgumentList.Add("--urlfile");
+            psi.ArgumentList.Add(urlFile);
+
+            var child = Process.Start(psi);
+            if (child == null)
+            {
+                await command.FollowupAsync("WGC配信の子プロセス起動に失敗しました。").ConfigureAwait(false);
+                return;
+            }
+
+            // 子プロセスの優先度を通常に（本体のDiscord処理を邪魔しない）。
+            try { child.PriorityClass = ProcessPriorityClass.Normal; } catch { }
+
             lock (wgcGate)
             {
-                wgcServer?.Dispose();
-                wgcServer = null;
+                wgcProcess = child;
+                wgcPublicUrl = null;
             }
 
-            string ffmpegPath = Path.Combine(appPaths.DataDirectory, "tools", "ffmpeg", "ffmpeg.exe");
-            if (!File.Exists(ffmpegPath))
+            // 子プロセスが URL を書き出すのを待つ（最大30秒、cloudflaredトンネル確立を含む）。
+            string? link = null;
+            for (int i = 0; i < 60; i++)
             {
-                string? found = Directory.EnumerateFiles(appPaths.DataDirectory, "ffmpeg.exe", SearchOption.AllDirectories).FirstOrDefault();
-                if (found is not null) ffmpegPath = found;
-            }
-
-            var server = new WgcStreamingServer(ffmpegPath, WriteLog, bitrate, fps);
-            try
-            {
-                server.Start();
-                string? publicUrl0 = await server.StartPublicTunnelAsync(appPaths.CloudflaredPath, CancellationToken.None).ConfigureAwait(false);
-                lock (wgcGate)
+                await Task.Delay(500).ConfigureAwait(false);
+                if (child.HasExited)
                 {
-                    wgcServer = server;
+                    break;
+                }
+
+                try
+                {
+                    if (File.Exists(urlFile))
+                    {
+                        string content = File.ReadAllText(urlFile).Trim();
+                        if (!string.IsNullOrWhiteSpace(content))
+                        {
+                            link = content;
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
                 }
             }
-            catch
-            {
-                // 起動に失敗したら、この server が起動した cloudflared/ffmpeg を確実に落とす。
-                try { server.Dispose(); } catch { }
-                throw;
-            }
 
-            string? publicUrl;
             lock (wgcGate)
             {
-                publicUrl = wgcServer?.PublicUrl;
+                wgcPublicUrl = link;
             }
 
-            string link = publicUrl ?? server.LocalUrl;
-            await command.FollowupAsync(
-                $"WGC配信を開始しました（{preset}/{fps}fps）。\n視聴リンク: {link}\nアカウント不要で誰でも見られます。").ConfigureAwait(false);
+            if (link != null)
+            {
+                await command.FollowupAsync(
+                    $"WGC配信を開始しました（{preset}/{fps}fps）。\n視聴リンク: {link}\nアカウント不要で誰でも見られます。").ConfigureAwait(false);
+            }
+            else
+            {
+                await command.FollowupAsync("WGC配信を開始しましたが、視聴リンクの取得に時間がかかっています。/wgc link で再確認してください。").ConfigureAwait(false);
+            }
         }
         catch (Exception exception)
         {

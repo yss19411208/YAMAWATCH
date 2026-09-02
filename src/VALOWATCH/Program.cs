@@ -29,6 +29,19 @@ static class Program
 
         if (args.Any(argument => string.Equals(argument, "--wgc-serve", StringComparison.OrdinalIgnoreCase)))
         {
+            // 引数：--wgc-serve [--bitrate N] [--fps N] [--urlfile PATH]
+            // 本体（親プロセス）から子プロセスとして起動され、WGC配信を担当する。
+            // CPU負荷の高いエンコードを本体から分離するのが目的（CPU分担）。
+            int wgcBitrate = 14_000_000;
+            int wgcFps = 60;
+            string urlFile = Path.Combine(Path.GetTempPath(), "wgc-url.txt");
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (string.Equals(args[i], "--bitrate", StringComparison.OrdinalIgnoreCase)) int.TryParse(args[i + 1], out wgcBitrate);
+                else if (string.Equals(args[i], "--fps", StringComparison.OrdinalIgnoreCase)) int.TryParse(args[i + 1], out wgcFps);
+                else if (string.Equals(args[i], "--urlfile", StringComparison.OrdinalIgnoreCase)) urlFile = args[i + 1];
+            }
+
             string serveResult = Path.Combine(Path.GetTempPath(), "wgc-serve.txt");
             try
             {
@@ -38,13 +51,17 @@ static class Program
                 var server = new WgcStreamingServer(ffmpegPath, (m, ex) =>
                 {
                     try { File.AppendAllText(serveResult, DateTimeOffset.Now.ToString("HH:mm:ss") + " " + m + (ex != null ? " EX:" + ex.Message : "") + "\n"); } catch { }
-                });
+                }, wgcBitrate, wgcFps);
                 string url = server.Start();
                 File.WriteAllText(serveResult, "WGC serve started (local): " + url + "\nffmpeg: " + ffmpegPath + "\n");
                 string? publicUrl = server.StartPublicTunnelAsync(wgcPaths.CloudflaredPath, CancellationToken.None).GetAwaiter().GetResult();
+                string finalUrl = publicUrl ?? url;
+                // 本体（親）が読めるよう、視聴URLを専用ファイルに書く。
+                try { File.WriteAllText(urlFile, finalUrl); } catch { }
                 if (publicUrl != null) { File.AppendAllText(serveResult, "PUBLIC URL (share this): " + publicUrl + "\n"); }
                 else { File.AppendAllText(serveResult, "Public tunnel unavailable; use local URL.\n"); }
-                Thread.Sleep(TimeSpan.FromMinutes(10));
+                // 親に kill されるまで動き続ける（/wgc off で親が子プロセスを止める）。
+                Thread.Sleep(Timeout.Infinite);
                 server.Dispose();
             }
             catch (Exception ex)
