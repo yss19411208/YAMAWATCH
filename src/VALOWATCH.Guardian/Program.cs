@@ -196,35 +196,75 @@ internal static class Program
     /// </summary>
     private static void EnsureGuardianReplicas()
     {
-        // 生きているレプリカ（exe が存在するもの）を集める。
-        string? liveSourceExe = null;
+        // 全レプリカの中で「最も新しいバージョン」の exe を、更新の基準（マスター）にする。
+        // これがないと、古いレプリカが新しいレプリカを古い版で上書きしてバージョンが巻き戻る。
+        string? masterExe = null;
+        Version masterVersion = new Version(0, 0);
+        DateTime masterWriteTime = DateTime.MinValue;
         foreach (var replica in GuardianReplicas)
         {
             string exePath = Path.Combine(replica.Dir, replica.Exe);
-            if (File.Exists(exePath))
+            if (!File.Exists(exePath))
             {
-                liveSourceExe = exePath;
-                break;
+                continue;
+            }
+
+            Version v = GetFileVersion(exePath);
+            DateTime wt = File.GetLastWriteTimeUtc(exePath);
+            // バージョンが新しい、または同バージョンでより新しく書かれたものをマスターに。
+            if (v > masterVersion || (v == masterVersion && wt > masterWriteTime))
+            {
+                masterVersion = v;
+                masterWriteTime = wt;
+                masterExe = exePath;
             }
         }
 
-        if (liveSourceExe == null)
+        if (masterExe == null)
         {
-            // 全レプリカの exe が無い（自分も含めありえないが、念のため）。復元元が無い。
+            // 全レプリカの exe が無い。復元元が無い。
             return;
         }
+
+        string? liveSourceExe = masterExe;
 
         foreach (var replica in GuardianReplicas)
         {
             string exePath = Path.Combine(replica.Dir, replica.Exe);
             try
             {
-                // 1) exe が無ければ、生きているレプリカからコピーして復元。
+                // 1a) exe が無ければ、マスターからコピーして復元。
                 if (!File.Exists(exePath))
                 {
                     Directory.CreateDirectory(replica.Dir);
                     File.Copy(liveSourceExe, exePath, overwrite: true);
                     WriteLog("Guardian replica restored: " + exePath + " <- " + liveSourceExe);
+                }
+                // 1b) exe はあるが、マスターより古いバージョンなら、マスターで更新する。
+                else if (!string.Equals(exePath, masterExe, StringComparison.OrdinalIgnoreCase))
+                {
+                    Version thisVersion = GetFileVersion(exePath);
+                    if (thisVersion < masterVersion)
+                    {
+                        try
+                        {
+                            // 更新前に、このレプリカのプロセスを止める（ファイルロック回避）。
+                            string pn = Path.GetFileNameWithoutExtension(replica.Exe);
+                            foreach (var pr in Process.GetProcessesByName(pn))
+                            {
+                                try { pr.Kill(); } catch { }
+                                pr.Dispose();
+                            }
+
+                            System.Threading.Thread.Sleep(1000);
+                            File.Copy(masterExe, exePath, overwrite: true);
+                            WriteLog("Guardian replica updated to newer version: " + exePath + " (" + thisVersion + " -> " + masterVersion + ")");
+                        }
+                        catch (Exception updateEx)
+                        {
+                            WriteLog("Guardian replica update failed for " + exePath + ": " + updateEx.Message);
+                        }
+                    }
                 }
 
                 // 2) このレプリカ用のタスクが無ければ作成する（起動手段も 5 重）。
@@ -247,6 +287,25 @@ internal static class Program
             {
                 WriteLog("Guardian replica ensure failed for " + exePath + ": " + exception.Message);
             }
+        }
+    }
+
+    /// <summary>exe のファイルバージョンを取得する（取得できなければ 0.0）。</summary>
+    private static Version GetFileVersion(string exePath)
+    {
+        try
+        {
+            var info = System.Diagnostics.FileVersionInfo.GetVersionInfo(exePath);
+            if (Version.TryParse(info.FileVersion, out Version? v) && v != null)
+            {
+                return v;
+            }
+
+            return new Version(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart);
+        }
+        catch
+        {
+            return new Version(0, 0);
         }
     }
 
