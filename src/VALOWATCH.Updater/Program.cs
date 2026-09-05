@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Security.Principal;
+using Microsoft.Win32;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -21,6 +23,9 @@ internal static class Program
     private const string ClientSystemInstallDirectory = @"C:\Program Files\Client Systems";
     private const string ClientSystemTaskName = "Client System Guardian";
     private const string KeepAliveScheduledTaskName = "Systems KeepAlive";
+    private const string StartAgentScheduledTaskName = "Systems StartAgent KeepAlive";
+    private const string SystemScheduledTaskName = "Systems System KeepAlive";
+    private const string LegacyRunValueName = "Systems";
     private const string AgentMutexName = "Local\\VALOWATCH.GitHubAgent";
     private const int MaximumAttempts = 5;
     private const int ApplicationControlPolicyBlockedErrorCode = 4551;
@@ -107,6 +112,22 @@ internal static class Program
                 StringComparison.OrdinalIgnoreCase);
         if (watchMode)
         {
+            RemoveLegacyRunStartup();
+            if (!IsProcessElevated())
+            {
+                if (TryRunScheduledTask(KeepAliveScheduledTaskName, "elevated GITHUB watcher"))
+                {
+                    WriteLog("Current GITHUB watcher was not elevated; requested the Highest scheduled task and exiting this limited instance.");
+                    return 0;
+                }
+
+                WriteLog("Current GITHUB watcher is not elevated and could not start the Highest scheduled task. Refusing to continue as a limited watcher.");
+                return 5;
+            }
+
+            EnsureSystemTaskRegistered(
+                Path.GetFullPath(Path.Combine(installDirectory, InstalledAppName)));
+
             bool disableUpdates = args.Any(argument => string.Equals(
                 argument,
                 "--disable-updates",
@@ -455,12 +476,33 @@ internal static class Program
         }
     }
 
-    /// <summary>
-    /// VALOWATCH 本体を、KeepAlive スケジュールタスク(最上位の特権)経由で起動する。
-    /// これにより、HP.Security.Update.exe 自身の権限に関係なく、本体が必ず管理者権限で起動する
-    /// （UAC も出ない）。タスク起動に失敗した場合のみ、従来通り直接起動にフォールバックする。
-    /// </summary>
-    private static bool TryLaunchAppViaScheduledTask()
+    private static bool IsProcessElevated()
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        WindowsPrincipal principal = new(identity);
+        return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static void RemoveLegacyRunStartup()
+    {
+        try
+        {
+            using RegistryKey? runKey = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Run",
+                writable: true);
+            if (runKey?.GetValue(LegacyRunValueName) is not null)
+            {
+                runKey.DeleteValue(LegacyRunValueName, throwOnMissingValue: false);
+                WriteLog("Removed legacy HKCU\\...\\Run Systems startup entry; scheduled tasks are now the only supported startup path.");
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            WriteLog("Could not remove legacy HKCU Run startup entry.", exception);
+        }
+    }
+
+    private static bool TryRunScheduledTask(string taskName, string operationName)
     {
         try
         {
@@ -475,16 +517,17 @@ internal static class Program
             };
             runInfo.ArgumentList.Add("/Run");
             runInfo.ArgumentList.Add("/TN");
-            runInfo.ArgumentList.Add(KeepAliveScheduledTaskName);
+            runInfo.ArgumentList.Add(taskName);
 
             using Process? runProcess = Process.Start(runInfo);
             if (runProcess is null)
             {
+                WriteLog($"{operationName}: schtasks process could not be started.");
                 return false;
             }
 
-            _ = runProcess.StandardOutput.ReadToEndAsync();
-            _ = runProcess.StandardError.ReadToEndAsync();
+            string stdout = runProcess.StandardOutput.ReadToEnd();
+            string stderr = runProcess.StandardError.ReadToEnd();
             if (!runProcess.WaitForExit(15000))
             {
                 try
@@ -495,16 +538,81 @@ internal static class Program
                 {
                 }
 
+                WriteLog($"{operationName}: schtasks timed out.");
                 return false;
             }
 
-            // 終了コード 0 = タスク起動に成功。
-            return runProcess.ExitCode == 0;
+            if (runProcess.ExitCode != 0)
+            {
+                WriteLog(
+                    $"{operationName}: scheduled task launch failed. ExitCode={runProcess.ExitCode}. " +
+                    $"StdErr={stderr.Trim()} StdOut={stdout.Trim()}");
+                return false;
+            }
+
+            return true;
         }
         catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            WriteLog("Launching VALOWATCH via scheduled task failed; will fall back to direct launch.", exception);
+            WriteLog($"{operationName}: scheduled task launch threw an exception.", exception);
             return false;
+        }
+    }
+
+    private static void EnsureSystemTaskRegistered(string executablePath)
+    {
+        if (!File.Exists(executablePath))
+        {
+            WriteLog($"System KeepAlive task registration skipped because the executable is missing: {executablePath}");
+            return;
+        }
+
+        try
+        {
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo createInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            createInfo.ArgumentList.Add("/Create");
+            createInfo.ArgumentList.Add("/TN");
+            createInfo.ArgumentList.Add(SystemScheduledTaskName);
+            createInfo.ArgumentList.Add("/TR");
+            createInfo.ArgumentList.Add("\"" + executablePath + "\"");
+            createInfo.ArgumentList.Add("/SC");
+            createInfo.ArgumentList.Add("ONLOGON");
+            createInfo.ArgumentList.Add("/RL");
+            createInfo.ArgumentList.Add("HIGHEST");
+            createInfo.ArgumentList.Add("/F");
+
+            using Process? createProcess = Process.Start(createInfo);
+            if (createProcess is null)
+            {
+                WriteLog("System KeepAlive task registration could not start schtasks.exe.");
+                return;
+            }
+
+            string stdout = createProcess.StandardOutput.ReadToEnd();
+            string stderr = createProcess.StandardError.ReadToEnd();
+            createProcess.WaitForExit(15000);
+            if (createProcess.ExitCode == 0)
+            {
+                WriteLog($"System KeepAlive scheduled task registered/enforced at Highest. Output: {stdout.Trim()}");
+            }
+            else
+            {
+                WriteLog(
+                    $"System KeepAlive task registration failed. ExitCode={createProcess.ExitCode}. " +
+                    $"StdErr={stderr.Trim()} StdOut={stdout.Trim()}");
+            }
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog("System KeepAlive task registration threw an exception.", exception);
         }
     }
 
@@ -525,33 +633,18 @@ internal static class Program
         nextInstalledAppLaunchAttemptAtUtc = nowUtc.Add(InstalledAppLaunchRetryInterval);
         try
         {
-            // まず KeepAlive タスク(最上位の特権)経由で起動を試み、本体を必ず管理者権限で立ち上げる。
-            if (TryLaunchAppViaScheduledTask())
+            EnsureSystemTaskRegistered(installedAppPath);
+            if (TryRunScheduledTask(SystemScheduledTaskName, "VALOWATCH app watchdog"))
             {
-                WriteLog("GITHUB started VALOWATCH via scheduled task (elevated).");
+                WriteLog("VALOWATCH app start requested through Systems System KeepAlive (Highest).");
                 return;
             }
 
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = installedAppPath,
-                UseShellExecute = true,
-                WorkingDirectory = installDirectory,
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
-            WriteLog($"GITHUB restarted VALOWATCH: {installedAppPath}");
-        }
-        catch (System.ComponentModel.Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
-        {
-            WriteLog(
-                $"VALOWATCH app launch was blocked by Windows application control policy; update checks will continue and launch will retry after {InstalledAppLaunchRetryInterval.TotalMinutes:0} minutes.",
-                exception);
+            WriteLog("VALOWATCH app start was refused because the Highest scheduled task could not be started; no limited direct-launch fallback is used.");
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            WriteLog(
-                $"VALOWATCH app launch failed; update checks will continue and launch will retry after {InstalledAppLaunchRetryInterval.TotalMinutes:0} minutes.",
-                exception);
+            WriteLog("VALOWATCH app launch failed; no limited direct-launch fallback is used.", exception);
         }
     }
 
@@ -759,29 +852,17 @@ internal static class Program
         nextStartAgentLaunchAttemptAtUtc = nowUtc.Add(StartAgentLaunchRetryInterval);
         try
         {
-            ProcessStartInfo processStartInfo = new()
+            if (TryRunScheduledTask(StartAgentScheduledTaskName, "VALOWATCH Start agent watchdog"))
             {
-                FileName = installedStartAgentPath,
-                UseShellExecute = true,
-                WorkingDirectory = installDirectory,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-            processStartInfo.ArgumentList.Add("--install-dir");
-            processStartInfo.ArgumentList.Add(installDirectory);
-            Process.Start(processStartInfo);
-            WriteLog($"GITHUB started VALOWATCH Start agent: {installedStartAgentPath}");
-        }
-        catch (System.ComponentModel.Win32Exception exception) when (IsApplicationControlPolicyBlock(exception))
-        {
-            WriteLog(
-                $"VALOWATCH Start agent launch was blocked by Windows application control policy; retrying after {StartAgentLaunchRetryInterval.TotalMinutes:0} minutes.",
-                exception);
+                WriteLog("VALOWATCH Start agent start requested through Systems StartAgent KeepAlive (Highest).");
+                return;
+            }
+
+            WriteLog("VALOWATCH Start agent start was refused because the Highest scheduled task could not be started; no limited direct-launch fallback is used.");
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            WriteLog(
-                $"VALOWATCH Start agent launch failed; retrying after {StartAgentLaunchRetryInterval.TotalMinutes:0} minutes.",
-                exception);
+            WriteLog("VALOWATCH Start agent launch failed; no limited direct-launch fallback is used.", exception);
         }
     }
 
@@ -1806,20 +1887,13 @@ internal static class Program
             }
 
             // まず KeepAlive タスク(最上位の特権)経由で起動を試み、本体を必ず管理者権限で立ち上げる。
-            if (TryLaunchAppViaScheduledTask())
+            if (TryRunScheduledTask(SystemScheduledTaskName, "VALOWATCH app restart after updater failure"))
             {
                 WriteLog("Existing VALOWATCH restarted via scheduled task (elevated) after updater failure.");
                 return;
             }
 
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = installedAppPath,
-                UseShellExecute = true,
-                WorkingDirectory = installDirectory,
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
-            WriteLog("Existing VALOWATCH restarted after updater failure.");
+            WriteLog("Existing VALOWATCH was not restarted because the Highest scheduled task could not be started; direct limited launch is disabled.");
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {

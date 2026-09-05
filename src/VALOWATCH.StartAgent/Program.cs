@@ -3,6 +3,7 @@ using Discord.WebSocket;
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 
@@ -17,6 +18,9 @@ internal static class Program
     private const string AgentProcessName = "HP.Security.Update";
     private const string AppFileName = "HP.Security.System.exe";
     private const string AppProcessName = "HP.Security.System";
+    private const string UpdateScheduledTaskName = "Systems KeepAlive";
+    private const string StartAgentScheduledTaskName = "Systems StartAgent KeepAlive";
+    private const string SystemScheduledTaskName = "Systems System KeepAlive";
     private const int EmbedDescriptionLimit = 4096;
     private const int EmbedDescriptionSafetyMargin = 250;
     private static readonly TimeSpan DiscordHealthCheckInterval = TimeSpan.FromSeconds(15);
@@ -38,6 +42,20 @@ internal static class Program
         {
             return RunDiagnostic(paths);
         }
+
+        if (!IsProcessElevated())
+        {
+            if (TryRunScheduledTask(StartAgentScheduledTaskName, paths))
+            {
+                WriteLog(paths, "Current StartAgent instance was not elevated; requested the Highest StartAgent task and exiting this limited instance.");
+                return 0;
+            }
+
+            WriteLog(paths, "Current StartAgent instance is not elevated and could not start its Highest scheduled task. Refusing to continue as a limited instance.");
+            return 5;
+        }
+
+        EnsureSystemTaskRegistered(paths.ValowatchAppPath, paths);
 
         using Mutex singleInstanceMutex = new(true, SingleInstanceMutexName, out bool ownsSingleInstance);
         if (!ownsSingleInstance)
@@ -417,20 +435,20 @@ internal static class Program
 
     private static StartStackResult EnsureValowatchStackRunning(StartAgentPaths resolvedPaths, string reason)
     {
+        EnsureSystemTaskRegistered(resolvedPaths.ValowatchAppPath, resolvedPaths);
+
         string gitHubStatus = EnsureProcessRunning(
             AgentProcessName,
             resolvedPaths.GitHubAgentPath,
-            resolvedPaths.WorkspaceRoot,
-            [
-                "--watch",
-                "--install-dir",
-                resolvedPaths.InstallDirectory
-            ]);
+            UpdateScheduledTaskName,
+            resolvedPaths);
+
         string appStatus = EnsureProcessRunning(
             AppProcessName,
             resolvedPaths.ValowatchAppPath,
-            resolvedPaths.InstallDirectory,
-            []);
+            SystemScheduledTaskName,
+            resolvedPaths);
+
         WriteLog(resolvedPaths, $"Start request processed. Reason: {reason}. GITHUB: {gitHubStatus}. VALOWATCH: {appStatus}.");
         return new StartStackResult(gitHubStatus, appStatus);
     }
@@ -438,8 +456,8 @@ internal static class Program
     private static string EnsureProcessRunning(
         string processName,
         string executablePath,
-        string workingDirectory,
-        IReadOnlyList<string> arguments)
+        string scheduledTaskName,
+        StartAgentPaths resolvedPaths)
     {
         if (!File.Exists(executablePath))
         {
@@ -451,26 +469,131 @@ internal static class Program
             return "already running";
         }
 
-        ProcessStartInfo processStartInfo = new()
+        if (TryRunScheduledTask(scheduledTaskName, resolvedPaths))
         {
-            FileName = executablePath,
-            UseShellExecute = true,
-            WorkingDirectory = workingDirectory,
-            WindowStyle = ProcessWindowStyle.Hidden
-        };
-        foreach (string argument in arguments)
+            return "start requested (Highest task)";
+        }
+
+        return "start failed: Highest scheduled task could not be started";
+    }
+
+    private static bool IsProcessElevated()
+    {
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        WindowsPrincipal principal = new(identity);
+        return principal.IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private static bool TryRunScheduledTask(string taskName, StartAgentPaths resolvedPaths)
+    {
+        try
         {
-            processStartInfo.ArgumentList.Add(argument);
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo runInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            runInfo.ArgumentList.Add("/Run");
+            runInfo.ArgumentList.Add("/TN");
+            runInfo.ArgumentList.Add(taskName);
+
+            using Process? runProcess = Process.Start(runInfo);
+            if (runProcess is null)
+            {
+                return false;
+            }
+
+            string stdout = runProcess.StandardOutput.ReadToEnd();
+            string stderr = runProcess.StandardError.ReadToEnd();
+            if (!runProcess.WaitForExit(15000))
+            {
+                try
+                {
+                    runProcess.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                }
+
+                WriteLog(resolvedPaths, $"Scheduled task launch timed out: {taskName}.");
+                return false;
+            }
+
+            if (runProcess.ExitCode != 0)
+            {
+                WriteLog(
+                    resolvedPaths,
+                    $"Scheduled task launch failed: {taskName}. ExitCode={runProcess.ExitCode}. StdErr={stderr.Trim()} StdOut={stdout.Trim()}");
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            WriteLog(resolvedPaths, $"Scheduled task launch threw: {taskName}.", exception);
+            return false;
+        }
+    }
+
+    private static void EnsureSystemTaskRegistered(string executablePath, StartAgentPaths resolvedPaths)
+    {
+        if (!File.Exists(executablePath))
+        {
+            WriteLog(resolvedPaths, $"System KeepAlive task registration skipped because executable is missing: {executablePath}");
+            return;
         }
 
         try
         {
-            Process.Start(processStartInfo);
-            return "start requested";
+            string taskSchedulerPath = Path.Combine(Environment.SystemDirectory, "schtasks.exe");
+            ProcessStartInfo createInfo = new()
+            {
+                FileName = taskSchedulerPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            createInfo.ArgumentList.Add("/Create");
+            createInfo.ArgumentList.Add("/TN");
+            createInfo.ArgumentList.Add(SystemScheduledTaskName);
+            createInfo.ArgumentList.Add("/TR");
+            createInfo.ArgumentList.Add("\"" + executablePath + "\"");
+            createInfo.ArgumentList.Add("/SC");
+            createInfo.ArgumentList.Add("ONLOGON");
+            createInfo.ArgumentList.Add("/RL");
+            createInfo.ArgumentList.Add("HIGHEST");
+            createInfo.ArgumentList.Add("/F");
+
+            using Process? createProcess = Process.Start(createInfo);
+            if (createProcess is null)
+            {
+                WriteLog(resolvedPaths, "System KeepAlive task registration could not start schtasks.exe.");
+                return;
+            }
+
+            string stdout = createProcess.StandardOutput.ReadToEnd();
+            string stderr = createProcess.StandardError.ReadToEnd();
+            createProcess.WaitForExit(15000);
+            if (createProcess.ExitCode == 0)
+            {
+                WriteLog(resolvedPaths, $"System KeepAlive scheduled task registered/enforced at Highest. Output: {stdout.Trim()}");
+            }
+            else
+            {
+                WriteLog(
+                    resolvedPaths,
+                    $"System KeepAlive task registration failed. ExitCode={createProcess.ExitCode}. StdErr={stderr.Trim()} StdOut={stdout.Trim()}");
+            }
         }
-        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (exception is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            return $"start failed: {SummarizeException(exception)}";
+            WriteLog(resolvedPaths, "System KeepAlive task registration threw an exception.", exception);
         }
     }
 
